@@ -1,0 +1,14 @@
+# Windows 批处理必须使用 CRLF，否则 cmd 解析 if/label 块时会失效
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# Windows 工程文件同理
+*.ps1 text eol=crlf
+# 其余文本统一 LF，避免混入 CRLF 噪音
+*.{vue,ts,tsx,js,mjs,cjs,css,html,json,md,rs,toml,yml,yaml} text eol=lf
+# 二进制资源不做行尾转换
+*.png binary
+*.ico binary
+*.icns binary
+*.jar binary
+*.keystore binary
+*.jks binary

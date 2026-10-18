@@ -1,0 +1,60 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+src-tauri/target/
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Auto-generated declaration files
+src/auto-imports.d.ts
+src/components.d.ts
+
+# Distribution binaries
+dist-apk/
+artifacts_latest/
+*.exe
+__pycache__/
+*.pyc
+docs/handoffs/
+
+# 内部文档（调研、审查、迁移记录）保留在本地，不进入公开仓库
+.internal-docs/
+verify-report.txt
+env-report.txt
+verify-report-*.txt
+
+# 运行时派生数据（书库封面缩略图缓存）
+.covers/
+
+# 本机环境采集 / 验证输出
+env-report.txt
+verify-report*.txt
+
+# 签名证书与临时脚本文档
+*.keystore
+*.jks
+
+# 本机一次性调试脚本与草稿（不随公开仓库分发）
+/clean-github-creds.bat
+/env-check.bat
+/verify-all.bat
+/新建 文本文档.txt

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0-rc",
+  "productName": "JoyManga",
+  "version": "0.2.4",
+  "identifier": "com.joymanga.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:5005",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "create": false,
+        "title": "JoyManga",
+        "width": 1080,
+        "height": 720,
+        "minWidth": 860,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' tauri: asset: customprotocol:; connect-src ipc: http://ipc.localhost https:; img-src 'self' asset: http://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "devCsp": "default-src 'self' http: https: data: blob:; connect-src ipc: http://ipc.localhost http: https: ws:; img-src 'self' asset: http://asset.localhost data: blob: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "licenseFile": "../LICENSE",
+    "shortDescription": "漫画下载与本地阅读工具",
+    "longDescription": "面向 Windows / Android / Linux / macOS 的漫画下载与本地阅读工具，支持批量下载、CBZ 归档、书库管理与内置阅读器。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": [
+          "SimpChinese"
+        ]
+      }
+    }
+  }
+}

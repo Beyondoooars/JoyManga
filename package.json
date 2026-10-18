@@ -1,0 +1,60 @@
+{
+  "name": "joymanga",
+  "private": true,
+  "version": "0.2.4",
+  "type": "module",
+  "description": "面向 Windows / Android / Linux / macOS 的漫画下载与本地阅读工具",
+  "author": "Beyondoooars",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Beyondoooars/JoyManga.git"
+  },
+  "homepage": "https://github.com/Beyondoooars/JoyManga#readme",
+  "bugs": {
+    "url": "https://github.com/Beyondoooars/JoyManga/issues"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "gen:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings --features bindings --locked --offline",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "copy:release": "node scripts/copy-release.mjs",
+    "release": "tauri build --no-bundle && node scripts/copy-release.mjs",
+    "build:android": "node scripts/build-android.mjs --release",
+    "build:android:debug": "node scripts/build-android.mjs --debug",
+    "build:android:test": "node scripts/build-android.mjs --test",
+    "bump": "node scripts/bump-version.mjs"
+  },
+  "dependencies": {
+    "@phosphor-icons/vue": "^2.2.1",
+    "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/plugin-dialog": "2.2.2",
+    "@tauri-apps/plugin-opener": "~2.2.6",
+    "@viselect/vue": "^3.9.0",
+    "naive-ui": "^2.40.1",
+    "pinia": "^3.0.1",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@tauri-apps/cli": "^2.12.0",
+    "@vitejs/plugin-vue": "^5.0.5",
+    "@vitejs/plugin-vue-jsx": "^4.1.2",
+    "eslint": "^9.18.0",
+    "eslint-plugin-vue": "^9.32.0",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.2.2",
+    "typescript-eslint": "^8.21.0",
+    "unocss": "^0.63.0",
+    "unplugin-auto-import": "^0.18.3",
+    "unplugin-vue-components": "^0.27.4",
+    "vite": "^5.3.1",
+    "vite-plugin-vue-devtools": "^7.7.2",
+    "vue-tsc": "^2.0.22"
+  },
+  "packageManager": "pnpm@11.16.0"
+}
