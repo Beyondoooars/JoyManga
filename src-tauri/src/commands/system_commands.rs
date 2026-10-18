@@ -14,14 +14,6 @@ use crate::utils;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct PathPreset {
-    pub label: String,
-    pub path: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
 pub struct DirectoryListing {
     pub current_path: String,
     pub parent_path: Option<String>,
@@ -29,26 +21,14 @@ pub struct DirectoryListing {
     pub files: Vec<String>,
     pub exists: bool,
     pub writable: bool,
-    pub presets: Vec<PathPreset>,
 }
 
 #[allow(clippy::needless_pass_by_value)]
 fn reveal_path_in_file_manager(app: &AppHandle, path: &Path, err_title: &str) -> CommandResult<()> {
     let path_str = path.to_string_lossy();
-    #[cfg(target_os = "android")]
-    {
-        let _ = app.opener().open_path(path_str.as_ref(), None::<&str>);
-        let _ = err_title;
-        Ok(())
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        app.opener()
-            .reveal_item_in_dir(path_str.as_ref())
-            .context(format!("在文件管理器中打开`{path_str}`失败"))
-            .map_err(|err| CommandError::from(err_title, err))?;
-        Ok(())
-    }
+    let _ = app.opener().open_path(path_str.as_ref(), None::<&str>);
+    let _ = err_title;
+    Ok(())
 }
 
 fn validate_reveal_path(app: &AppHandle, path: &Path) -> anyhow::Result<()> {
@@ -94,14 +74,6 @@ fn validate_reveal_path(app: &AppHandle, path: &Path) -> anyhow::Result<()> {
 #[tauri::command(async)]
 #[specta::specta]
 #[allow(clippy::needless_pass_by_value)]
-pub fn show_config_in_file_manager(app: AppHandle) -> CommandResult<()> {
-    let storage = app.state::<ConfigStorage>();
-    reveal_path_in_file_manager(&app, storage.config_path(), "打开配置目录失败")
-}
-
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
 pub fn show_logs_in_file_manager(app: AppHandle) -> CommandResult<()> {
     let logs_dir =
         logger::logs_dir(&app).map_err(|err| CommandError::from("获取日志目录失败", err))?;
@@ -109,14 +81,6 @@ pub fn show_logs_in_file_manager(app: AppHandle) -> CommandResult<()> {
         .context(format!("创建日志目录`{}`失败", logs_dir.display()))
         .map_err(|err| CommandError::from("打开日志目录失败", err))?;
     reveal_path_in_file_manager(&app, &logs_dir, "打开日志目录失败")
-}
-
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn show_cache_in_file_manager(app: AppHandle) -> CommandResult<()> {
-    let storage = app.state::<ConfigStorage>();
-    reveal_path_in_file_manager(&app, storage.webview_data_dir(), "打开缓存目录失败")
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -286,16 +250,12 @@ fn validate_clear_root(
         "{name}目录是链接，拒绝批量清空"
     );
     let canonical = std::fs::canonicalize(configured).context(format!("规范化{name}目录失败"))?;
-    #[cfg(target_os = "windows")]
-    {
-        let canonical_root = std::fs::canonicalize(allowed_root)?;
-        ensure!(
-            canonical.starts_with(&canonical_root) && canonical != canonical_root,
-            "{name}目录不在应用数据或安装目录内，拒绝清空"
-        );
-    }
-    #[cfg(not(target_os = "windows"))]
-    let _ = allowed_root;
+    // 即使配置指向默认目录，也必须落在应用数据根目录内，避免异常配置清空到别处。
+    let canonical_root = std::fs::canonicalize(allowed_root)?;
+    ensure!(
+        canonical.starts_with(&canonical_root) && canonical != canonical_root,
+        "{name}目录不在应用数据目录内，拒绝清空"
+    );
     for entry in walkdir::WalkDir::new(&canonical).follow_links(false) {
         let entry = entry.context(format!("检查{name}目录内容失败"))?;
         ensure!(
@@ -307,15 +267,7 @@ fn validate_clear_root(
 }
 
 fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::fs::MetadataExt;
-        metadata.file_attributes() & 0x400 != 0
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        metadata.file_type().is_symlink()
-    }
+    metadata.file_type().is_symlink()
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -369,26 +321,17 @@ pub fn export_logs(
 ) -> CommandResult<ExportLogsResult> {
     let config = app.get_config().read().clone();
 
-    #[cfg(target_os = "android")]
-    let preferred_dir: Option<PathBuf> = Some(config.download_dir.join("logs"));
-    #[cfg(not(target_os = "android"))]
-    let preferred_dir: Option<PathBuf> = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-
-    let target_dir = match preferred_dir {
-        Some(dir) if check_directory_writable(&dir) => dir,
-        _ => {
-            let fallback = config.download_dir.join("logs");
-            if check_directory_writable(&fallback) {
-                fallback
-            } else {
-                let app_data = app
-                    .path()
-                    .app_data_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."));
-                app_data.join("logs")
-            }
+    // 优先写入书库下的 logs 目录（用户可通过文件管理器访问）；不可写时退回应用数据目录。
+    let target_dir = {
+        let preferred = config.download_dir.join("logs");
+        if check_directory_writable(&preferred) {
+            preferred
+        } else {
+            let app_data = app
+                .path()
+                .app_data_dir()
+                .unwrap_or_else(|_| PathBuf::from("."));
+            app_data.join("logs")
         }
     };
 
@@ -467,11 +410,6 @@ pub fn export_logs(
 
     let file_path_str = target_file_path.to_string_lossy().to_string();
 
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app.opener().reveal_item_in_dir(&file_path_str);
-    }
-
     tracing::info!(path = %file_path_str, "已导出应用运行日志");
 
     Ok(ExportLogsResult {
@@ -479,84 +417,6 @@ pub fn export_logs(
         file_path: file_path_str,
         message: format!("日志已成功导出至：{}", target_file_path.display()),
     })
-}
-
-fn get_path_presets(app: &AppHandle) -> Vec<PathPreset> {
-    #[cfg(target_os = "android")]
-    {
-        let managed = app.path().app_data_dir().unwrap_or_default();
-        vec![
-            PathPreset {
-                label: "应用专用书库".into(),
-                path: managed.join("library").to_string_lossy().into_owned(),
-                description: "无需存储权限；卸载应用会清理".into(),
-            },
-            PathPreset {
-                label: "当前书库".into(),
-                path: app
-                    .get_config()
-                    .read()
-                    .download_dir
-                    .to_string_lossy()
-                    .into_owned(),
-                description: "保留现有保存位置".into(),
-            },
-            PathPreset {
-                label: "应用导出目录".into(),
-                path: app
-                    .get_config()
-                    .read()
-                    .export_dir
-                    .to_string_lossy()
-                    .into_owned(),
-                description: "导出后可保存到系统下载".into(),
-            },
-        ]
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let mut presets = Vec::new();
-        if let Some(storage) = app.try_state::<ConfigStorage>() {
-            let base_dir = storage.base_dir();
-            presets.push(PathPreset {
-                label: "便携下载目录 (exe同级)".to_string(),
-                path: base_dir.join("漫画下载").to_string_lossy().to_string(),
-                description: "exe文件所在目录下的漫画下载文件夹".to_string(),
-            });
-            presets.push(PathPreset {
-                label: "便携导出目录 (exe同级)".to_string(),
-                path: base_dir.join("漫画导出").to_string_lossy().to_string(),
-                description: "exe文件所在目录下的漫画导出文件夹".to_string(),
-            });
-        }
-        if let Ok(app_data) = app.path().app_data_dir() {
-            presets.push(PathPreset {
-                label: "应用数据下载目录".to_string(),
-                path: app_data.join("漫画下载").to_string_lossy().to_string(),
-                description: "AppData内部数据下载目录".to_string(),
-            });
-            presets.push(PathPreset {
-                label: "应用数据导出目录".to_string(),
-                path: app_data.join("漫画导出").to_string_lossy().to_string(),
-                description: "AppData内部数据导出目录".to_string(),
-            });
-        }
-        if let Ok(download) = app.path().download_dir() {
-            presets.push(PathPreset {
-                label: "系统下载目录".to_string(),
-                path: download.join("JoyManga").to_string_lossy().to_string(),
-                description: "个人用户的下载文件夹".to_string(),
-            });
-        }
-        if let Ok(documents) = app.path().document_dir() {
-            presets.push(PathPreset {
-                label: "系统文档目录".to_string(),
-                path: documents.join("JoyManga").to_string_lossy().to_string(),
-                description: "个人用户的文档文件夹".to_string(),
-            });
-        }
-        presets
-    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -567,22 +427,10 @@ pub fn list_directory_contents(
     path: Option<String>,
     include_files: Option<bool>,
 ) -> CommandResult<DirectoryListing> {
-    let presets = get_path_presets(&app);
     let include_files = include_files.unwrap_or(false);
     let target_path_buf = match path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => PathBuf::from(p),
-        None => {
-            #[cfg(target_os = "android")]
-            {
-                app.get_config().read().download_dir.clone()
-            }
-            #[cfg(not(target_os = "android"))]
-            {
-                app.path()
-                    .download_dir()
-                    .unwrap_or_else(|_| app.path().app_data_dir().unwrap_or_default())
-            }
-        }
+        None => app.get_config().read().download_dir.clone(),
     };
 
     let target_path_str = target_path_buf.to_string_lossy().to_string();
@@ -627,7 +475,6 @@ pub fn list_directory_contents(
         files,
         exists,
         writable,
-        presets,
     })
 }
 

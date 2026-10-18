@@ -6,11 +6,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// 当前网络是否按流量计费。默认 false（桌面端与未知情况都放行）。
+/// 当前网络是否按流量计费。默认 false（未知情况放行）。
 static METERED: AtomicBool = AtomicBool::new(false);
-/// 是否已经收到过 Android 侧的明确网络状态。未收到时不要拦截，
+/// 是否已经收到过明确网络状态。未收到时不要拦截，
 /// 否则应用刚启动、事件还没到时会把所有下载挡掉。
-static KNOWN: AtomicBool = AtomicBool::new(cfg!(not(target_os = "android")));
+static KNOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn set_metered(metered: bool) {
     METERED.store(metered, Ordering::Relaxed);

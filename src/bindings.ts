@@ -60,25 +60,9 @@ async setFavoriteComic(comicId: number, desired: boolean, sessionEpoch: number) 
     else return { status: "error", error: e  as any };
 }
 },
-async showConfigInFileManager() : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("show_config_in_file_manager") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async showLogsInFileManager() : Promise<Result<null, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("show_logs_in_file_manager") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async showCacheInFileManager() : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("show_cache_in_file_manager") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -383,18 +367,7 @@ async getLocalImageDataUrl(filePath: string) : Promise<Result<string, CommandErr
 }
 },
 /**
- * 打开/关闭常亮。`enabled` 为 false 时恢复系统默认息屏行为。
- */
-async setKeepScreenOn(enabled: boolean) : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_keep_screen_on", { enabled }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Android 侧把当前网络是否计费推给后端（桌面端不会调用）。
+ * Android 侧把当前网络是否计费推给后端。
  * 前端在启动时与网络变化时各调一次，后端据此判断"仅 Wi-Fi 下载"。
  */
 async setNetworkMetered(metered: boolean) : Promise<Result<null, CommandError>> {
@@ -569,7 +542,7 @@ volumeKeyPaging?: boolean;
  */
 downloadOnlyWifi?: boolean }
 export type ConfigChangedEvent = { config: Config }
-export type DirectoryListing = { currentPath: string; parentPath: string | null; subdirectories: string[]; files: string[]; exists: boolean; writable: boolean; presets: PathPreset[] }
+export type DirectoryListing = { currentPath: string; parentPath: string | null; subdirectories: string[]; files: string[]; exists: boolean; writable: boolean }
 export type DownloadAllFavoritesEvent = { event: "GetFavoritesStart" } | { event: "GetComicsProgress"; data: { current: number; total: number } } | { event: "StartCreateDownloadTasks"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreatingDownloadTask"; data: { comicId: number; current: number } } | { event: "EndCreateDownloadTasks"; data: { comicId: number } } | { event: "GetComicsEnd" }
 export type DownloadFormat = "Jpeg" | "Png" | "Webp" | 
 /**
@@ -606,7 +579,6 @@ export type LogLevel = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR"
 export type LoginRespData = { profile: GetUserProfileRespData; sessionEpoch: number; switchedApiDomainMode: ApiDomainMode | null }
 export type NetworkCheckReport = { api: NetworkProbe; image: NetworkProbe; domain: NetworkProbe }
 export type NetworkProbe = { label: string; state: string; elapsedMs: number | null; message: string }
-export type PathPreset = { label: string; path: string; description: string }
 export type ProxyMode = "System" | "NoProxy" | "Custom"
 /**
  * 阅读方向：决定点击区域、键盘、滑动与"上一页/下一页"按钮的语义。

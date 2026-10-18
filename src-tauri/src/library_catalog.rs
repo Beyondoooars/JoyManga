@@ -41,17 +41,7 @@ impl Default for LibraryCatalog {
 
 fn root_key(root: &Path) -> String {
     let path = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let key = path.to_string_lossy().into_owned();
-    if cfg!(windows) {
-        let key = if let Some(rest) = key.strip_prefix(r"\\?\UNC\") {
-            format!(r"\\{rest}")
-        } else {
-            key.strip_prefix(r"\\?\").unwrap_or(&key).to_owned()
-        };
-        key.to_lowercase()
-    } else {
-        key
-    }
+    path.to_string_lossy().into_owned()
 }
 
 pub(crate) fn catalog_path(app: &AppHandle) -> PathBuf {

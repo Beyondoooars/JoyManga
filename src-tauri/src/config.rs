@@ -1,4 +1,3 @@
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
@@ -25,9 +24,6 @@ const IMAGE_DOMAIN_6: &str = "cdn-msp3.jmapinodeudzn.net";
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const LOGS_DIR_NAME: &str = "日志";
-const PORTABLE_LOGS_DIR_NAME: &str = "logs";
-const PORTABLE_CACHE_DIR_NAME: &str = "cache";
-const WEBVIEW_DATA_DIR_NAME: &str = "webview2";
 
 #[derive(Debug)]
 pub struct ConfigStorage {
@@ -44,59 +40,32 @@ impl ConfigStorage {
         std::fs::create_dir_all(&app_data_dir)
             .context(format!("创建应用数据目录`{}`失败", app_data_dir.display()))?;
 
-        let config_path = if cfg!(target_os = "windows") {
-            let executable_path = std::env::current_exe().context("无法定位当前可执行文件")?;
-            select_config_path(
-                &app_data_dir,
-                &executable_path,
-                true,
-                verify_directory_writable,
-            )?
-        } else {
-            app_data_dir.join(CONFIG_FILE_NAME)
-        };
-
-        let logs_dir = select_logs_dir(&app_data_dir, &config_path)?;
-        let logs_dir = (|| -> anyhow::Result<PathBuf> {
-            let logs_parent = logs_dir
-                .parent()
-                .context(format!("日志目录`{}`没有父目录", logs_dir.display()))?;
-            let logs_name = logs_dir
-                .file_name()
-                .context(format!("日志目录`{}`没有目录名", logs_dir.display()))?;
-            utils::create_dir_all_beneath(logs_parent, Path::new(logs_name))
-        })()
-        .unwrap_or_else(|err| {
-            tracing::warn!(error = %err, "无法创建选定的日志目录，回退到应用数据目录");
+        // Android 应用数据目录固定，不存在便携版/安装版的分叉。
+        let config_path = app_data_dir.join(CONFIG_FILE_NAME);
+        let logs_dir = {
             let fallback = app_data_dir.join(LOGS_DIR_NAME);
-            let _ = std::fs::create_dir_all(&fallback);
-            fallback
-        });
-        let webview_data_dir =
-            select_webview_data_dir(&app_data_dir, &app_local_data_dir, &config_path)?;
-        let webview_data_dir = if webview_data_dir == app_local_data_dir {
-            std::fs::create_dir_all(&webview_data_dir).context(format!(
-                "创建WebView2数据目录`{}`失败",
-                webview_data_dir.display()
-            ))?;
-            std::fs::canonicalize(&webview_data_dir).unwrap_or(webview_data_dir)
-        } else {
-            let portable_root = config_path
-                .parent()
-                .context(format!("配置`{}`没有父目录", config_path.display()))?;
-            utils::create_dir_all_beneath(
-                portable_root,
-                &Path::new(PORTABLE_CACHE_DIR_NAME).join(WEBVIEW_DATA_DIR_NAME),
-            )?
+            utils::create_dir_all_beneath(&app_data_dir, Path::new(LOGS_DIR_NAME)).unwrap_or_else(
+                |err| {
+                    tracing::warn!(error = %err, "无法创建日志目录，回退到应用数据目录");
+                    let _ = std::fs::create_dir_all(&fallback);
+                    fallback
+                },
+            )
         };
+        // WebView 数据由系统按应用管理；保留该路径供清理缓存使用。
+        let webview_data_dir = app_local_data_dir;
+        std::fs::create_dir_all(&webview_data_dir).context(format!(
+            "创建 WebView 数据目录`{}`失败",
+            webview_data_dir.display()
+        ))?;
+        let webview_data_dir = std::fs::canonicalize(&webview_data_dir).unwrap_or(webview_data_dir);
 
-        let storage = Self {
+        Ok(Self {
             config_path,
             logs_dir,
             webview_data_dir,
             app_data_dir,
-        };
-        Ok(storage)
+        })
     }
 
     pub fn config_path(&self) -> &Path {
@@ -118,109 +87,7 @@ impl ConfigStorage {
     pub fn webview_data_dir(&self) -> &Path {
         &self.webview_data_dir
     }
-
-    pub fn app_data_dir(&self) -> &Path {
-        &self.app_data_dir
-    }
 }
-fn select_logs_dir(app_data_dir: &Path, config_path: &Path) -> anyhow::Result<PathBuf> {
-    if config_path == app_data_dir.join(CONFIG_FILE_NAME) {
-        Ok(app_data_dir.join(LOGS_DIR_NAME))
-    } else {
-        Ok(config_path
-            .parent()
-            .context(format!("配置`{}`没有父目录", config_path.display()))?
-            .join(PORTABLE_LOGS_DIR_NAME))
-    }
-}
-
-fn select_webview_data_dir(
-    app_data_dir: &Path,
-    app_local_data_dir: &Path,
-    config_path: &Path,
-) -> anyhow::Result<PathBuf> {
-    if config_path == app_data_dir.join(CONFIG_FILE_NAME) {
-        Ok(app_local_data_dir.to_path_buf())
-    } else {
-        Ok(config_path
-            .parent()
-            .context(format!("配置`{}`没有父目录", config_path.display()))?
-            .join(PORTABLE_CACHE_DIR_NAME)
-            .join(WEBVIEW_DATA_DIR_NAME))
-    }
-}
-
-fn select_config_path<F>(
-    app_data_dir: &Path,
-    executable_path: &Path,
-    prefer_portable: bool,
-    verify_writable: F,
-) -> anyhow::Result<PathBuf>
-where
-    F: FnOnce(&Path) -> anyhow::Result<()>,
-{
-    let app_data_config_path = app_data_dir.join(CONFIG_FILE_NAME);
-    if !prefer_portable {
-        return Ok(app_data_config_path);
-    }
-
-    let executable_dir = executable_path.parent().context(format!(
-        "可执行文件`{}`没有父目录",
-        executable_path.display()
-    ))?;
-    let portable_config_path = executable_dir.join(CONFIG_FILE_NAME);
-
-    if portable_config_path.exists() {
-        verify_writable(executable_dir).context(format!(
-            "便携配置`{}`已存在，但所在目录不可写",
-            portable_config_path.display()
-        ))?;
-        return Ok(portable_config_path);
-    }
-
-    match verify_writable(executable_dir) {
-        Ok(()) => Ok(portable_config_path),
-        Err(err) => {
-            tracing::warn!(
-                executable_dir = %executable_dir.display(),
-                error = %err,
-                "可执行文件目录不可写，将配置保存在应用数据目录"
-            );
-            Ok(app_data_config_path)
-        }
-    }
-}
-
-fn verify_directory_writable(directory: &Path) -> anyhow::Result<()> {
-    let probe_id = uuid::Uuid::new_v4();
-    let source_path = directory.join(format!(".joymanga-config-probe-{probe_id}.part"));
-    let target_path = directory.join(format!(".joymanga-config-probe-{probe_id}.done"));
-
-    let result = (|| -> anyhow::Result<()> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&source_path)
-            .context(format!("无法在`{}`创建临时文件", directory.display()))?;
-        file.sync_all().context(format!(
-            "同步配置目录写入探针`{}`失败",
-            source_path.display()
-        ))?;
-        drop(file);
-        std::fs::rename(&source_path, &target_path)
-            .context(format!("无法在`{}`重命名临时文件", directory.display()))?;
-        std::fs::remove_file(&target_path)
-            .context(format!("无法在`{}`删除临时文件", directory.display()))?;
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&source_path);
-        let _ = std::fs::remove_file(&target_path);
-    }
-    result
-}
-
 fn validate_custom_domain(value: &str, label: &str) -> anyhow::Result<()> {
     let domain = value.trim();
     ensure!(!domain.is_empty(), "{label}不能为空");
@@ -377,7 +244,6 @@ impl Config {
         self.update_downloaded_comics_interval_sec = 0;
     }
     pub fn new(storage: &ConfigStorage) -> anyhow::Result<Self> {
-        let app_data_dir = storage.app_data_dir();
         let base_dir = storage.base_dir();
         let config_path = storage.config_path();
 
@@ -385,17 +251,11 @@ impl Config {
 
         let (mut config, repaired_config) = if config_path.exists() {
             let config_string = std::fs::read_to_string(config_path)?;
-            let (mut cfg, repaired) = match deserialize_config_from_storage(&config_string) {
+            let (cfg, repaired) = match deserialize_config_from_storage(&config_string) {
                 Ok(config) if Config::validate(&config).is_ok() => (config, false),
                 // 缺字段、字段类型错误或值越界时逐字段恢复，保留其余有效配置。
                 Ok(_) | Err(_) => (Config::merge_config(&config_string, base_dir), true),
             };
-            if cfg.download_dir == app_data_dir.join("漫画下载") {
-                cfg.download_dir = base_dir.join("漫画下载");
-            }
-            if cfg.export_dir == app_data_dir.join("漫画导出") {
-                cfg.export_dir = base_dir.join("漫画导出");
-            }
             (cfg, repaired)
         } else {
             (Config::default(base_dir), false)
@@ -569,24 +429,17 @@ impl Config {
     }
 
     pub fn default(base_dir: &Path) -> Config {
-        let (download_dir, export_dir) = if cfg!(target_os = "android") {
-            (base_dir.join("library"), base_dir.join("library"))
-        } else {
-            (base_dir.join("漫画下载"), base_dir.join("漫画下载"))
-        };
-
-        let (chapter_concurrency, img_concurrency) = if cfg!(target_os = "android") {
-            (1, 4)
-        } else {
-            (2, 15)
-        };
+        let library_dir = base_dir.join("library");
+        let (download_dir, export_dir) = (library_dir.clone(), library_dir);
+        // Android 设备的默认并发：移动端网络与内存都更保守
+        let (chapter_concurrency, img_concurrency) = (1, 4);
 
         Config {
             revision: 0,
             schema_version: 1,
             api_domain_migration_pending: false,
             auto_login: false,
-            android_storage_initialized: !cfg!(target_os = "android"),
+            android_storage_initialized: false,
             username: String::new(),
             password: String::new(),
             download_dir,
@@ -597,7 +450,7 @@ impl Config {
             proxy_host: "127.0.0.1".to_string(),
             proxy_port: 7890,
             // Android 上文件日志持续写入会消耗电量和存储，默认关闭
-            enable_file_logger: !cfg!(target_os = "android"),
+            enable_file_logger: false,
             chapter_concurrency,
             chapter_download_interval_sec: 0,
             img_concurrency,
@@ -749,12 +602,9 @@ pub enum ImageDomainMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        deserialize_config_from_storage, select_config_path, select_logs_dir,
-        select_webview_data_dir, serialize_config_for_storage, ApiDomainMode, Config,
+        deserialize_config_from_storage, serialize_config_for_storage, ApiDomainMode, Config,
         ConfigStorage, ImageDomainMode, API_DOMAIN_2, CONFIG_FILE_NAME, IMAGE_DOMAIN_3,
-        LOGS_DIR_NAME, PORTABLE_CACHE_DIR_NAME, PORTABLE_LOGS_DIR_NAME, WEBVIEW_DATA_DIR_NAME,
     };
-    use anyhow::anyhow;
     use serde_json::json;
     use std::path::{Path, PathBuf};
 
@@ -763,36 +613,6 @@ mod tests {
             std::env::temp_dir().join(format!("joymanga-config-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         path
-    }
-
-    #[test]
-    fn non_portable_mode_uses_app_data_without_probing_executable_dir() {
-        let root = test_dir("non-portable");
-        let app_data_dir = root.join("app-data");
-        let executable_path = root.join("bin").join("app.exe");
-
-        let selected = select_config_path(&app_data_dir, &executable_path, false, |_| {
-            panic!("非便携模式不应探测可执行文件目录")
-        })
-        .unwrap();
-
-        assert_eq!(selected, app_data_dir.join(CONFIG_FILE_NAME));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn writable_windows_release_uses_config_beside_executable() {
-        let root = test_dir("portable");
-        let app_data_dir = root.join("app-data");
-        let executable_dir = root.join("portable");
-        std::fs::create_dir_all(&executable_dir).unwrap();
-        let executable_path = executable_dir.join("app.exe");
-
-        let selected =
-            select_config_path(&app_data_dir, &executable_path, true, |_| Ok(())).unwrap();
-
-        assert_eq!(selected, executable_dir.join(CONFIG_FILE_NAME));
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -829,23 +649,6 @@ mod tests {
     }
 
     #[test]
-    fn portable_mode_defaults_download_and_export_dir_beside_executable() {
-        let root = test_dir("portable-defaults");
-        let portable_dir = root.join("bin");
-        std::fs::create_dir_all(&portable_dir).unwrap();
-        let storage = ConfigStorage {
-            config_path: portable_dir.join(CONFIG_FILE_NAME),
-            logs_dir: portable_dir.join("logs"),
-            webview_data_dir: portable_dir.join("webview"),
-            app_data_dir: root.join("app-data"),
-        };
-        let config = Config::new(&storage).unwrap();
-        assert_eq!(config.download_dir, portable_dir.join("漫画下载"));
-        assert_eq!(config.export_dir, config.download_dir);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn config_startup_recovers_interrupted_replacement_before_loading_defaults() {
         let root = test_dir("restore-backup");
         let path = root.join(CONFIG_FILE_NAME);
@@ -864,69 +667,6 @@ mod tests {
         assert!(!backup.exists());
         config.dir_fmt = "{comic_title}/{chapter_id}/images".into();
         assert!(config.validate().is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn config_logs_and_webview_data_switch_storage_mode_together() {
-        let root = test_dir("paired-storage");
-        let app_data_dir = root.join("app-data");
-        let app_local_data_dir = root.join("app-local-data");
-        let portable_dir = root.join("portable");
-        let app_data_config = app_data_dir.join(CONFIG_FILE_NAME);
-        let portable_config = portable_dir.join(CONFIG_FILE_NAME);
-
-        assert_eq!(
-            select_logs_dir(&app_data_dir, &app_data_config).unwrap(),
-            app_data_dir.join(LOGS_DIR_NAME)
-        );
-        assert_eq!(
-            select_logs_dir(&app_data_dir, &portable_config).unwrap(),
-            portable_dir.join(PORTABLE_LOGS_DIR_NAME)
-        );
-        assert_eq!(
-            select_webview_data_dir(&app_data_dir, &app_local_data_dir, &app_data_config).unwrap(),
-            app_local_data_dir.clone()
-        );
-        assert_eq!(
-            select_webview_data_dir(&app_data_dir, &app_local_data_dir, &portable_config).unwrap(),
-            portable_dir
-                .join(PORTABLE_CACHE_DIR_NAME)
-                .join(WEBVIEW_DATA_DIR_NAME)
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn protected_install_directory_falls_back_to_app_data() {
-        let root = test_dir("protected-install");
-        let app_data_dir = root.join("app-data");
-        let executable_path = root.join("program-files").join("app.exe");
-
-        let selected = select_config_path(&app_data_dir, &executable_path, true, |_| {
-            Err(anyhow!("access denied"))
-        })
-        .unwrap();
-
-        assert_eq!(selected, app_data_dir.join(CONFIG_FILE_NAME));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn existing_portable_config_must_not_silently_fall_back_when_read_only() {
-        let root = test_dir("read-only-portable");
-        let app_data_dir = root.join("app-data");
-        let executable_dir = root.join("portable");
-        std::fs::create_dir_all(&executable_dir).unwrap();
-        let executable_path = executable_dir.join("app.exe");
-        std::fs::write(executable_dir.join(CONFIG_FILE_NAME), "{}").unwrap();
-
-        let error = select_config_path(&app_data_dir, &executable_path, true, |_| {
-            Err(anyhow!("access denied"))
-        })
-        .unwrap_err();
-
-        assert!(error.to_string().contains("已存在，但所在目录不可写"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -978,7 +718,7 @@ mod tests {
         let merged = Config::merge_config(&value.to_string(), app_data_dir);
 
         assert_eq!(merged.username, "alice");
-        assert_eq!(merged.chapter_concurrency, 2);
+        assert_eq!(merged.chapter_concurrency, 1);
         merged.validate().unwrap();
     }
 
@@ -993,7 +733,7 @@ mod tests {
         let merged = Config::merge_config(&value.to_string(), app_data_dir);
 
         assert_eq!(merged.username, "bob");
-        assert_eq!(merged.img_concurrency, 15);
+        assert_eq!(merged.img_concurrency, 4);
         merged.validate().unwrap();
     }
 }

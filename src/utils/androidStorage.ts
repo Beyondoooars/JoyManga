@@ -1,5 +1,4 @@
 import { isAndroid } from '../composables/useIsMobile.ts'
-import { commands } from '../bindings.ts'
 
 export type PickMode = 'cbz' | 'backup' | 'directory'
 export interface MobileResult { requestId: string; paths?: string[]; cancelled?: boolean; error?: string; exported?: number }
@@ -55,16 +54,10 @@ export function exportToAndroidDownloads(path: string) {
 }
 
 /**
- * 阅读时的常亮与音量键。
- * Android 的常亮必须走原生 window flag（前端 CSS/JS 无法阻止系统息屏），
- * 桌面端则走 Rust 命令；这里统一成一个入口，调用方不必分支。
+ * 阅读时的常亮与音量键，全部由 Android 原生层处理。
  */
 export function setKeepScreenOn(enabled: boolean) {
-  if (isAndroid) {
-    window.JmAndroid?.setKeepScreenOn(enabled)
-    return
-  }
-  void commands.setKeepScreenOn(enabled).catch(() => { /* 常亮失败不影响阅读 */ })
+  window.JmAndroid?.setKeepScreenOn(enabled)
 }
 
 export function setVolumeKeyPaging(enabled: boolean) {
