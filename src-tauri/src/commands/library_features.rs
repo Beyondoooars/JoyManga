@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context};
+use anyhow::{anyhow, ensure, Context};
 use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Manager};
@@ -143,6 +143,17 @@ pub fn remove_library_comic(
     delete_files: bool,
 ) -> CommandResult<()> {
     let root = app.get_config().read().download_dir.clone();
+    // 归档整合会在后台合并/重命名/删除这本漫画的章节文件。与删除并发时，
+    // 可能出现"刚删掉的漫画又被合并写回"或整合中途失败。这里与清空下载目录
+    // 采用同一保护：整合进行中直接拒绝，等它结束再删。
+    if let Some(state) = app.try_state::<crate::archive_finalize::ArchiveFinalizeState>() {
+        if state.is_running(comic_id) {
+            return Err(CommandError::from(
+                "移除漫画失败",
+                anyhow!("该漫画正在整理 CBZ，请稍后再试"),
+            ));
+        }
+    }
     if delete_files {
         let manager = app.get_download_manager();
         for task in manager

@@ -304,7 +304,7 @@ async function retryAllFailed() {
 
 async function cancelAll() {
   if (batchOperating.value) return
-  const ids = [...uncompletedProgresses.value.keys()]
+  const ids = uncompletedProgresses.value.map(([chapterId]) => chapterId)
   if (ids.length === 0) return
   // “全部取消”不可恢复，先二次确认
   const confirmed = await new Promise<boolean>((resolve) => {

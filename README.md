@@ -5,12 +5,12 @@
 </p>
 
 <p align="center">
-  <strong>基于 Tauri v2 + Rust + Vue 3 的跨平台现代化漫画下载与离线阅读客户端</strong>
+  <strong>基于 Tauri v2 + Rust + Vue 3 的 Windows / Android 漫画下载与离线阅读客户端</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-v0.2.4-ff69b4.svg" alt="Version 0.2.4" />
-  <img src="https://img.shields.io/badge/Platform-Android%20%7C%20Windows%20%7C%20Linux%20%7C%20macOS-0969da.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/Platform-Android%20%7C%20Windows-0969da.svg" alt="Platform" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20Tauri%20v2-ea580c.svg" alt="Tauri v2" />
   <img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Naive%20UI-10b981.svg" alt="Vue 3" />
 </p>

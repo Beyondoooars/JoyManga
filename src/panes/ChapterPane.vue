@@ -197,21 +197,22 @@ watchEffect(() => {
   if (store.pickedComic === undefined) {
     return
   }
-  // 只保留未下载的章节
-  // TODO: 改用set效率更高
-  const notDownloadedChapterIds = chapterInfos.value
-    .filter((c) => c.isDownloaded !== true && !isDownloading(c.state))
+  // 只保留未下载且未在下载中的章节。
+  // 失败(Failed)的章节虽然也"未下载"，但用户刚点过下载，不应自动重新出现在
+  // 可勾选集合里——否则一次"全选未下载"会把刚失败的章节再次提交。
+  const selectableChapterIds = chapterInfos.value
+    .filter((c) => c.isDownloaded !== true && !isDownloading(c.state) && c.state !== 'Failed')
     .map((c) => c.chapterId)
-  checkedIds.value = checkedIds.value.filter((id) => notDownloadedChapterIds.includes(id))
+  checkedIds.value = checkedIds.value.filter((id) => selectableChapterIds.includes(id))
 })
 
 const notDownloadedCount = computed(
-  () => chapterInfos.value.filter((c) => c.isDownloaded !== true && !isDownloading(c.state)).length,
+  () => chapterInfos.value.filter((c) => c.isDownloaded !== true && !isDownloading(c.state) && c.state !== 'Failed').length,
 )
 
 function toggleSelectAllUndownloaded() {
   const notDownloadedChapterIds = chapterInfos.value
-    .filter((c) => c.isDownloaded !== true && !isDownloading(c.state))
+    .filter((c) => c.isDownloaded !== true && !isDownloading(c.state) && c.state !== 'Failed')
     .map((c) => c.chapterId)
 
   if (checkedIds.value.length >= notDownloadedChapterIds.length && notDownloadedChapterIds.length > 0) {

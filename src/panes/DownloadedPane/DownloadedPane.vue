@@ -28,6 +28,7 @@ import { getErrorMessage } from '../../utils/errors.ts'
 import { useDropdown } from '../../composables/useDropdown.ts'
 import { useIsMobile } from '../../composables/useIsMobile.ts'
 import { withAndroidSelection } from '../../utils/androidStorage.ts'
+import { filterLibrary } from '../../utils/librarySearch.ts'
 import { libraryApi } from '../../libraryApi.ts'
 import { isMergeableComic } from '../../utils/mergeableComics.ts'
 
@@ -134,6 +135,7 @@ const loading = ref(false)
 const PAGE_SIZE = 20
 const libraryFilter = ref('all')
 const sortOrder = ref('added')
+const searchQuery = ref('')
 const importing = ref(false)
 const recentComics = computed(() => store.downloadedComics.filter((comic) => store.readingState.progress[String(comic.id)])
   .sort((a, b) => store.readingState.progress[String(b.id)].updatedAt - store.readingState.progress[String(a.id)].updatedAt).slice(0, 3))
@@ -154,7 +156,7 @@ const filteredComics = computed(() => {
   })
   if (sortOrder.value === 'title') comics.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
   if (sortOrder.value === 'read') comics.sort((a, b) => (store.readingState.progress[String(b.id)]?.updatedAt ?? 0) - (store.readingState.progress[String(a.id)]?.updatedAt ?? 0))
-  return comics
+  return filterLibrary(comics, searchQuery.value)
 })
 
 const pathFieldRef = ref<InstanceType<typeof PathField>>()
@@ -278,7 +280,7 @@ watchEffect(() => {
   }
 })
 
-watch([libraryFilter, sortOrder], () => {
+watch([libraryFilter, sortOrder, searchQuery], () => {
   currentPage.value = 1
   selectedIds.value.clear()
   checkedIds.value.clear()
@@ -581,6 +583,13 @@ async function deleteDownloadedComics() {
       </div>
       <div class="library-actions select-none">
         <div class="library-filters">
+        <n-input
+          v-model:value="searchQuery"
+          class="library-search"
+          size="small"
+          clearable
+          placeholder="搜索标题 / 作者 / 标签 / ID"
+          aria-label="搜索书库" />
         <n-select v-model:value="libraryFilter" :options="filterOptions" class="library-select" aria-label="筛选书库" />
         <n-select v-model:value="sortOrder" :options="sortOptions" class="library-select" aria-label="书库排序" />
         </div>
@@ -653,8 +662,10 @@ async function deleteDownloadedComics() {
         </div>
         <div v-else-if="currentPageComics.length === 0" class="library-empty">
           <PhArchive :size="30" weight="duotone" />
-          <strong>{{ libraryFilter === 'mergeable' ? '暂无可合并的多话漫画' : '暂无漫画' }}</strong>
-          <span v-if="libraryFilter === 'mergeable'">需要同一本漫画至少两话已下载。</span>
+          <strong v-if="searchQuery.trim()">没有匹配「{{ searchQuery.trim() }}」的漫画</strong>
+          <strong v-else>{{ libraryFilter === 'mergeable' ? '暂无可合并的多话漫画' : '暂无漫画' }}</strong>
+          <span v-if="searchQuery.trim()">可尝试更短的关键词，或清空搜索框。</span>
+          <span v-else-if="libraryFilter === 'mergeable'">需要同一本漫画至少两话已下载。</span>
         </div>
         <div class="comic-grid">
         <DownloadedComicCard
@@ -721,6 +732,7 @@ async function deleteDownloadedComics() {
 .continue-grid small { display: block; color: #a28495; font-size: 10px; margin-top: 5px; }
 .continue-dot { color: #c65e87; background: #f9dfeb; padding: 6px 10px; border-radius: 8px; }
 .library-select { width: 125px; flex-shrink: 0; }
+.library-search { width: 210px; flex-shrink: 1; min-width: 140px; }
 .library-toolbar-buttons { display: flex; align-items: center; gap: 6px; }
 .comic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; padding: 4px 6px 12px; }
 @media (max-width: 760px) { .library-hero { padding: 14px; flex-wrap: wrap; } .hero-import { justify-content: flex-start; } .continue-grid { grid-template-columns: 1fr; } .continue-grid button:nth-child(n+2) { display: none; } .comic-grid { grid-template-columns: 1fr; } }
@@ -788,8 +800,25 @@ async function deleteDownloadedComics() {
   /* 触屏：工具栏与批量操作按钮统一 44dp，避免小目标连点误触 */
   .library-toolbar-buttons :deep(.n-button),
   .export-format-actions :deep(.n-button),
-  .library-filters :deep(.n-base-selection) {
+  .library-filters :deep(.n-base-selection),
+  .library-filters :deep(.n-input) {
     min-height: 44px;
+  }
+
+  /* 移动端搜索框独占一行，筛选与排序并排，避免宽度挤压 */
+  .library-filters {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .library-search {
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .library-select {
+    flex: 1 1 0;
+    width: auto;
   }
 
   .subtab-btn {
