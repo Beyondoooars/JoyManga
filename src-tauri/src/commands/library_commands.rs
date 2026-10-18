@@ -179,17 +179,6 @@ pub fn export_merged_cbz(app: AppHandle, comic: Comic) -> CommandResult<()> {
     Ok(())
 }
 
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn export_pdf(app: AppHandle, comic: Comic) -> CommandResult<()> {
-    let comic_title = &comic.name;
-    export::pdf(&app, &comic)
-        .context(format!("漫画`{comic_title}`导出pdf失败"))
-        .map_err(|err| CommandError::from("导出pdf失败", err))?;
-    Ok(())
-}
-
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command(async)]
 #[specta::specta]

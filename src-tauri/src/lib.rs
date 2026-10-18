@@ -1,7 +1,7 @@
 use anyhow::Context;
 use events::{
     DownloadAllFavoritesEvent, DownloadSleepingEvent, DownloadSpeedEvent, DownloadTaskEvent,
-    ExportCbzEvent, ExportPdfEvent, LogEvent, UpdateDownloadedComicsEvent,
+    ExportCbzEvent, LogEvent, UpdateDownloadedComicsEvent,
 };
 use parking_lot::RwLock;
 use tauri::{Manager, WebviewWindowBuilder, Wry};
@@ -90,7 +90,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             delete_downloaded_comic,
             export_cbz,
             export_merged_cbz,
-            export_pdf,
             get_logs_dir_size,
             export_logs,
             get_synced_comic,
@@ -115,7 +114,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             DownloadAllFavoritesEvent,
             UpdateDownloadedComicsEvent,
             ExportCbzEvent,
-            ExportPdfEvent,
             LogEvent,
             crate::events::ConfigChangedEvent,
             crate::events::SessionChangedEvent,

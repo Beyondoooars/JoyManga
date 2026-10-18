@@ -310,14 +310,6 @@ async exportMergedCbz(comic: Comic) : Promise<Result<null, CommandError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async exportPdf(comic: Comic) : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("export_pdf", { comic }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async getLogsDirSize() : Promise<Result<number, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_logs_dir_size") };
@@ -390,6 +382,9 @@ async getLocalImageDataUrl(filePath: string) : Promise<Result<string, CommandErr
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * 打开/关闭常亮。`enabled` 为 false 时恢复系统默认息屏行为。
+ */
 async setKeepScreenOn(enabled: boolean) : Promise<Result<null, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_keep_screen_on", { enabled }) };
@@ -398,6 +393,10 @@ async setKeepScreenOn(enabled: boolean) : Promise<Result<null, CommandError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Android 侧把当前网络是否计费推给后端（桌面端不会调用）。
+ * 前端在启动时与网络变化时各调一次，后端据此判断"仅 Wi-Fi 下载"。
+ */
 async setNetworkMetered(metered: boolean) : Promise<Result<null, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_network_metered", { metered }) };
@@ -459,7 +458,6 @@ downloadSleepingEvent: DownloadSleepingEvent,
 downloadSpeedEvent: DownloadSpeedEvent,
 downloadTaskEvent: DownloadTaskEvent,
 exportCbzEvent: ExportCbzEvent,
-exportPdfEvent: ExportPdfEvent,
 favoriteChangedEvent: FavoriteChangedEvent,
 logEvent: LogEvent,
 sessionChangedEvent: SessionChangedEvent,
@@ -472,7 +470,6 @@ downloadSleepingEvent: "download-sleeping-event",
 downloadSpeedEvent: "download-speed-event",
 downloadTaskEvent: "download-task-event",
 exportCbzEvent: "export-cbz-event",
-exportPdfEvent: "export-pdf-event",
 favoriteChangedEvent: "favorite-changed-event",
 logEvent: "log-event",
 sessionChangedEvent: "session-changed-event",
@@ -495,16 +492,6 @@ export type CategorySubRespData = { id: string | null; title: string | null }
 /**
  * 下载完成后的 CBZ 归档方式。
  */
-export type ReadingDirection = 
-/**
- * 从左往右：左侧点击/左滑为上一页
- */
-"LeftToRight" | 
-/**
- * 从右往左：右侧点击/右滑为上一页（日漫默认）
- */
-"RightToLeft"
-
 export type CbzMode = 
 /**
  * 合并为该漫画已下载的全部话，产出单个以本子名命名的 CBZ（默认）。
@@ -525,8 +512,41 @@ export type ComicArchiveEvent = { event: "Start"; data: { comicId: number; comic
 export type ComicInFavorite = { id: number; author: string; description: string | null; name: string; latestEp: string | null; latestEpAid: string | null; image: string; category: CategoryRespData; categorySub: CategorySubRespData; isDownloaded: boolean; comicDownloadDir: string }
 export type ComicInSearch = { id: number; author: string; name: string; image: string; category: CategoryRespData; categorySub: CategorySubRespData; liked: boolean; isFavorite: boolean; updateAt: number; isDownloaded: boolean; comicDownloadDir: string }
 export type ComicInWeekly = { id: number; author: string; description: string; name: string; image: string; category: Category; category_sub: CategorySub; liked: boolean; is_favorite: boolean; update_at: number; is_downloaded: boolean; comic_download_dir: string }
-export type CommandErrorKind = "Network" | "Timeout" | "Auth" | "NotFound" | "Storage" | "Unknown"
-export type CommandError = { err_title: string; err_message: string; kind?: CommandErrorKind }
+export type CommandError = { err_title: string; err_message: string; 
+/**
+ * 错误类别（旧前端忽略该字段即可，保持向后兼容）
+ */
+kind: CommandErrorKind }
+/**
+ * 错误类别：前端据此决定给用户什么操作，而不是解析中文文案。
+ * 
+ * 只做**决策相关**的粗分类；更细的定位仍看 `err_message`。
+ */
+export type CommandErrorKind = 
+/**
+ * 网络不通、连接被重置、DNS/代理问题：建议换线路或检查网络
+ */
+"Network" | 
+/**
+ * 请求超时：建议重试
+ */
+"Timeout" | 
+/**
+ * 需要登录 / 登录已失效：建议重新登录
+ */
+"Auth" | 
+/**
+ * 资源不存在（漫画被下架、章节被删）：重试无意义
+ */
+"NotFound" | 
+/**
+ * 磁盘写入失败、空间不足、权限问题：建议清理空间或换目录
+ */
+"Storage" | 
+/**
+ * 其他未归类
+ */
+"Unknown"
 export type Config = { revision?: number; schemaVersion?: number; apiDomainMigrationPending?: boolean; autoLogin?: boolean; androidStorageInitialized?: boolean; username: string; password: string; downloadDir: string; exportDir: string; downloadFormat: DownloadFormat; dirFmt: string; proxyMode: ProxyMode; proxyHost: string; proxyPort: number; enableFileLogger: boolean; chapterConcurrency: number; chapterDownloadIntervalSec: number; imgConcurrency: number; imgDownloadIntervalSec: number; downloadAllFavoritesIntervalSec: number; updateDownloadedComicsIntervalSec: number; apiDomainMode: ApiDomainMode; customApiDomain: string; imageDomainMode: ImageDomainMode; customImageDomain: string; shouldDownloadCover: boolean; 
 /**
  * 下载完成后 CBZ 自动整合的默认方式（单次下载可在界面上另行选择）。
@@ -564,11 +584,16 @@ export type DownloadTaskSnapshot = { taskId: string; revision: number; state: Do
 export type DownloadTaskState = "Pending" | "Downloading" | "Paused" | "Cancelled" | "Completed" | "Failed"
 export type ExportCbzEvent = { event: "Start"; data: { uuid: string; comicTitle: string; total: number } } | { event: "Progress"; data: { uuid: string; current: number } } | { event: "Error"; data: { uuid: string } } | { event: "End"; data: { uuid: string; chapterExportDir: string } }
 export type ExportLogsResult = { success: boolean; filePath: string; message: string }
-export type ExportPdfEvent = { event: "CreateStart"; data: { uuid: string; comicTitle: string; total: number } } | { event: "CreateProgress"; data: { uuid: string; current: number } } | { event: "CreateError"; data: { uuid: string } } | { event: "CreateEnd"; data: { uuid: string; chapterExportDir: string } } | { event: "MergeStart"; data: { uuid: string; comicTitle: string } } | { event: "MergeError"; data: { uuid: string } } | { event: "MergeEnd"; data: { uuid: string; chapterExportDir: string } }
 export type FavoriteChangedEvent = { comicId: number; isFavorite: boolean; sessionEpoch: number }
 export type FavoriteFolderRespData = { FID: string; UID: string; name: string }
 export type FavoriteSort = "FavoriteTime" | "UpdateTime"
 export type GetFavoriteResult = { list: ComicInFavorite[]; folderList: FavoriteFolderRespData[]; total: number; count: number }
+/**
+ * 登录/用户资料响应。
+ * 
+ * 除令牌 `s` 与账号标识 `uid` 外，其余字段都视为可选：不同客户端版本、封禁/游客
+ * 账号返回的字段集合并不一致，缺失字段降级为空值，避免“一个字段缺失导致整次登录失败”。
+ */
 export type GetUserProfileRespData = { uid: string; username: string; email: string; emailverified: string; photo: string; fname: string; gender: string; message: string | null; coin: number; album_favorites: number; s: string; level_name: string; level: number; nextLevelExp: number; exp: string; expPercent: number; album_favorites_max: number; ad_free: boolean; charge: string; jar: string; invitation_qrcode: string; invitation_url: string; invited_cnt: string }
 export type GetWeeklyInfoRespData = { categories: CategoryInWeeklyInfo[]; type: WeeklyType[] }
 export type GetWeeklyResult = { total: number; list: ComicInWeekly[] }
@@ -583,6 +608,20 @@ export type NetworkCheckReport = { api: NetworkProbe; image: NetworkProbe; domai
 export type NetworkProbe = { label: string; state: string; elapsedMs: number | null; message: string }
 export type PathPreset = { label: string; path: string; description: string }
 export type ProxyMode = "System" | "NoProxy" | "Custom"
+/**
+ * 阅读方向：决定点击区域、键盘、滑动与"上一页/下一页"按钮的语义。
+ * 
+ * JM 内容以日式排版为主，默认从右往左读（右滑看下一页）。
+ */
+export type ReadingDirection = 
+/**
+ * 从左往右：左侧点击/左滑为上一页
+ */
+"LeftToRight" | 
+/**
+ * 从右往左：右侧点击/右滑为上一页（日漫默认）
+ */
+"RightToLeft"
 export type RelatedListRespData = { id: string; author: string; name: string; image: string }
 export type SearchResult = { searchQuery: string; total: number; content: ComicInSearch[] }
 export type SearchResultVariant = { SearchResult: SearchResult } | { Comic: Comic }

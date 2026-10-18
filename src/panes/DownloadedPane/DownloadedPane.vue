@@ -13,7 +13,6 @@ import {
   PhCheck,
   PhChecks,
   PhDownloadSimple,
-  PhFilePdf,
   PhFileZip,
   PhTrash,
   PhX,
@@ -394,7 +393,7 @@ function handleContextMenu(comic: Comic) {
 const exporting = ref(false)
 
 // 批量导出：失败不中断，结束后汇总提示；整个过程中禁用按钮防止重复提交
-async function runBatchExport(exportType: 'cbz' | 'pdf') {
+async function runBatchExport() {
   if (checkedIds.value.size === 0 || exporting.value) {
     return
   }
@@ -414,9 +413,7 @@ async function runBatchExport(exportType: 'cbz' | 'pdf') {
   try {
     for (const comic of comics) {
       try {
-        const result = exportType === 'cbz'
-          ? await commands.exportCbz(comic)
-          : await commands.exportPdf(comic)
+        const result = await commands.exportCbz(comic)
         if (result.status === 'error') {
           failures.push(`${comic.name}：${result.error.err_message}`)
         }
@@ -435,11 +432,7 @@ async function runBatchExport(exportType: 'cbz' | 'pdf') {
 }
 
 async function exportCbz() {
-  await runBatchExport('cbz')
-}
-
-async function exportPdf() {
-  await runBatchExport('pdf')
+  await runBatchExport()
 }
 
 async function mergeSelectedComics(comics: Comic[] = checkedMergeableComics.value) {
@@ -624,18 +617,6 @@ async function deleteDownloadedComics() {
             @click="mergeSelectedComics()">
             <template #icon><PhArchive :size="17" /></template>
             整理为整本（{{ checkedMergeableComics.length }} 本）
-          </n-button>
-          <n-button
-            class="export-format-button"
-            type="primary"
-            secondary
-            size="small"
-            :disabled="checkedIds.size === 0"
-            :loading="exporting"
-            aria-label="导出为 PDF"
-            @click="exportPdf">
-            <template #icon><PhFilePdf :size="17" /></template>
-            PDF
           </n-button>
           <n-button
             class="export-format-button delete-stock-button"
