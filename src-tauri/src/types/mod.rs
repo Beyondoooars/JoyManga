@@ -1,0 +1,42 @@
+mod cbz_mode;
+mod chapter_info;
+mod comic;
+mod comic_info;
+mod download_format;
+mod favorite_sort;
+mod get_favorite_result;
+mod get_weekly_result;
+mod log_level;
+mod proxy_mode;
+mod reading_direction;
+mod search_result;
+mod search_sort;
+
+pub use cbz_mode::*;
+pub use chapter_info::*;
+pub use comic::*;
+pub use comic_info::*;
+pub use download_format::*;
+pub use favorite_sort::*;
+pub use get_favorite_result::*;
+pub use get_weekly_result::*;
+pub use log_level::*;
+pub use proxy_mode::*;
+pub use reading_direction::*;
+pub use search_result::*;
+pub use search_sort::*;
+
+use serde::{Deserialize, Serialize};
+use specta::Type;
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct Category {
+    pub id: Option<String>,
+    pub title: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct CategorySub {
+    pub id: Option<String>,
+    pub title: Option<String>,
+}

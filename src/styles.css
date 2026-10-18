@@ -1,0 +1,141 @@
+:root {
+  /* === Design Tokens === */
+  --bili-pink: #FB7299;
+  --bili-pink-hover: #FF85AD;
+  --bili-pink-active: #E05D84;
+  --bili-pink-light: rgba(251, 114, 153, 0.12);
+  --bili-blue: #00AEEC;
+  --bili-blue-hover: #33BDEC;
+  --bili-blue-light: rgba(0, 174, 236, 0.08);
+  --bg-body: #F6F7F8;
+  --bg-card: #FFFFFF;
+  --bg-subtle: #F1F2F3;
+  --border-color: #E3E5E7;
+  --text-primary: #18191C;
+  --text-regular: #61666D;
+  --text-secondary: #9499A0;
+  --text-disabled: #C9CCD0;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* === 密度令牌（方案 B：两端同一套语义，按端取值）=== */
+  --radius-card: 12px;
+  --radius-panel: 16px;
+  --radius-control: 8px;
+  --radius-pill: 999px;
+  --shadow-card: 0 4px 16px rgba(251, 114, 153, 0.12);
+  --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.03);
+  --control-h: 34px;
+  --row-h: 44px;
+  --card-pad: 12px;
+
+  color: var(--text-primary);
+  background: var(--bg-body);
+  font-family:
+    'Noto Sans SC',
+    'PingFang SC',
+    'Microsoft YaHei',
+    Inter,
+    'SF Pro Display',
+    system-ui,
+    -apple-system,
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg-body);
+  color: var(--text-primary);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+input,
+textarea {
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible, a:focus-visible {
+  outline: 2px solid #e796b5;
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* === 桌面密度（ui-design-spec-v2 第二节）：窄屏保持移动取值，≥769px 收敛 === */
+@media (min-width: 769px) {
+  :root {
+    --radius-card: 9px;
+    --radius-panel: 10px;
+    --radius-control: 6px;
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06);
+    --shadow-surface: 0 1px 3px rgba(0, 0, 0, 0.04);
+    --control-h: 30px;
+    --row-h: 38px;
+    --card-pad: 10px;
+  }
+
+  /* 控件密度：桌面按钮/输入统一收到 30px，与移动端 44dp 触控目标区分 */
+  .n-button:not(.n-button--huge):not(.n-button--large) {
+    --n-height: 30px !important;
+  }
+
+  .n-base-selection,
+  .n-input {
+    --n-height: 30px !important;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: #e3e5e7;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #fb7299;
+  background-clip: padding-box;
+}
+
+::selection {
+  color: #18191c;
+  background: rgba(251, 114, 153, 0.28);
+}

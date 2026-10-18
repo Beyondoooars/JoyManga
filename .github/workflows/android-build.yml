@@ -1,0 +1,146 @@
+name: Android Build
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+    tags:
+      - 'v*'
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android NDK and SDK
+        run: |
+          for d in "$ANDROID_HOME"/cmdline-tools/*/bin "$ANDROID_HOME"/tools/bin; do
+            if [ -x "$d/sdkmanager" ]; then
+              echo "$d" >> $GITHUB_PATH
+              export PATH="$d:$PATH"
+              break
+            fi
+          done
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          export PATH="$ANDROID_HOME/platform-tools:$PATH"
+
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
+          if [ ! -d "$ANDROID_HOME/ndk" ] || [ -z "$(ls -A "$ANDROID_HOME"/ndk 2>/dev/null)" ]; then
+            echo "Installing NDK..."
+            sdkmanager "ndk;26.1.10909125"
+          fi
+
+          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -n 1)
+          if [ -d "$ANDROID_HOME/ndk/26.1.10909125" ]; then
+            NDK_DIR="$ANDROID_HOME/ndk/26.1.10909125"
+          fi
+          echo "Using Android NDK: $NDK_DIR"
+          echo "NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Init Android Project if needed
+        run: |
+          if [ ! -d "src-tauri/gen/android" ]; then
+            pnpm tauri android init --ci
+          fi
+
+      - name: Extract version info
+        id: version_info
+        run: |
+          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Configure release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_ALIAS" && test -n "$KEY_PASSWORD" && test -n "$CERT_SHA256"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > src-tauri/gen/android/app/release.keystore
+
+      - name: Build Android APK
+        env:
+          APP_VERSION_NAME: ${{ env.VERSION }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: pnpm tauri android build --apk --target aarch64
+
+      - name: Collect and verify signed APK
+        env:
+          CERT_SHA256: ${{ secrets.ANDROID_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          mapfile -t apks < <(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*release*.apk' ! -name '*unsigned*' | sort)
+          test "${#apks[@]}" -eq 1
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          "$build_tools/apksigner" verify --print-certs "${apks[0]}" > artifacts/signature.txt
+          actual=$(awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2}' artifacts/signature.txt | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')
+          expected=$(printf '%s' "$CERT_SHA256" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')
+          test -n "$actual" && test "$actual" = "$expected"
+          "$build_tools/aapt" dump badging "${apks[0]}" > artifacts/package.txt
+          grep -F "versionName='$VERSION'" artifacts/package.txt
+          grep -F "native-code: 'arm64-v8a'" artifacts/package.txt
+          cp "${apks[0]}" artifacts/joymanga-arm64-v8a.apk
+
+      - name: Upload APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: joymanga-android-arm64-v8a-apk
+          path: artifacts/joymanga-arm64-v8a.apk
+          if-no-files-found: error
+
+      - name: Auto Publish or Update Release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: JoyManga v${{ env.VERSION }}
+          body: |
+            ### JoyManga v${{ env.VERSION }}
+            自动编译最新 Android 安装包已就绪。
+          files: |
+            artifacts/joymanga-arm64-v8a.apk
+          draft: false
+          prerelease: false
