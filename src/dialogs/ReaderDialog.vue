@@ -8,8 +8,6 @@ import { bookmarkId, type ReadingProgress } from '../utils/readingState.ts'
 import { useMessage } from 'naive-ui'
 import {
   PhX,
-  PhCornersOut,
-  PhCornersIn,
   PhCaretLeft,
   PhCaretRight,
   PhCaretDoubleLeft,
@@ -45,7 +43,7 @@ import {
 const store = useStore()
 const message = useMessage()
 
-const { isMobile, isAndroid } = useIsMobile()
+const { isAndroid } = useIsMobile()
 const hudVisible = ref(true)
 
 function toggleHud() {
@@ -56,159 +54,6 @@ useBackHandler(() => {
   store.closeReader()
   return true
 }, 100)
-
-interface WinRect {
-  x: number
-  y: number
-  w: number
-  h: number
-}
-
-const STORAGE_RECT_KEY = 'joymanga_reader_win_rect'
-const isMaximized = ref(false)
-const isResizing = ref(false)
-const isDragging = ref(false)
-const effectiveMaximized = computed(() => isMobile.value || isMaximized.value)
-
-const winRect = ref<WinRect>({
-  x: 50,
-  y: 50,
-  w: 1000,
-  h: 750,
-})
-
-function loadWinRect() {
-  try {
-    const raw = localStorage.getItem(STORAGE_RECT_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (parsed && typeof parsed.w === 'number' && typeof parsed.h === 'number') {
-        const w = Math.max(500, Math.min(parsed.w, window.innerWidth))
-        const h = Math.max(400, Math.min(parsed.h, window.innerHeight))
-        const x = Math.max(0, Math.min(parsed.x ?? 50, window.innerWidth - w))
-        const y = Math.max(0, Math.min(parsed.y ?? 50, window.innerHeight - h))
-        winRect.value = { x, y, w, h }
-        return
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load window rect', e)
-  }
-  const w = Math.min(1100, Math.max(700, window.innerWidth * 0.88))
-  const h = Math.min(850, Math.max(500, window.innerHeight * 0.88))
-  winRect.value = {
-    x: Math.max(0, (window.innerWidth - w) / 2),
-    y: Math.max(0, (window.innerHeight - h) / 2),
-    w,
-    h,
-  }
-}
-
-function saveWinRect() {
-  try {
-    localStorage.setItem(STORAGE_RECT_KEY, JSON.stringify(winRect.value))
-  } catch (e) {
-    console.error('Failed to save window rect', e)
-  }
-}
-
-type Direction = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
-
-function startResize(e: MouseEvent, dir: Direction) {
-  if (isMaximized.value) return
-  e.preventDefault()
-  e.stopPropagation()
-
-  isResizing.value = true
-  const startX = e.clientX
-  const startY = e.clientY
-  const { x: initX, y: initY, w: initW, h: initH } = winRect.value
-  const minW = 500
-  const minH = 400
-
-  const onMouseMove = (moveEvent: MouseEvent) => {
-    const dx = moveEvent.clientX - startX
-    const dy = moveEvent.clientY - startY
-    let newX = initX
-    let newY = initY
-    let newW = initW
-    let newH = initH
-
-    if (dir.includes('e')) {
-      newW = Math.max(minW, Math.min(initW + dx, window.innerWidth - initX))
-    }
-    if (dir.includes('s')) {
-      newH = Math.max(minH, Math.min(initH + dy, window.innerHeight - initY))
-    }
-    if (dir.includes('w')) {
-      const candidateW = initW - dx
-      if (candidateW >= minW) {
-        newW = candidateW
-        newX = initX + dx
-      } else {
-        newW = minW
-        newX = initX + (initW - minW)
-      }
-    }
-    if (dir.includes('n')) {
-      const candidateH = initH - dy
-      if (candidateH >= minH) {
-        newH = candidateH
-        newY = initY + dy
-      } else {
-        newH = minH
-        newY = initY + (initH - minH)
-      }
-    }
-
-    winRect.value = { x: newX, y: newY, w: newW, h: newH }
-  }
-
-  const onMouseUp = () => {
-    isResizing.value = false
-    window.removeEventListener('mousemove', onMouseMove)
-    window.removeEventListener('mouseup', onMouseUp)
-    saveWinRect()
-  }
-
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('mouseup', onMouseUp)
-}
-
-function startHeaderDrag(e: MouseEvent) {
-  if (isMaximized.value) return
-  if ((e.target as HTMLElement).closest('button') || (e.target as HTMLElement).closest('.no-drag')) {
-    return
-  }
-  e.preventDefault()
-  isDragging.value = true
-
-  const startX = e.clientX
-  const startY = e.clientY
-  const { x: initX, y: initY, w, h } = winRect.value
-
-  const onMouseMove = (moveEvent: MouseEvent) => {
-    const dx = moveEvent.clientX - startX
-    const dy = moveEvent.clientY - startY
-    const newX = Math.max(0, Math.min(initX + dx, window.innerWidth - 100))
-    const newY = Math.max(0, Math.min(initY + dy, window.innerHeight - 60))
-    winRect.value = { x: newX, y: newY, w, h }
-  }
-
-  const onMouseUp = () => {
-    isDragging.value = false
-    window.removeEventListener('mousemove', onMouseMove)
-    window.removeEventListener('mouseup', onMouseUp)
-    saveWinRect()
-  }
-
-  window.addEventListener('mousemove', onMouseMove)
-  window.addEventListener('mouseup', onMouseUp)
-}
-
-function toggleMaximize() {
-  isMaximized.value = !isMaximized.value
-}
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -423,7 +268,6 @@ function containerSize(): { width: number; height: number } {
 
 /// 双击：未放大则放大到 2x 并把触点居中，已放大则复位
 function onViewerDoubleClick(event: MouseEvent) {
-  if (!isMobile.value) return
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
   zoom.value = toggleZoom(
     zoom.value,
@@ -630,9 +474,7 @@ function resetSwipeState() {
 
 function handleViewerBodyClick() {
   if (justSwiped) return
-  if (isMobile.value) {
-    toggleHud()
-  }
+  toggleHud()
 }
 
 function goToChapter(nav: ChapterNavInfo) {
@@ -659,34 +501,9 @@ function tapRight(): void {
   runPageAction(pageActionForTapZone(readingDirection.value, 'right'))
 }
 
-// 桌面端滚轮翻页（累积一定位移后翻一页，避免触控板误触）
-let wheelAccum = 0
-let wheelResetTimer: ReturnType<typeof setTimeout> | undefined
-function onWheel(e: WheelEvent) {
-  if (Math.abs(e.deltaY) < 1) return
-  wheelAccum += e.deltaY
-  if (wheelResetTimer) clearTimeout(wheelResetTimer)
-  wheelResetTimer = setTimeout(() => {
-    wheelAccum = 0
-  }, 240)
-  const threshold = 36
-  if (wheelAccum >= threshold) {
-    wheelAccum = 0
-    // 滚轮向下 = 往后读；方向设置只影响左右切换，不影响纵向滚轮
-    nextPage()
-  } else if (wheelAccum <= -threshold) {
-    wheelAccum = 0
-    prevPage()
-  }
-}
-
 function handleKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     store.closeReader()
-    return
-  }
-  if (e.key === 'f' || e.key === 'F') {
-    toggleMaximize()
     return
   }
   const action = pageActionForKey(readingDirection.value, e.key)
@@ -715,7 +532,6 @@ watch(
 )
 
 onMounted(() => {
-  loadWinRect()
   window.addEventListener('keydown', handleKeyDown)
   // 阅读器打开即保持常亮（可在设置关闭）；音量键仅 Android 生效
   keepScreenOnWatch = watch(
@@ -736,11 +552,7 @@ onUnmounted(() => {
   unsubscribeVolumeKeys?.()
   unsubscribeVolumeKeys = undefined
   chapterGeneration++
-  // 触摸/手势与滚轮计时器可能在组件销毁后仍触发，先清掉
-  if (wheelResetTimer !== undefined) {
-    clearTimeout(wheelResetTimer)
-    wheelResetTimer = undefined
-  }
+  // 触摸/手势计时器可能在组件销毁后仍触发，先清掉
   if (swipeResetTimer !== undefined) {
     clearTimeout(swipeResetTimer)
     swipeResetTimer = undefined
@@ -761,34 +573,12 @@ onUnmounted(() => {
 <template>
   <div class="reader-backdrop" @click="store.closeReader">
     <div
-      class="reader-window"
-      :class="{ maximized: effectiveMaximized, 'is-mobile': isMobile }"
-      :style="effectiveMaximized ? undefined : {
-        top: `${winRect.y}px`,
-        left: `${winRect.x}px`,
-        width: `${winRect.w}px`,
-        height: `${winRect.h}px`,
-      }"
+      class="reader-window maximized is-mobile"
       @click.stop>
-      <!-- 8 direction resize handles -->
-      <template v-if="!effectiveMaximized">
-        <div class="resize-handle handle-n" @mousedown="startResize($event, 'n')"></div>
-        <div class="resize-handle handle-s" @mousedown="startResize($event, 's')"></div>
-        <div class="resize-handle handle-e" @mousedown="startResize($event, 'e')"></div>
-        <div class="resize-handle handle-w" @mousedown="startResize($event, 'w')"></div>
-        <div class="resize-handle handle-ne" @mousedown="startResize($event, 'ne')"></div>
-        <div class="resize-handle handle-nw" @mousedown="startResize($event, 'nw')"></div>
-        <div class="resize-handle handle-se" @mousedown="startResize($event, 'se')"></div>
-        <div class="resize-handle handle-sw" @mousedown="startResize($event, 'sw')"></div>
-      </template>
-
       <!-- Window Header -->
       <header
-        v-show="!isMobile || hudVisible"
-        class="reader-header"
-        :class="{ 'mobile-header': isMobile }"
-        @mousedown="startHeaderDrag"
-        @dblclick="toggleMaximize">
+        v-show="hudVisible"
+        class="reader-header mobile-header">
         <div class="header-title no-drag">
           <span class="comic-name" :title="chapterData?.comicTitle || store.activeReaderTarget?.comicTitle">
             {{ chapterData?.comicTitle || store.activeReaderTarget?.comicTitle || '漫画阅读器' }}
@@ -812,16 +602,6 @@ onUnmounted(() => {
             :title="`适配：${FIT_MODE_LABELS[fitMode]}（点击切换）`"
             @click="cycleFitMode">
             <PhArrowsHorizontal :size="18" />
-          </button>
-
-          <button
-            v-if="!isMobile"
-            type="button"
-            class="action-btn"
-            :title="isMaximized ? '还原窗口' : '最大化窗口'"
-            @click="toggleMaximize">
-            <PhCornersIn v-if="isMaximized" :size="18" />
-            <PhCornersOut v-else :size="18" />
           </button>
 
           <button
@@ -863,11 +643,10 @@ onUnmounted(() => {
         </div>
 
         <template v-else-if="chapterData">
-          <!-- 单页翻页模式（滑动 / 点击区域 / 滚轮 / 键盘） -->
+          <!-- 单页翻页模式（滑动 / 点击区域 / 键盘） -->
           <div
             class="paginated-viewer"
             ref="viewerBody"
-            @wheel="onWheel"
             @touchstart="onTouchStart"
             @touchmove="onTouchMove"
             @touchend="onTouchEnd"
@@ -918,9 +697,8 @@ onUnmounted(() => {
 
       <!-- Window Footer -->
       <footer
-        v-show="!isMobile || hudVisible"
-        class="reader-footer"
-        :class="{ 'mobile-footer': isMobile }">
+        v-show="hudVisible"
+        class="reader-footer mobile-footer">
         <div class="footer-controls">
           <button
             type="button"
@@ -973,14 +751,6 @@ onUnmounted(() => {
             <PhCaretDoubleRight :size="16" />
           </button>
         </div>
-
-        <div v-if="!isMobile" class="shortcuts-hint">
-          <span>拖拽边框可自由调节窗口大小</span>
-          <span class="sep">·</span>
-          <span>A / D 或 ← / → 翻页</span>
-          <span class="sep">·</span>
-          <span>Esc 退出</span>
-        </div>
       </footer>
     </div>
   </div>
@@ -1021,68 +791,6 @@ onUnmounted(() => {
   height: 100vh !important;
   border-radius: 0;
   box-shadow: none;
-}
-
-/* 8-direction resize handles */
-.resize-handle {
-  position: absolute;
-  z-index: 100;
-}
-.handle-n {
-  top: 0;
-  left: 10px;
-  right: 10px;
-  height: 6px;
-  cursor: ns-resize;
-}
-.handle-s {
-  bottom: 0;
-  left: 10px;
-  right: 10px;
-  height: 6px;
-  cursor: ns-resize;
-}
-.handle-w {
-  left: 0;
-  top: 10px;
-  bottom: 10px;
-  width: 6px;
-  cursor: ew-resize;
-}
-.handle-e {
-  right: 0;
-  top: 10px;
-  bottom: 10px;
-  width: 6px;
-  cursor: ew-resize;
-}
-.handle-nw {
-  top: 0;
-  left: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nwse-resize;
-}
-.handle-ne {
-  top: 0;
-  right: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nesw-resize;
-}
-.handle-sw {
-  bottom: 0;
-  left: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nesw-resize;
-}
-.handle-se {
-  bottom: 0;
-  right: 0;
-  width: 12px;
-  height: 12px;
-  cursor: nwse-resize;
 }
 
 /* Header */
@@ -1180,7 +888,6 @@ onUnmounted(() => {
   justify-content: center;
   height: 100%;
 }
-
 
 /* Image states */
 .reader-img {
@@ -1422,19 +1129,6 @@ onUnmounted(() => {
 
 .page-indicator strong {
   color: #fff;
-}
-
-.shortcuts-hint {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  font-size: 11px;
-  color: #61666D;
-}
-
-.shortcuts-hint .sep {
-  opacity: 0.5;
 }
 
 /* Mobile Fullscreen & Safe Area Overrides */

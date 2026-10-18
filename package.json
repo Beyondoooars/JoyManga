@@ -31,7 +31,6 @@
   "dependencies": {
     "@phosphor-icons/vue": "^2.2.1",
     "@tauri-apps/api": "^2.5.0",
-    "@tauri-apps/plugin-dialog": "2.2.2",
     "@tauri-apps/plugin-opener": "~2.2.6",
     "@viselect/vue": "^3.9.0",
     "naive-ui": "^2.40.1",

@@ -12,17 +12,6 @@ use crate::extensions::AppHandleExt;
 use crate::logger;
 use crate::utils;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectoryListing {
-    pub current_path: String,
-    pub parent_path: Option<String>,
-    pub subdirectories: Vec<String>,
-    pub files: Vec<String>,
-    pub exists: bool,
-    pub writable: bool,
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn reveal_path_in_file_manager(app: &AppHandle, path: &Path, err_title: &str) -> CommandResult<()> {
     let path_str = path.to_string_lossy();
@@ -417,102 +406,6 @@ pub fn export_logs(
         file_path: file_path_str,
         message: format!("日志已成功导出至：{}", target_file_path.display()),
     })
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn list_directory_contents(
-    app: AppHandle,
-    path: Option<String>,
-    include_files: Option<bool>,
-) -> CommandResult<DirectoryListing> {
-    let include_files = include_files.unwrap_or(false);
-    let target_path_buf = match path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => app.get_config().read().download_dir.clone(),
-    };
-
-    let target_path_str = target_path_buf.to_string_lossy().to_string();
-    let exists = target_path_buf.exists();
-    let parent_path = target_path_buf
-        .parent()
-        .map(|p| p.to_string_lossy().to_string());
-
-    let mut subdirectories = Vec::new();
-    let mut files = Vec::new();
-    let mut writable = false;
-
-    if exists && target_path_buf.is_dir() {
-        let entries = std::fs::read_dir(&target_path_buf).map_err(|err| {
-            CommandError::from("无法读取目录，请使用系统文件选择器或检查授权", err)
-        })?;
-        {
-            for entry in entries.flatten() {
-                if let Ok(ft) = entry.file_type() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if !name.starts_with('.') {
-                        if ft.is_dir() {
-                            subdirectories.push(name);
-                        } else if include_files && ft.is_file() {
-                            files.push(name);
-                        }
-                    }
-                }
-            }
-        }
-        subdirectories.sort_by_key(|a| a.to_lowercase());
-        files.sort_by_key(|a| a.to_lowercase());
-
-        writable = std::fs::metadata(&target_path_buf)
-            .is_ok_and(|metadata| !metadata.permissions().readonly());
-    }
-
-    Ok(DirectoryListing {
-        current_path: target_path_str,
-        parent_path,
-        subdirectories,
-        files,
-        exists,
-        writable,
-    })
-}
-
-#[tauri::command(async)]
-#[specta::specta]
-pub fn validate_selected_path(path: String, mode: String) -> CommandResult<()> {
-    let path = PathBuf::from(path);
-    let result = match mode.as_str() {
-        "file" => (|| -> anyhow::Result<()> {
-            ensure!(path.is_file(), "所选路径不存在或不是文件");
-            std::fs::File::open(&path)?;
-            Ok(())
-        })(),
-        "directory" => (|| -> anyhow::Result<()> {
-            ensure!(path.is_dir(), "所选路径不存在或不是目录");
-            std::fs::read_dir(&path)?;
-            Ok(())
-        })(),
-        _ => Err(anyhow!("选择模式无效")),
-    };
-    result.map_err(|err| CommandError::from("路径校验失败", err))
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn create_directory(_app: AppHandle, path: &str) -> CommandResult<()> {
-    let p = Path::new(path.trim());
-    if p.as_os_str().is_empty() {
-        return Err(CommandError::from(
-            "创建目录失败",
-            anyhow!("目录路径不能为空"),
-        ));
-    }
-    std::fs::create_dir_all(p)
-        .context(format!("创建目录`{path}`失败，请检查存储权限"))
-        .map_err(|err| CommandError::from("创建目录失败", err))?;
-    Ok(())
 }
 
 #[cfg(test)]

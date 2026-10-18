@@ -1,31 +1,22 @@
 <script setup lang="tsx">
 import { Comic, commands } from '../../bindings.ts'
-import { computed, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
+import { computed, ref, watch, watchEffect } from 'vue'
 import DownloadedComicCard from './components/DownloadedComicCard.vue'
-import { open } from '@tauri-apps/plugin-dialog'
-import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useStore } from '../../store.ts'
-import { DropdownOption, NCheckbox, NIcon } from 'naive-ui'
-import { SelectionArea, SelectionEvent } from '@viselect/vue'
+import { NCheckbox } from 'naive-ui'
 import {
   PhArchive,
   PhBooks,
-  PhCheck,
-  PhChecks,
   PhDownloadSimple,
   PhFileZip,
   PhTrash,
-  PhX,
   PhPlus,
 } from '@phosphor-icons/vue'
 import ProgressesPane from '../ProgressesPane/ProgressesPane.vue'
 import UpdateDownloadedComicsButton from './components/UpdateDownloadedComicsButton.vue'
 import PathField from '../../components/PathField.vue'
-import PathEditDialog from '../../dialogs/PathEditDialog.vue'
 import { useDialog, useMessage } from 'naive-ui'
 import { getErrorMessage } from '../../utils/errors.ts'
-import { useDropdown } from '../../composables/useDropdown.ts'
-import { useIsMobile } from '../../composables/useIsMobile.ts'
 import { withAndroidSelection } from '../../utils/androidStorage.ts'
 import { filterLibrary } from '../../utils/librarySearch.ts'
 import { libraryApi } from '../../libraryApi.ts'
@@ -35,7 +26,7 @@ const store = useStore()
 const message = useMessage()
 const dialog = useDialog()
 
-const { isMobile, isAndroid } = useIsMobile()
+const checkedIds = ref<Set<number>>(new Set())
 
 function toggleSelectAll() {
   if (checkedIds.value.size >= currentPageComics.value.length && currentPageComics.value.length > 0) {
@@ -45,90 +36,6 @@ function toggleSelectAll() {
   }
 }
 
-const selectedIds = ref<Set<number>>(new Set())
-const checkedIds = ref<Set<number>>(new Set())
-const { dropdownX, dropdownY, dropdownShowing, showDropdown, closeDropdown } = useDropdown()
-
-const baseDropdownOptions: DropdownOption[] = [
-  {
-    label: '勾选',
-    key: 'check',
-    icon: () => (
-      <NIcon size="20">
-        <PhCheck />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        selectedIds.value.forEach((id) => checkedIds.value.add(id))
-        dropdownShowing.value = false
-      },
-    },
-  },
-  {
-    label: '取消勾选',
-    key: 'uncheck',
-    icon: () => (
-      <NIcon size="20">
-        <PhX />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        selectedIds.value.forEach((id) => checkedIds.value.delete(id))
-        dropdownShowing.value = false
-      },
-    },
-  },
-  {
-    label: '全选',
-    key: 'select-all',
-    icon: () => (
-      <NIcon size="20">
-        <PhChecks />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        currentPageComics.value.forEach((comic) => selectedIds.value.add(comic.id))
-        dropdownShowing.value = false
-      },
-    },
-  },
-  {
-    label: '整理所选漫画为整本 CBZ',
-    key: 'merge-cbz',
-    icon: () => (
-      <NIcon size="20">
-        <PhArchive />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        dropdownShowing.value = false
-        void mergeSelectedComics(selectedMergeableComics.value)
-      },
-    },
-  },
-  {
-    label: '删除库存',
-    key: 'delete',
-    icon: () => (
-      <NIcon size="20">
-        <PhTrash />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        // 框选项并入勾选项后执行删除
-        selectedIds.value.forEach((id) => checkedIds.value.add(id))
-        dropdownShowing.value = false
-        void deleteDownloadedComics()
-      },
-    },
-  },
-]
-const selectionAreaRef = ref<InstanceType<typeof SelectionArea>>()
 const loading = ref(false)
 
 const PAGE_SIZE = 20
@@ -139,9 +46,7 @@ const importing = ref(false)
 const recentComics = computed(() => store.downloadedComics.filter((comic) => store.readingState.progress[String(comic.id)])
   .sort((a, b) => store.readingState.progress[String(b.id)].updatedAt - store.readingState.progress[String(a.id)].updatedAt).slice(0, 3))
 const mergeableComics = computed(() => store.downloadedComics.filter(isMergeableComic))
-const selectedMergeableComics = computed(() => currentPageComics.value.filter((comic) => selectedIds.value.has(comic.id) && isMergeableComic(comic)))
 const checkedMergeableComics = computed(() => currentPageComics.value.filter((comic) => checkedIds.value.has(comic.id) && isMergeableComic(comic)))
-const dropdownOptions = computed(() => baseDropdownOptions.filter((option) => option.key !== 'merge-cbz' || selectedMergeableComics.value.length > 0))
 const filterOptions = computed(() => [ { label: '全部漫画', value: 'all' }, { label: `可合并多话（${mergeableComics.value.length} 本）`, value: 'mergeable' }, { label: '正在阅读', value: 'reading' },
   { label: '有书签', value: 'bookmarks' }, { label: '本地导入', value: 'imported' } ])
 const sortOptions = [ { label: '最近加入', value: 'added' }, { label: '最近阅读', value: 'read' }, { label: '标题排序', value: 'title' } ]
@@ -158,28 +63,14 @@ const filteredComics = computed(() => {
   return filterLibrary(comics, searchQuery.value)
 })
 
-const pathFieldRef = ref<InstanceType<typeof PathField>>()
-
-const showImportModal = ref(false)
-const importMode = ref<'directory' | 'file'>('file')
-
 async function importComics(directory = false) {
   if (importing.value) return
-  if (isAndroid) {
-    try { await withAndroidSelection(directory ? 'directory' : 'cbz', executeImport) }
-    catch (error) { message.error(`选择文件失败：${getErrorMessage(error)}`) }
-    return
-  }
-  if (isMobile.value) {
-    importMode.value = directory ? 'directory' : 'file'
-    showImportModal.value = true
-    return
-  }
+  // Android 通过 SAF 选择文件/目录；应用只面向 Android，不再有桌面分支。
   try {
-    const selected = await open(directory ? { directory: true } : { multiple: true, filters: [{ name: '漫画压缩包', extensions: ['cbz'] }] })
-    if (!selected) return
-    await executeImport(Array.isArray(selected) ? selected : [selected])
-  } catch (error) { message.error(`导入失败：${getErrorMessage(error)}`) }
+    await withAndroidSelection(directory ? 'directory' : 'cbz', executeImport)
+  } catch (error) {
+    message.error(`选择文件失败：${getErrorMessage(error)}`)
+  }
 }
 
 async function executeImport(paths: string[]) {
@@ -197,51 +88,6 @@ async function executeImport(paths: string[]) {
   }
 }
 
-// ── 桌面端拖放导入（Fluent 习惯）：拖入 .cbz 文件松手即导入 ──
-const dragActive = ref(false)
-let unlistenDragDrop: (() => void) | undefined
-// 注册是异步的：组件可能在 await 完成前就被卸载，此时不能再挂监听
-let dragDropDisposed = false
-
-onMounted(async () => {
-  if (isMobile.value) return
-  try {
-    const unlisten = await getCurrentWebview().onDragDropEvent((event) => {
-      const payload = event.payload
-      if (payload.type === 'enter' || payload.type === 'over') {
-        dragActive.value = true
-      } else if (payload.type === 'leave') {
-        dragActive.value = false
-      } else if (payload.type === 'drop') {
-        dragActive.value = false
-        const paths = payload.paths ?? []
-        // 只接受 .cbz 与目录（过滤掉 txt 等无关文件）；目录是否存在交给后端校验
-        const toImport = paths.filter((path) => {
-          if (path.toLowerCase().endsWith('.cbz')) return true
-          return !/[\\/][^\\/]*\.[^\\/]*$/.test(path)
-        })
-        if (toImport.length === 0) {
-          message.info('请拖入 .cbz 文件或漫画文件夹')
-          return
-        }
-        void executeImport(toImport)
-      }
-    })
-    if (dragDropDisposed) {
-      unlisten()
-    } else {
-      unlistenDragDrop = unlisten
-    }
-  } catch (error) {
-    console.error('注册拖放导入失败', error)
-  }
-})
-
-onUnmounted(() => {
-  dragDropDisposed = true
-  unlistenDragDrop?.()
-})
-
 async function refreshLibrary() {
   loading.value = true
   try { await store.refreshDownloadedComics() }
@@ -251,7 +97,6 @@ async function refreshLibrary() {
 
 watch(() => store.authoritativeConfig?.downloadDir, (path, previous) => {
   if (!previous || path === previous) return
-  selectedIds.value.clear()
   checkedIds.value.clear()
   store.downloadedComics = []
   void refreshLibrary()
@@ -281,16 +126,11 @@ watchEffect(() => {
 
 watch([libraryFilter, sortOrder, searchQuery], () => {
   currentPage.value = 1
-  selectedIds.value.clear()
   checkedIds.value.clear()
-  selectionAreaRef.value?.selection?.clearSelection()
 })
 
 watch(currentPage, () => {
-  selectedIds.value.clear()
   checkedIds.value.clear()
-  selectionAreaRef.value?.selection?.clearSelection()
-  selectionAreaRef.value?.$el.scrollTo({ top: 0, behavior: 'instant' })
 })
 
 // 监听标签页变化，更新下载的漫画列表
@@ -314,65 +154,6 @@ watch(
   { immediate: true },
 )
 
-async function selectLibraryDir() {
-  if (store.config === undefined) {
-    return
-  }
-
-  if (isMobile.value) {
-    pathFieldRef.value?.openModal()
-    return
-  }
-
-  try {
-    const selectedDirPath = await open({ directory: true })
-    if (selectedDirPath === null) {
-      return
-    }
-
-    store.config.downloadDir = selectedDirPath
-    await store.saveConfigNow()
-    await store.refreshDownloadedComics()
-    message.success('书库路径已更新，导出同位置')
-  } catch (e) {
-    console.warn('Native folder picker failed or unsupported, opening modal:', e)
-    pathFieldRef.value?.openModal()
-  }
-}
-
-async function showLibraryDirInFileManager() {
-  if (store.config === undefined) {
-    return
-  }
-  const result = await commands.showPathInFileManager(store.config.downloadDir)
-  if (result.status === 'error') {
-    console.error(result.error)
-  }
-}
-
-function extractIds(elements: Element[]): number[] {
-  return elements
-    .map((element) => element.getAttribute('data-key'))
-    .filter(Boolean)
-    .map(Number)
-}
-
-function updateSelectedIds({
-  store: {
-    changed: { added, removed },
-  },
-}: SelectionEvent) {
-  extractIds(added).forEach((id) => selectedIds.value.add(id))
-  extractIds(removed).forEach((id) => selectedIds.value.delete(id))
-}
-
-function unselectAll({ event, selection }: SelectionEvent) {
-  if (!event?.ctrlKey && !event?.metaKey) {
-    selection.clearSelection()
-    selectedIds.value.clear()
-  }
-}
-
 function handleCheckboxClick(comic: Comic) {
   if (checkedIds.value.has(comic.id)) {
     checkedIds.value.delete(comic.id)
@@ -381,14 +162,7 @@ function handleCheckboxClick(comic: Comic) {
   }
 }
 
-function handleContextMenu(comic: Comic) {
-  if (selectedIds.value.has(comic.id)) {
-    return
-  }
 
-  selectedIds.value.clear()
-  selectedIds.value.add(comic.id)
-}
 
 const exporting = ref(false)
 
@@ -486,7 +260,6 @@ async function deleteDownloadedComics() {
         }
       }
       checkedIds.value.clear()
-      selectedIds.value.clear()
       await store.refreshDownloadedComics()
       if (failedCount > 0) {
         message.warning(`${failedCount} 本未能删除`)
@@ -567,11 +340,8 @@ async function deleteDownloadedComics() {
       </section>
       <div class="library-toolbar">
         <PathField
-          ref="pathFieldRef"
           v-model:value="store.config.downloadDir"
-          label="漫画书库"
-          @choose="selectLibraryDir"
-          @open="showLibraryDirInFileManager" />
+          label="漫画书库" />
         <div class="library-toolbar-buttons"><n-button size="small" :loading="loading" @click="refreshLibrary">刷新书库</n-button><update-downloaded-comics-button /></div>
       </div>
       <div class="library-actions select-none">
@@ -588,7 +358,6 @@ async function deleteDownloadedComics() {
         </div>
         <div class="export-format-actions">
           <n-button
-            v-if="isMobile"
             class="export-format-button"
             size="small"
             @click="toggleSelectAll">
@@ -630,13 +399,7 @@ async function deleteDownloadedComics() {
           </n-button>
         </div>
       </div>
-      <SelectionArea
-        class="flex flex-col overflow-auto box-border px-2 selection-container mb-2"
-        ref="selectionAreaRef"
-        :options="{ selectables: isMobile ? '' : '.selectable', features: { deselectOnBlur: true } }"
-        @contextmenu="showDropdown"
-        @move="updateSelectedIds"
-        @start="unselectAll">
+      <div class="flex flex-col overflow-auto box-border px-2 selection-container mb-2">
         <div v-if="loading && currentPageComics.length === 0" class="library-empty">
           <n-spin size="small" />
           <strong>正在读取本地库存…</strong>
@@ -653,13 +416,12 @@ async function deleteDownloadedComics() {
           v-for="comic in currentPageComics"
           :key="comic.id"
           :data-key="comic.id"
-          :class="['selectable mb-2', selectedIds.has(comic.id) ? 'selected shadow-md' : 'hover:bg-gray-1']"
+          class="mb-2"
           :comic="comic"
           :checked="checkedIds.has(comic.id)"
-          @toggle-check="handleCheckboxClick"
-          @card-contextmenu="handleContextMenu" />
+          @toggle-check="handleCheckboxClick" />
         </div>
-      </SelectionArea>
+      </div>
 
       <n-pagination
         class="box-border p-2 pt-0 mt-auto"
@@ -668,33 +430,7 @@ async function deleteDownloadedComics() {
         @update:page="currentPage = $event" />
     </div>
 
-    <n-dropdown
-      placement="bottom-start"
-      trigger="manual"
-      :x="dropdownX"
-      :y="dropdownY"
-      :options="dropdownOptions"
-      :show="dropdownShowing"
-      :on-clickoutside="closeDropdown" />
 
-    <!-- 桌面端拖放导入提示层 -->
-    <div v-if="dragActive" class="drop-overlay">
-      <div class="drop-overlay-card">
-        <PhPlus :size="36" weight="bold" />
-        <strong>松手导入 CBZ</strong>
-        <span>支持 .cbz 文件与漫画文件夹</span>
-      </div>
-    </div>
-
-    <!-- 移动端导入 CBZ / 目录文件选择弹窗 -->
-    <PathEditDialog
-      v-model:show="showImportModal"
-      :title="importMode === 'file' ? '选择漫画压缩包 (.cbz)' : '选择漫画文件夹'"
-      :current-path="store.config?.downloadDir || ''"
-      :mode="importMode"
-      :create-on-confirm="false"
-      :file-extensions="importMode === 'file' ? ['.cbz'] : []"
-      @confirm="(path) => executeImport([path])" />
   </div>
 </template>
 
@@ -985,34 +721,6 @@ async function deleteDownloadedComics() {
   50% { transform: scale(1.2); opacity: 1; }
   100% { transform: scale(0.9); opacity: 0.7; }
 }
-
-.drop-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 3000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(251, 114, 153, 0.08);
-  backdrop-filter: blur(1px);
-  pointer-events: none;
-}
-
-.drop-overlay-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 36px 56px;
-  color: #b73963;
-  background: #ffffff;
-  border: 2px dashed #fb7299;
-  border-radius: 16px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.12);
-}
-
-.drop-overlay-card strong { font-size: 16px; color: #18191c; }
-.drop-overlay-card span { font-size: 12px; color: #61666d; }
 
 .transfers-container {
   min-height: 0;
