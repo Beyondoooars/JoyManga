@@ -120,10 +120,13 @@ pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> Vec<Comic> {
             }
             for other_ch in other.chapter_infos {
                 if other_ch.is_downloaded == Some(true) {
+                    // 只按 chapter_id 认定同一章。order 只是展示序号：服务端增减章节会让
+                    // 它整体偏移，外部导入的 ComicInfo 也可能出现重复 Number；用它兜底
+                    // 会把不同章节当成同一章，导致已下载标记与文件路径串位。
                     if let Some(base_ch) = base_comic
                         .chapter_infos
                         .iter_mut()
-                        .find(|c| c.chapter_id == other_ch.chapter_id || c.order == other_ch.order)
+                        .find(|c| c.chapter_id == other_ch.chapter_id)
                     {
                         base_ch.is_downloaded = Some(true);
                         if base_ch.chapter_download_dir.is_none() {

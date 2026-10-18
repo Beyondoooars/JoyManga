@@ -113,7 +113,9 @@ async function syncFavoriteFolder() {
       message.error(formatCommandError(result.error))
       return
     }
-    await getFavourite(0, 1, 'FavoriteTime')
+    // 同步后只刷新当前视图：回到「全部/第 1 页/默认排序」会把用户正在看的
+    // 收藏夹、页码和排序全部重置掉。
+    await getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
     message.success('收藏夹已同步')
   } catch (error) {
     console.error(error)

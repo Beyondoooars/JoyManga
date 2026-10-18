@@ -4,7 +4,7 @@ use std::{
 };
 
 use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockDecrypt, KeyInit};
 use aes::Aes256;
 use anyhow::{anyhow, ensure, Context};
 use base64::engine::general_purpose;
@@ -216,25 +216,6 @@ pub(crate) fn create_dir_all_beneath(root: &Path, relative: &Path) -> anyhow::Re
 // 计算MD5哈希并返回十六进制字符串
 pub fn md5_hex(data: &str) -> String {
     format!("{:x}", md5::compute(data))
-}
-
-/// 使用 AES-256-ECB 加密（自动 PKCS#7 填充），返回 base64 字符串
-///
-/// `key` 必须是 32 字节；`md5_hex` 的返回值恰好满足这一长度。
-#[allow(dead_code)]
-pub fn aes256_ecb_encrypt_base64(key: &[u8], plain: &[u8]) -> String {
-    let cipher = Aes256::new(GenericArray::from_slice(key));
-    let mut data = plain.to_vec();
-    let pad = 16 - data.len() % 16;
-    data.extend(std::iter::repeat_n(pad as u8, pad));
-
-    let mut encrypted = Vec::with_capacity(data.len());
-    for block in data.chunks(16) {
-        let mut block = GenericArray::clone_from_slice(block);
-        cipher.encrypt_block(&mut block);
-        encrypted.extend_from_slice(&block);
-    }
-    general_purpose::STANDARD.encode(encrypted)
 }
 
 /// 使用 AES-256-ECB 解密 base64 数据（自动去除 PKCS#7 填充）

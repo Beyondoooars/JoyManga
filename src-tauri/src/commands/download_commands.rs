@@ -21,6 +21,23 @@ use crate::utils;
 static DOWNLOAD_ALL_FAVORITES_RUNNING: AtomicBool = AtomicBool::new(false);
 static UPDATE_DOWNLOADED_COMICS_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// 「仅 Wi-Fi 下载」的统一入口检查。
+///
+/// 所有**新建**下载任务的命令都必须经过这里：单章、整本、批量收藏、库存更新。
+/// 计费网络下直接拒绝并给出可执行提示，而不是让任务创建后立刻失败
+/// （那样用户看不懂原因）。恢复已排队的任务不在此列。
+fn ensure_download_allowed(app: &AppHandle, err_title: &str) -> CommandResult<()> {
+    let only_wifi = app.get_config().read().download_only_wifi;
+    if let Err(reason) = crate::network_state::download_allowed(only_wifi) {
+        return Err(CommandError::with_kind(
+            err_title,
+            anyhow!(reason),
+            CommandErrorKind::Network,
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct SingleFlightGuard<'a>(&'a AtomicBool);
 
 impl<'a> SingleFlightGuard<'a> {
@@ -89,16 +106,7 @@ pub fn create_download_task(
     let download_manager = app.get_download_manager();
     let comic_title = comic.name.clone();
 
-    // 仅 Wi-Fi 下载：计费网络下直接拒绝并给出可执行提示，
-    // 而不是让任务创建后立刻失败（那样用户看不懂原因）。
-    let only_wifi = app.get_config().read().download_only_wifi;
-    if let Err(reason) = crate::network_state::download_allowed(only_wifi) {
-        return Err(CommandError::with_kind(
-            "无法开始下载",
-            anyhow!(reason),
-            CommandErrorKind::Network,
-        ));
-    }
+    ensure_download_allowed(&app, "无法开始下载")?;
 
     if let Some(cbz_mode) = cbz_mode {
         app.state::<ArchiveIntentStore>().set(comic.id, cbz_mode);
@@ -171,6 +179,8 @@ pub async fn download_comic(
     cbz_mode: Option<CbzMode>,
 ) -> CommandResult<()> {
     let download_manager = app.get_download_manager();
+
+    ensure_download_allowed(&app, "一键下载漫画失败")?;
 
     let comic = utils::get_comic(app.clone(), aid)
         .await
@@ -279,6 +289,7 @@ fn format_batch_errors(action_name: &str, batch_errors: Vec<String>) -> CommandR
 #[tauri::command(async)]
 #[specta::specta]
 pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> CommandResult<()> {
+    ensure_download_allowed(&app, "下载收藏夹失败")?;
     let _single_flight = SingleFlightGuard::acquire(&DOWNLOAD_ALL_FAVORITES_RUNNING)
         .ok_or_else(|| CommandError::from("下载整个收藏夹失败", anyhow!("已有同类任务正在运行")))?;
     let config = app.get_config();
@@ -418,6 +429,7 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
 #[tauri::command(async)]
 #[specta::specta]
 pub async fn update_downloaded_comics(app: AppHandle) -> CommandResult<()> {
+    ensure_download_allowed(&app, "更新本地库存失败")?;
     let _single_flight = SingleFlightGuard::acquire(&UPDATE_DOWNLOADED_COMICS_RUNNING)
         .ok_or_else(|| CommandError::from("更新本地库存失败", anyhow!("已有同类任务正在运行")))?;
     let config = app.get_config();

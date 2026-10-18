@@ -30,6 +30,7 @@ src/components.d.ts
 
 # Distribution binaries
 dist-apk/
+dist-release/
 artifacts_latest/
 *.exe
 __pycache__/
@@ -38,9 +39,6 @@ docs/handoffs/
 
 # 内部文档（调研、审查、迁移记录）保留在本地，不进入公开仓库
 .internal-docs/
-verify-report.txt
-env-report.txt
-verify-report-*.txt
 
 # 运行时派生数据（书库封面缩略图缓存）
 .covers/

@@ -28,3 +28,15 @@ test('library and export remain unified while an unsaved library edit survives a
   assert.equal(merged.downloadDir, 'new-library')
   assert.equal(merged.exportDir, 'new-library')
 })
+
+test('server-owned fields never make the local config look dirty', () => {
+  // 后端会强制 exportDir = downloadDir，并在 Android 初始化时置位 androidStorageInitialized。
+  // 这些派生字段若参与脏检查，会在每次配置事件后触发一次无意义的保存。
+  const base = { revision: 1, schemaVersion: 1, downloadDir: 'lib', exportDir: 'lib', androidStorageInitialized: false }
+  const server = { ...base, revision: 2, androidStorageInitialized: true }
+  assert.equal(hasConfigChanges(server, base), false)
+
+  // exportDir 与 downloadDir 不一致时也不应被视为用户改动
+  const drifted = { ...base, exportDir: 'stale-export' }
+  assert.equal(hasConfigChanges(drifted, base), false)
+})

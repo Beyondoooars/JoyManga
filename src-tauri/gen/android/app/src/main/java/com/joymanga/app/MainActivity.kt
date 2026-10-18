@@ -355,23 +355,18 @@ class MainActivity : TauriActivity() {
                 activeDownloads = active.coerceAtLeast(0); downloadSpeed = speed.take(80)
                 downloadPagesCurrent = current.coerceAtLeast(0)
                 downloadPagesTotal = total.coerceAtLeast(0)
+                // 用户第一次拒绝后不再骚扰，但每次升级/新会话仍允许再试一次：
+                // 记的是"已询问过的应用版本"，而不是永久开关。
                 val prefs = getSharedPreferences("joymanga_permissions", MODE_PRIVATE)
+                val version = appVersionName()
+                val askedVersion = prefs.getString("notifications_prompted_version", null)
                 if (activeDownloads > 0 && Build.VERSION.SDK_INT >= 33 &&
                     checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-                    !prefs.getBoolean("notifications_prompted", false)) {
-                    prefs.edit().putBoolean("notifications_prompted", true).apply()
+                    askedVersion != version) {
+                    prefs.edit().putString("notifications_prompted_version", version).apply()
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
                 }
                 updateDownloadService()
-            }
-        }
-        @JavascriptInterface fun hasAllFilesAccess(): Boolean = Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
-        @JavascriptInterface fun requestAllFilesAccess() {
-            runOnUiThread {
-                if (Build.VERSION.SDK_INT >= 30) {
-                    try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).setData(Uri.parse("package:$packageName"))) }
-                    catch (_: Exception) { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
-                }
             }
         }
         /** 阅读时保持屏幕常亮；关闭后恢复系统默认息屏策略。 */
@@ -386,5 +381,12 @@ class MainActivity : TauriActivity() {
             runOnUiThread { volumeKeyPaging = enabled }
         }
     }
+    /** 当前应用版本名（用于"每个版本最多提示一次通知权限"）。 */
+    private fun appVersionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+    } catch (_: Exception) {
+        ""
+    }
+
     companion object { private const val PICK_DOCUMENTS = 3101 }
 }

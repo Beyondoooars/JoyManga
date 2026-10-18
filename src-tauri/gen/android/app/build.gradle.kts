@@ -45,7 +45,9 @@ android {
     compileSdk = 34
     namespace = "com.joymanga.app"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "true"
+        // release 包默认禁止明文 HTTP（应用只访问 HTTPS 接口）；debug 包在下方单独放开，
+        // 便于本地调试抓包。用 manifestPlaceholders 让 manifest 里的取值随构建类型变化。
+        manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.joymanga.app"
         minSdk = 24
         targetSdk = 34

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.2.4",
   "type": "module",
-  "description": "面向 Windows / Android / Linux / macOS 的漫画下载与本地阅读工具",
+  "description": "面向 Windows / Android 的漫画下载与本地阅读工具",
   "author": "Beyondoooars",
   "license": "MIT",
   "repository": {

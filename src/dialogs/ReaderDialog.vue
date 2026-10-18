@@ -215,6 +215,9 @@ const error = ref<string | null>(null)
 const chapterData = ref<ChapterReaderData | null>(null)
 const imageCache = ref<Map<string, string>>(new Map())
 const byteCache = new ImageByteCache(isAndroid ? 64 * 1024 * 1024 : 128 * 1024 * 1024)
+// 阅读进度写入防抖（见 saveProgress / flushProgress）
+let progressSaveTimer: ReturnType<typeof setTimeout> | undefined
+let pendingProgress: ReadingProgress | undefined
 let activeImageReads = 0
 const imageReadWaiters: Array<() => void> = []
 async function acquireImageRead() {
@@ -259,11 +262,37 @@ function progressSnapshot(): ReadingProgress | undefined {
 
 function saveProgress() {
   const progress = progressSnapshot()
-  if (progress) store.saveReadingProgress(progress)
+  if (!progress) return
+  // 每次翻页都写会做「排序 1000 条 + 全量 JSON.stringify + 同步 localStorage」，
+  // 长阅读时会拖慢翻页。这里防抖 300ms，并在关闭阅读器/切章时立即落盘。
+  pendingProgress = progress
+  if (progressSaveTimer !== undefined) clearTimeout(progressSaveTimer)
+  progressSaveTimer = setTimeout(flushProgress, 300)
 }
 
-function imageLoaded(path: string, event: Event) {
+/** 立即写入尚未落盘的阅读进度（防抖窗口内的最后一次改动）。 */
+function flushProgress() {
+  if (progressSaveTimer !== undefined) {
+    clearTimeout(progressSaveTimer)
+    progressSaveTimer = undefined
+  }
+  if (pendingProgress) {
+    store.saveReadingProgress(pendingProgress)
+    pendingProgress = undefined
+  }
+}
+
+/**
+ * 图片解码完成：按**解码后内存**更新 LRU 记账。
+ *
+ * 路径取自 `img` 元素自身绑定的 `src` 对应的页面，而不是 `currentImagePath`：
+ * 快速翻页时上一张图的 load 事件可能在新页已经渲染后才到达，用当前页路径会把
+ * 尺寸记到错误的页上，进而错误地逐出仍在使用的缓存。
+ */
+function onImageLoaded(event: Event) {
   const image = event.target as HTMLImageElement
+  const path = image.dataset.imagePath
+  if (!path) return
   for (const evicted of byteCache.resize(path, image.naturalWidth * image.naturalHeight * 4, pinnedPages())) imageCache.value.delete(evicted)
 }
 
@@ -330,7 +359,7 @@ function preloadCurrentRange() {
 }
 
 async function loadChapter(comicId: number, chapterId: number, page = 1) {
-  saveProgress()
+  flushProgress()
   const generation = ++chapterGeneration
   loading.value = true
   error.value = null
@@ -673,7 +702,7 @@ watch(
     if (target) {
       loadChapter(target.comicId, target.chapterId, target.page ?? 1)
     } else {
-      saveProgress()
+      flushProgress()
       chapterGeneration++
       imageCache.value.clear()
       byteCache.clear()
@@ -699,7 +728,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  saveProgress()
+  flushProgress()
   keepScreenOnWatch?.()
   keepScreenOnWatch = undefined
   setKeepScreenOn(false)
@@ -861,10 +890,12 @@ onUnmounted(() => {
                 @dblclick.stop="onViewerDoubleClick">
                 <img
                   v-if="currentImagePath && imageCache.has(currentImagePath)"
+                  :key="currentImagePath"
+                  :data-image-path="currentImagePath"
                   :src="imageCache.get(currentImagePath)"
                   :alt="`第 ${currentPage} 页`"
                   class="reader-img"
-                  @load="currentImagePath && imageLoaded(currentImagePath, $event)"
+                  @load="onImageLoaded($event)"
                   @error="currentImagePath && markImageError(currentImagePath)"
                   :draggable="false" />
                 <div v-else-if="currentImagePath && imageErrors.has(currentImagePath)" class="image-skeleton image-error">

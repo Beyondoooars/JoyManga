@@ -31,6 +31,8 @@ pub fn set_network_metered(metered: bool) -> CommandResult<()> {
 #[cfg(target_os = "windows")]
 mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{self, Sender};
+    use std::sync::OnceLock;
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -42,11 +44,38 @@ mod imp {
 
     /// 记录当前是否已置位，避免重复调用（每次调用都会重置系统计时器）。
     static ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// 专用常亮线程的命令通道。
+    ///
+    /// `SetThreadExecutionState` 是**线程级**状态：只影响调用它的那个线程，
+    /// 而 Tauri 的 async 命令运行在会复用/回收的 tokio 工作线程上。若直接在
+    /// 命令里调用，置位后线程一换就失效。因此固定用一个常驻线程执行。
+    static KEEP_AWAKE_TX: OnceLock<Sender<bool>> = OnceLock::new();
 
-    pub fn apply(enabled: bool) {
-        let already = ACTIVE.swap(enabled, Ordering::SeqCst);
-        if already == enabled {
-            return;
+    fn channel() -> &'static Sender<bool> {
+        KEEP_AWAKE_TX.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<bool>();
+            std::thread::Builder::new()
+                .name("keep-screen-on".into())
+                .spawn(move || {
+                    // 线程创建后先确保 ES_CONTINUOUS 已置位，后续只切换显示器保持位。
+                    apply_on_this_thread(true, false);
+                    while let Ok(enabled) = rx.recv() {
+                        apply_on_this_thread(enabled, true);
+                    }
+                    // 退出时恢复系统默认息屏策略
+                    apply_on_this_thread(false, false);
+                })
+                .expect("创建常亮线程失败");
+            tx
+        })
+    }
+
+    fn apply_on_this_thread(enabled: bool, track: bool) {
+        if track {
+            let already = ACTIVE.swap(enabled, Ordering::SeqCst);
+            if already == enabled {
+                return;
+            }
         }
         let flags = if enabled {
             ES_CONTINUOUS | ES_DISPLAY_REQUIRED
@@ -56,6 +85,14 @@ mod imp {
         // SAFETY: SetThreadExecutionState 只接受位标志，无指针参数，失败仅返回 0。
         unsafe {
             SetThreadExecutionState(flags);
+        }
+    }
+
+    pub fn apply(enabled: bool) {
+        // 通道发送失败说明常亮线程已退出（不应发生）；此时退化为直接调用，
+        // 至少保证当前线程不必等锁。
+        if channel().send(enabled).is_err() {
+            apply_on_this_thread(enabled, true);
         }
     }
 }

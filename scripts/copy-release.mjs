@@ -5,8 +5,12 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const rootDir = path.resolve(__dirname, '..')
 
-const targetDir = 'D:\\Toolkits\\JoyManga'
 const srcExe = path.join(rootDir, 'src-tauri', 'target', 'release', 'joymanga.exe')
+
+// 目标目录：优先取环境变量，其次是 `pnpm release -- <dir>` 传入的位置。
+// 不再内置任何开发者本机的绝对路径——公开仓库里每个人都能直接运行。
+const cliTarget = process.argv.slice(2).find((arg) => !arg.startsWith('-'))
+const targetDir = path.resolve(cliTarget ?? process.env.JOYMANGA_RELEASE_DIR ?? path.join(rootDir, 'dist-release'))
 
 if (!fs.existsSync(srcExe)) {
   console.error(`[copy-release] Source file not found: ${srcExe}`)
@@ -29,8 +33,8 @@ try {
   throw err
 }
 
-// Clean up any installer files in targetDir to ensure strictly green portable edition
-const existingSetupFiles = fs.readdirSync(targetDir).filter(f => f.endsWith('-setup.exe') || f.endsWith('.msi'))
+// 清理目标目录里遗留的安装包，保证这里是纯绿色便携版
+const existingSetupFiles = fs.readdirSync(targetDir).filter((f) => f.endsWith('-setup.exe') || f.endsWith('.msi'))
 for (const file of existingSetupFiles) {
   try {
     fs.unlinkSync(path.join(targetDir, file))

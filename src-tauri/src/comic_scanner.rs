@@ -643,11 +643,15 @@ pub(crate) fn read_chapter_identity_from_archive<R: std::io::Read + std::io::See
 }
 
 /// 解析整本合并归档条目名中的话序号前缀，如 `[02] 第2话/0001.jpg` -> Some(2)。
+///
+/// 两侧必须保持一致：写入端用 `[{order:0width$}]`（最少 2 位，话数超过 99 时 3 位，
+/// 超过 999 时自然变成 4 位）。早期这里硬编码只接受 2~3 位，导致 >999 话的整本
+/// 归档在阅读/切片/导出时全都找不到本话页面。现在接受 2~6 位，并统一按十进制解析。
 pub(crate) fn bracket_order(entry_name: &str) -> Option<i64> {
     let rest = entry_name.strip_prefix('[')?;
     let close = rest.find(']')?;
     let digits = &rest[..close];
-    if !(digits.len() == 2 || digits.len() == 3) || !digits.chars().all(|c| c.is_ascii_digit()) {
+    if !(2..=6).contains(&digits.len()) || !digits.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     digits.parse().ok()
@@ -901,6 +905,16 @@ mod merged_archive_tests {
         assert_eq!(bracket_order("[1] x/1.jpg"), None);
         assert_eq!(bracket_order("0001.jpg"), None);
         assert_eq!(bracket_order("[ab] x/1.jpg"), None);
+    }
+
+    #[test]
+    fn bracket_order_handles_more_than_999_chapters() {
+        // 写入端 `[{order:0width$}]` 在话数超过 999 时会产生 4 位前缀，
+        // 解析端必须能认出来，否则整本归档在阅读/切片/导出时找不到本话页面。
+        assert_eq!(bracket_order("[999] x/1.jpg"), Some(999));
+        assert_eq!(bracket_order("[1000] 千话/0001.jpg"), Some(1000));
+        assert_eq!(bracket_order("[12345] x/1.jpg"), Some(12345));
+        assert_eq!(bracket_order("[1234567] x/1.jpg"), None);
     }
 
     #[test]

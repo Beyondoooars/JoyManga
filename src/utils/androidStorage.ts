@@ -13,8 +13,6 @@ declare global {
       exportDocuments(requestId: string, path: string): void
       downloadStatus(active: number, speed: string, current: number, total: number): void
       exitApp(): void
-      hasAllFilesAccess(): boolean
-      requestAllFilesAccess(): void
       setKeepScreenOn(enabled: boolean): void
       setVolumeKeyPaging(enabled: boolean): void
     }
@@ -25,15 +23,22 @@ function request(action: (id: string) => void): Promise<MobileResult> {
   if (!isAndroid || !window.JmAndroid) return Promise.reject(new Error('Android 文件服务尚未就绪，请重新打开应用'))
   const requestId = crypto.randomUUID()
   return new Promise((resolve, reject) => {
+    // 原生侧若因 Activity 被系统回收而丢失了 pendingPicker，就不会再回传结果。
+    // 没有超时的话调用方（导入/备份/导出）会永久挂起，界面停在 loading。
+    const timeout = setTimeout(() => {
+      window.removeEventListener('jm-mobile-result', listener)
+      reject(new Error('等待系统文件选择器超时，请重试'))
+    }, 5 * 60 * 1000)
     const listener = (event: Event) => {
       const result = (event as CustomEvent<MobileResult>).detail
       if (result.requestId !== requestId) return
+      clearTimeout(timeout)
       window.removeEventListener('jm-mobile-result', listener)
       if (result.error) reject(new Error(result.error))
       else resolve(result)
     }
     window.addEventListener('jm-mobile-result', listener)
-    try { action(requestId) } catch (error) { window.removeEventListener('jm-mobile-result', listener); reject(error) }
+    try { action(requestId) } catch (error) { clearTimeout(timeout); window.removeEventListener('jm-mobile-result', listener); reject(error) }
   })
 }
 
