@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 import { useStore } from '../../../store.ts'
 import { formatCommandError } from '../../../utils/errors.ts'
 import { commands, Comic } from '../../../bindings.ts'
-import { PhBookOpen, PhCheckCircle, PhFilePdf, PhFileZip, PhFolderOpen, PhTrash } from '@phosphor-icons/vue'
+import { PhBookOpen, PhCheckCircle, PhFileZip, PhFolderOpen, PhTrash } from '@phosphor-icons/vue'
 import IconButton from '../../../components/IconButton.vue'
 import { useMessage } from 'naive-ui'
 import { getErrorMessage } from '../../../utils/errors.ts'
@@ -43,15 +43,13 @@ async function showComicDir(comic: Comic) {
 
 const exportingIds = ref<Set<number>>(new Set())
 
-async function exportComic(comic: Comic, exportType: 'cbz' | 'pdf') {
+async function exportComic(comic: Comic) {
   // 防重：导出是长任务，连点会重复创建事件与文件
   if (exportingIds.value.has(comic.id)) return
   exportingIds.value.add(comic.id)
   store.progressesPaneTabName = 'export'
   try {
-    const result = exportType === 'cbz'
-      ? await commands.exportCbz(comic)
-      : await commands.exportPdf(comic)
+    const result = await commands.exportCbz(comic)
     if (result.status === 'error') {
       console.error(result.error)
       message.error(`${comic.name} 导出失败：${result.error.err_message}`)
@@ -65,11 +63,7 @@ async function exportComic(comic: Comic, exportType: 'cbz' | 'pdf') {
 }
 
 async function exportCbz(comic: Comic) {
-  await exportComic(comic, 'cbz')
-}
-
-async function exportPdf(comic: Comic) {
-  await exportComic(comic, 'pdf')
+  await exportComic(comic)
 }
 </script>
 
@@ -111,9 +105,6 @@ async function exportPdf(comic: Comic) {
           </IconButton>
           <IconButton class="ml-auto" title="导出cbz" @click="exportCbz(comic)">
             <PhFileZip :size="18" />
-          </IconButton>
-          <IconButton title="导出pdf" @click="exportPdf(comic)">
-            <PhFilePdf :size="18" />
           </IconButton>
         </div>
       </div>

@@ -416,7 +416,7 @@ export const useStore = defineStore('store', () => {
   interface ExportProgressItem {
     // 与 ExportProgresses.vue 的 ProgressData 保持同形
     uuid: string
-    exportType: 'cbz' | 'pdf'
+    exportType: 'cbz'
     state: 'Processing' | 'Error' | 'End'
     comicTitle: string
     current: number
@@ -461,61 +461,7 @@ export const useStore = defineStore('store', () => {
           progress.indicator = 'CBZ创建完成'
         }
       })
-      const pdfUnlisten = await events.exportPdfEvent.listen(({ payload }) => {
-        if (payload.event === 'CreateStart') {
-          const { uuid, comicTitle, total } = payload.data
-          exportProgresses.value.set(uuid, {
-            uuid,
-            exportType: 'pdf',
-            state: 'Processing',
-            comicTitle,
-            current: 0,
-            total,
-            percentage: 0,
-            indicator: 'PDF创建中',
-          })
-          return
-        }
-        if (payload.event === 'MergeStart') {
-          const { uuid, comicTitle } = payload.data
-          exportProgresses.value.set(uuid, {
-            uuid,
-            exportType: 'pdf',
-            state: 'Processing',
-            comicTitle,
-            current: 0,
-            total: 1,
-            percentage: 0,
-            indicator: 'PDF合并中',
-          })
-          return
-        }
-        const uuid = payload.data.uuid
-        const progress = exportProgresses.value.get(uuid)
-        if (!progress) return
-        if (payload.event === 'CreateProgress') {
-          progress.current = payload.data.current
-          progress.percentage = progress.total === 0 ? 0 : (progress.current / progress.total) * 100
-          progress.indicator = `PDF创建中 ${progress.current}/${progress.total}`
-        } else if (payload.event === 'CreateError') {
-          progress.state = 'Error'
-          progress.indicator = '创建PDF失败'
-        } else if (payload.event === 'CreateEnd') {
-          progress.state = 'End'
-          progress.chapterExportDir = payload.data.chapterExportDir
-          progress.indicator = 'PDF创建完成'
-        } else if (payload.event === 'MergeError') {
-          progress.state = 'Error'
-          progress.indicator = 'PDF合并失败'
-        } else if (payload.event === 'MergeEnd') {
-          progress.state = 'End'
-          progress.current = progress.total
-          progress.percentage = 100
-          progress.chapterExportDir = payload.data.chapterExportDir
-          progress.indicator = 'PDF合并完成'
-        }
-      })
-      exportUnlisteners.push(cbzUnlisten, pdfUnlisten)
+      exportUnlisteners.push(cbzUnlisten)
     })().catch((error) => {
       exportUnlisteners.splice(0).forEach((unlisten) => unlisten())
       exportListenerPromise = undefined

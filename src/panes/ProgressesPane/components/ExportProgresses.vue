@@ -12,7 +12,7 @@ import { useDropdown } from '../../../composables/useDropdown.ts'
 // 已完成项只在本次会话内保留，超过上限时淘汰最早的记录，避免长期运行无限增长。
 export interface ProgressData {
   uuid: string
-  exportType: 'cbz' | 'pdf'
+  exportType: 'cbz'
   state: 'Processing' | 'Error' | 'End'
   comicTitle: string
   current: number
