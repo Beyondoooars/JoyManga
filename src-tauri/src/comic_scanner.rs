@@ -195,7 +195,8 @@ fn render_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
         .with_guessed_format()
         .ok()?;
     let mut limits = image::Limits::default();
-    limits.max_alloc = Some(if cfg!(target_os = "android") { 64 } else { 128 } * 1024 * 1024);
+    // Android 设备内存更紧张，缩略图解码上限固定 64 MB
+    limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     let image = reader.decode().ok()?;
     let mut thumbnail = std::io::Cursor::new(Vec::new());
