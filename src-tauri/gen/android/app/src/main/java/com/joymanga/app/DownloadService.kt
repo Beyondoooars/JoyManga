@@ -43,9 +43,11 @@ class DownloadService : Service() {
         val active = intent?.getIntExtra("active", 0) ?: 0
         if (active <= 0) { stopSelf(); return START_NOT_STICKY }
 
-        val total = intent.getIntExtra("total", 0)
-        val current = intent.getIntExtra("current", 0)
-        val speed = intent.getStringExtra("speed").orEmpty()
+        // 走到这里 active > 0，说明 intent 非空；用局部非空引用避免可空接收者报错。
+        val extras = intent ?: run { stopSelf(); return START_NOT_STICKY }
+        val total = extras.getIntExtra("total", 0)
+        val current = extras.getIntExtra("current", 0)
+        val speed = extras.getStringExtra("speed").orEmpty()
         val notification = buildNotification(active, current, total, speed, done = false)
         if (Build.VERSION.SDK_INT >= 29) startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else startForeground(ID, notification)
