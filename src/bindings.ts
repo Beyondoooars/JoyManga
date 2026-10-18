@@ -393,30 +393,6 @@ async removeLibraryComic(comicId: number, deleteFiles: boolean) : Promise<Result
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
-},
-async listDirectoryContents(path: string | null, includeFiles: boolean | null) : Promise<Result<DirectoryListing, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_directory_contents", { path, includeFiles }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async createDirectory(path: string) : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_directory", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async validateSelectedPath(path: string, mode: string) : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("validate_selected_path", { path, mode }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
 }
 }
 
@@ -542,7 +518,6 @@ volumeKeyPaging?: boolean;
  */
 downloadOnlyWifi?: boolean }
 export type ConfigChangedEvent = { config: Config }
-export type DirectoryListing = { currentPath: string; parentPath: string | null; subdirectories: string[]; files: string[]; exists: boolean; writable: boolean }
 export type DownloadAllFavoritesEvent = { event: "GetFavoritesStart" } | { event: "GetComicsProgress"; data: { current: number; total: number } } | { event: "StartCreateDownloadTasks"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreatingDownloadTask"; data: { comicId: number; current: number } } | { event: "EndCreateDownloadTasks"; data: { comicId: number } } | { event: "GetComicsEnd" }
 export type DownloadFormat = "Jpeg" | "Png" | "Webp" | 
 /**

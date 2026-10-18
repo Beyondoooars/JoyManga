@@ -2,7 +2,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { PhFolder, PhGlobe, PhWrench, PhInfo, PhX, PhArrowClockwise, PhCaretDown, PhBookOpen } from '@phosphor-icons/vue'
 import { getVersion } from '@tauri-apps/api/app'
-import { open } from '@tauri-apps/plugin-dialog'
 import { useDialog, useMessage } from 'naive-ui'
 import { commands, type CbzMode, type ImageDomainPreset, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection } from '../bindings.ts'
 import { useStore } from '../store.ts'
@@ -128,17 +127,6 @@ async function checkNetwork() {
   finally { if (current === generation) checking.value = false }
 }
 
-async function chooseDirectory(kind: 'downloadDir') {
-  try {
-    const selected = await open({ directory: true })
-    if (typeof selected === 'string' && store.config) store.config[kind] = selected
-  } catch (error) { message.error(`选择目录失败：${getErrorMessage(error)}`) }
-}
-async function openDirectory(kind: 'downloadDir') {
-  if (!store.config) return
-  const result = await commands.showPathInFileManager(store.config[kind])
-  if (result.status === 'error') message.error(result.error.err_message)
-}
 async function dataAction(name: string, action: () => Promise<void>) {
   if (dataBusy.value) return
   dataBusy.value = name
@@ -152,10 +140,8 @@ async function backup() {
     await store.saveConfigNow()
     const result = await commands.backupAppData()
     if (result.status === 'error') throw new Error(result.error.err_message)
-    if (isAndroid) {
-      const published = await exportToAndroidDownloads(result.data)
-      if (!published.cancelled) message.success('备份已保存到系统下载')
-    } else message.success(`备份已保存：${result.data}`, { duration: 5000 })
+    const published = await exportToAndroidDownloads(result.data)
+    if (!published.cancelled) message.success('备份已保存到系统下载')
   })
 }
 async function restore() {
@@ -173,11 +159,7 @@ async function restore() {
     })
   }
   try {
-    if (isAndroid) await withAndroidSelection('backup', apply)
-    else {
-      const selected = await open({ multiple: false, filters: [{ name: '设置备份', extensions: ['json'] }] })
-      if (typeof selected === 'string') await apply([selected])
-    }
+    await withAndroidSelection('backup', apply)
   } catch (error) { dataError.value = getErrorMessage(error) }
 }
 async function clearCache() {
@@ -208,8 +190,7 @@ async function exportLogs() {
     const logs = store.logRecords.slice(-1000).map((record) => `[${record.level}] ${record.formatedLog}`)
     const result = await commands.exportLogs(logs)
     if (result.status === 'error') throw new Error(result.error.err_message)
-    if (isAndroid) await exportToAndroidDownloads(result.data.filePath)
-    else message.success(`日志已保存：${result.data.filePath}`, { duration: 5000 })
+    await exportToAndroidDownloads(result.data.filePath)
   })
 }
 </script>
@@ -225,7 +206,7 @@ async function exportLogs() {
         <section class="settings-section">
           <h3><PhFolder :size="20" aria-hidden="true" />保存位置</h3>
           <div class="setting-row">
-            <PathField v-model:value="store.config.downloadDir" label="漫画书库" @choose="chooseDirectory('downloadDir')" @open="openDirectory('downloadDir')" />
+            <PathField v-model:value="store.config.downloadDir" label="漫画书库" />
           </div>
           <div class="setting-row">
             <label class="setting-label" for="cbz-mode">下载整理</label>
@@ -272,7 +253,7 @@ async function exportLogs() {
               <div><label class="setting-label">主机</label><n-input v-model:value="store.config.proxyHost" aria-label="代理主机" placeholder="127.0.0.1" /></div>
               <div><label class="setting-label">端口</label><n-input-number :value="store.config.proxyPort" aria-label="代理端口" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
             </div>
-            <p class="settings-note">{{ isAndroid ? 'VPN 随系统生效；仅 HTTP 端口的代理工具在此设置（127.0.0.1 指本机）。' : '手动代理作用于信息与下载请求；界面封面仍走系统网络。' }}</p>
+            <p class="settings-note">VPN 随系统生效；仅 HTTP 端口的代理工具在此设置（127.0.0.1 指本机）。开启 VPN 时应用会自动跳过此代理。</p>
           </div>
         </section>
 

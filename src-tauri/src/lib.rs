@@ -100,9 +100,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             set_network_metered,
             import_local_comics,
             remove_library_comic,
-            list_directory_contents,
-            create_directory,
-            validate_selected_path,
         ])
         .events(tauri_specta::collect_events![
             DownloadSpeedEvent,

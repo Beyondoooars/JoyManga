@@ -20,7 +20,6 @@ import { watchNetworkMetered } from './utils/androidStorage.ts'
 
 const UserCenterDialog = defineAsyncComponent(() => import('./dialogs/UserCenterDialog.vue'))
 const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
-const LogDialog = defineAsyncComponent(() => import('./dialogs/LogDialog.vue'))
 const AndroidGuideDialog = defineAsyncComponent(() => import('./dialogs/AndroidGuideDialog.vue'))
 const ReaderDialog = defineAsyncComponent(() => import('./dialogs/ReaderDialog.vue'))
 const UpdateDialog = defineAsyncComponent(() => import('./dialogs/UpdateDialog.vue'))
@@ -37,12 +36,11 @@ const pageComponents: Record<CurrentTabName, Component> = {
 const store = useStore()
 const message = useMessage()
 const notification = useNotification()
-const { isMobile, isAndroid } = useIsMobile()
+const { isAndroid } = useIsMobile()
 const { checkForUpdates } = useAppUpdate()
 
 const userCenterShowing = computed({ get: () => store.userCenterShowing, set: (value: boolean) => { store.userCenterShowing = value } })
 const settingsDialogShowing = ref<boolean>(false)
-const logViewerShowing = ref<boolean>(false)
 
 const initializing = ref(false)
 const initializationError = ref('')
@@ -62,15 +60,6 @@ store.registerConfigSaveWaiter(async () => {
   }
   await configSaveQueue
 })
-
-const navigationItems: Array<{
-  name: CurrentTabName
-  label: string
-  icon: Component
-}> = [
-  { name: 'search', label: '发现', icon: PhMagnifyingGlass },
-  { name: 'downloaded', label: '本地书库', icon: PhBooks },
-]
 
 function navigateToTab(tab: CurrentTabName) {
   store.closeComicDetail()
@@ -93,10 +82,6 @@ useBackHandler(() => {
   }
   if (settingsDialogShowing.value) {
     settingsDialogShowing.value = false
-    return true
-  }
-  if (logViewerShowing.value) {
-    logViewerShowing.value = false
     return true
   }
   if (store.chapterDetailShowing) {
@@ -241,8 +226,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="appReady && store.config !== undefined" :class="['bili-app', { 'is-mobile-app': isMobile }]">
-    <!-- Bilibili Clean Header -->
+  <div v-if="appReady && store.config !== undefined" class="bili-app is-mobile-app">
+    <!-- 顶部栏：移动端只保留品牌与设置，导航在底部 -->
     <header class="bili-header" aria-label="应用主导航">
       <div class="header-left">
         <!-- Brand Logo -->
@@ -253,28 +238,10 @@ onUnmounted(() => {
           </svg>
           <span class="brand-title">JoyManga</span>
         </button>
-
-        <!-- Desktop Navigation Tabs -->
-        <nav class="header-nav">
-          <button
-            v-for="item in navigationItems"
-            :key="item.name"
-            type="button"
-            :class="['nav-link', { active: store.currentTabName === item.name && !store.chapterDetailShowing }]"
-            :aria-current="store.currentTabName === item.name && !store.chapterDetailShowing ? 'page' : undefined"
-            @click="navigateToTab(item.name)">
-            <component :is="item.icon" :size="16" weight="bold" class="nav-icon" />
-            <span>{{ item.label }}</span>
-          </button>
-        </nav>
       </div>
 
       <!-- Header Right Controls -->
       <div class="header-right">
-        <button v-if="!isMobile" type="button" class="header-icon-btn header-account-btn" title="我的账号与收藏" @click="userCenterShowing = true">
-          <PhUser :size="20" /><span>我的</span>
-        </button>
-
         <!-- Settings Action -->
         <div class="header-actions">
           <button type="button" class="header-icon-btn" title="应用设置" @click="settingsDialogShowing = true">
@@ -306,7 +273,7 @@ onUnmounted(() => {
     </main>
 
     <!-- Mobile Bottom Navigation Bar (3 Tabs: 发现, 书库(含传输), 我的) -->
-    <nav v-if="isMobile" class="mobile-nav" aria-label="移动端底部导航">
+    <nav class="mobile-nav" aria-label="移动端底部导航">
       <!-- 发现 Tab -->
       <button
         type="button"
@@ -341,7 +308,6 @@ onUnmounted(() => {
     <!-- Modals and Dialogs -->
     <UserCenterDialog v-if="userCenterShowing" v-model:showing="userCenterShowing" />
     <SettingsDialog v-if="settingsDialogShowing" v-model:showing="settingsDialogShowing" />
-    <LogDialog v-if="logViewerShowing" v-model:showing="logViewerShowing" />
     <AndroidGuideDialog v-if="store.androidGuideShowing" v-model:showing="store.androidGuideShowing" />
     <ReaderDialog v-if="store.activeReaderTarget" />
     <UpdateDialog />
@@ -367,7 +333,6 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.header-icon-btn.header-account-btn { width: auto; min-width: 70px; padding: 0 10px; gap: 6px; white-space: nowrap; flex-flow: row nowrap; }
 .bili-app {
   display: flex;
   width: 100%;
@@ -435,40 +400,6 @@ onUnmounted(() => {
 
 .brand-button:hover .brand-title {
   color: #fb7299;
-}
-
-.header-nav {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.nav-link {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  color: #61666d;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  transition: all 180ms ease;
-}
-
-.nav-link:hover {
-  color: #fb7299;
-  background: #f1f2f3;
-}
-
-.nav-link.active {
-  color: #ffffff;
-  background: #fb7299;
-  box-shadow: 0 3px 12px rgba(251, 114, 153, 0.35);
-  font-weight: 700;
 }
 
 .header-right {
@@ -551,17 +482,6 @@ onUnmounted(() => {
 
 .content-surface > * {
   height: 100%;
-}
-
-/* 桌面密度：加大工作区利用率、收紧顶栏与卡片内边距（规范第二节） */
-@media (min-width: 769px) {
-  .main-viewport {
-    padding: 12px 18px 14px;
-  }
-
-  .bili-header {
-    padding: 0 26px;
-  }
 }
 
 /* Mobile Bottom Navigation */
@@ -677,10 +597,6 @@ onUnmounted(() => {
 }
 
 /* Android Mobile Specific Layout */
-.bili-app.is-mobile-app .header-nav {
-  display: none;
-}
-
 .bili-app.is-mobile-app .mobile-nav {
   display: flex;
 }
@@ -692,14 +608,6 @@ onUnmounted(() => {
 .bili-app.is-mobile-app .bili-header {
   padding: env(safe-area-inset-top, 0px) 12px 0 12px;
   height: calc(52px + env(safe-area-inset-top, 0px));
-}
-
-/* Desktop Narrow Screen Tweaks (Keeps desktop layout intact) */
-@media (max-width: 768px) {
-  .nav-link {
-    padding: 6px 12px;
-    font-size: 12px;
-  }
 }
 
 :global(.bili-drawer .n-drawer-header) {
