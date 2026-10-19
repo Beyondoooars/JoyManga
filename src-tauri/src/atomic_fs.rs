@@ -148,7 +148,6 @@ where
         .context(format!("拒绝替换已有文件`{}`", target_path.display()))?;
 
     // 同目录直接替换文件，避免先移走正式文件留下缺失窗口。
-    // Windows 的 std::fs::rename 同样支持替换已有普通文件。
     rename_or_copy_fallback(temp_path, target_path)
 }
 

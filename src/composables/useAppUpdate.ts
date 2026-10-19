@@ -1,7 +1,6 @@
 import { ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { isAndroid } from './useIsMobile.ts'
 
 export interface GithubReleaseAsset {
   name: string
@@ -107,36 +106,19 @@ export function useAppUpdate() {
       publishedAt.value = formatDate(data.published_at)
       releaseUrl.value = data.html_url || `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases`
 
-      // 3. 根据当前平台匹配最适配的安装包
+      // 3. 匹配 arm64-v8a 安装包（本应用仅面向 Android，ABI 固定为 arm64-v8a）
       const assets = data.assets || []
-      if (isAndroid) {
-        // Android 平台：优先寻找 arm64-v8a apk，兜底选择任意 apk
-        const arm64Apk = assets.find((a) => a.name.toLowerCase().endsWith('.apk') && a.name.toLowerCase().includes('arm64'))
-        const anyApk = assets.find((a) => a.name.toLowerCase().endsWith('.apk'))
-        const target = arm64Apk || anyApk
-        if (target) {
-          downloadUrl.value = target.browser_download_url
-          downloadFileName.value = target.name
-          downloadFileSize.value = formatFileSize(target.size)
-        } else {
-          downloadUrl.value = releaseUrl.value
-          downloadFileName.value = '请前往 Release 页面下载 APK'
-          downloadFileSize.value = ''
-        }
+      const arm64Apk = assets.find((a) => a.name.toLowerCase().endsWith('.apk') && a.name.toLowerCase().includes('arm64'))
+      const anyApk = assets.find((a) => a.name.toLowerCase().endsWith('.apk'))
+      const target = arm64Apk || anyApk
+      if (target) {
+        downloadUrl.value = target.browser_download_url
+        downloadFileName.value = target.name
+        downloadFileSize.value = formatFileSize(target.size)
       } else {
-        // Windows / 桌面端：优先寻找便携版 zip，其次寻找 exe
-        const portableZip = assets.find((a) => a.name.toLowerCase().endsWith('.zip') && a.name.toLowerCase().includes('portable'))
-        const exeFile = assets.find((a) => a.name.toLowerCase().endsWith('.exe'))
-        const target = portableZip || exeFile
-        if (target) {
-          downloadUrl.value = target.browser_download_url
-          downloadFileName.value = target.name
-          downloadFileSize.value = formatFileSize(target.size)
-        } else {
-          downloadUrl.value = releaseUrl.value
-          downloadFileName.value = '前往 Release 页面下载'
-          downloadFileSize.value = ''
-        }
+        downloadUrl.value = releaseUrl.value
+        downloadFileName.value = '请前往 Release 页面下载 APK'
+        downloadFileSize.value = ''
       }
 
       // 4. 比对版本号

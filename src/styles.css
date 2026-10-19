@@ -90,30 +90,6 @@ button:focus-visible, a:focus-visible {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
 
-/* === 桌面密度（ui-design-spec-v2 第二节）：窄屏保持移动取值，≥769px 收敛 === */
-@media (min-width: 769px) {
-  :root {
-    --radius-card: 9px;
-    --radius-panel: 10px;
-    --radius-control: 6px;
-    --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.06);
-    --shadow-surface: 0 1px 3px rgba(0, 0, 0, 0.04);
-    --control-h: 30px;
-    --row-h: 38px;
-    --card-pad: 10px;
-  }
-
-  /* 控件密度：桌面按钮/输入统一收到 30px，与移动端 44dp 触控目标区分 */
-  .n-button:not(.n-button--huge):not(.n-button--large) {
-    --n-height: 30px !important;
-  }
-
-  .n-base-selection,
-  .n-input {
-    --n-height: 30px !important;
-  }
-}
-
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

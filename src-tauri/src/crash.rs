@@ -15,7 +15,7 @@ fn dir_slot() -> &'static RwLock<Option<PathBuf>> {
     CRASH_DIR.get_or_init(|| RwLock::new(None))
 }
 
-/// 安装 panic hook：release 版是 `panic = "abort"` 且 Windows 无控制台，
+/// 安装 panic hook：release 版是 `panic = "abort"` 且移动端无控制台，
 /// 不落盘的话崩溃后没有任何线索。这里只做最小工作（格式化 + 写文件），
 /// 不使用 tracing（panic 可能发生在日志系统初始化前后）。
 ///

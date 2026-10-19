@@ -20,52 +20,6 @@ jobs:
           VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-  windows-build:
-    needs: get-version
-    env:
-      VERSION: ${{ needs.get-version.outputs.VERSION }}
-    outputs:
-      VERSION: ${{ env.VERSION }}
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: lts/*
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build tauri app
-        uses: tauri-apps/tauri-action@v0
-
-      - name: Create artifacts directory
-        run: mkdir -p artifacts
-
-      - name: Copy nsis to release assets
-        run: cp src-tauri/target/release/bundle/nsis/JoyManga_${{ env.VERSION }}_x64-setup.exe artifacts/joymanga_${{ env.VERSION }}_windows_x64.exe
-
-      - name: Zip portable to release assets
-        run: |
-          cd src-tauri/target/release
-          7z a -tzip ../../../artifacts/joymanga_${{ env.VERSION }}_windows_x64_portable.zip joymanga.exe
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-assets
-          path: artifacts/*
-
   android-build:
     needs: get-version
     env:
@@ -156,17 +110,11 @@ jobs:
           path: artifacts/*
 
   create-release:
-    needs: [windows-build, android-build]
+    needs: [android-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download Windows assets
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-assets
-          path: artifacts/windows
-
       - name: Download Android assets
         uses: actions/download-artifact@v4
         with:
@@ -179,12 +127,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: JoyManga v${{ needs.windows-build.outputs.VERSION }}
+          name: JoyManga v${{ needs.android-build.outputs.VERSION }}
           body: |
-            ### JoyManga v${{ needs.windows-build.outputs.VERSION }}
-            欢迎下载使用！本版本提供 Windows 安装包 / 免安装便携版与 Android APK。
+            ### JoyManga v${{ needs.android-build.outputs.VERSION }}
+            欢迎下载使用！本版本提供 Android arm64-v8a APK。
           files: |
-            artifacts/windows/*
             artifacts/android/*
           draft: false
           prerelease: false

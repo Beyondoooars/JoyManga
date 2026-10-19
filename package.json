@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.2.4",
   "type": "module",
-  "description": "面向 Windows / Android 的漫画下载与本地阅读工具",
+  "description": "面向 Android 的漫画下载与本地阅读工具",
   "author": "Beyondoooars",
   "license": "MIT",
   "repository": {
@@ -21,8 +21,6 @@
     "gen:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings --features bindings --locked --offline",
     "preview": "vite preview",
     "tauri": "tauri",
-    "copy:release": "node scripts/copy-release.mjs",
-    "release": "tauri build --no-bundle && node scripts/copy-release.mjs",
     "build:android": "node scripts/build-android.mjs --release",
     "build:android:debug": "node scripts/build-android.mjs --debug",
     "build:android:test": "node scripts/build-android.mjs --test",

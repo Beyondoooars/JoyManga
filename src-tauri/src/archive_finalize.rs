@@ -126,7 +126,7 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
                 comic_id,
                 comic_title,
                 mode,
-                archive_path: displayable_path(archive_path),
+                archive_path,
             }
             .emit(app);
         }
@@ -151,20 +151,6 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
     {
         spawn_finalize_if_idle(app, comic_id);
     }
-}
-
-/// 事件中对外展示的路径去掉 Windows 规范化前缀（`\\?\` 或 `\\?\UNC\`）。
-fn displayable_path(path: PathBuf) -> PathBuf {
-    let Some(text) = path.to_str() else {
-        return path;
-    };
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
-    }
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
-    }
-    path
 }
 
 fn local_comic(app: &AppHandle, comic_id: i64) -> anyhow::Result<Comic> {

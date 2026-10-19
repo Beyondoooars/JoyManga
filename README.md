@@ -5,12 +5,12 @@
 </p>
 
 <p align="center">
-  <strong>基于 Tauri v2 + Rust + Vue 3 的 Windows / Android 漫画下载与离线阅读客户端</strong>
+  <strong>基于 Tauri v2 + Rust + Vue 3 的 Android 漫画下载与离线阅读客户端</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-v0.2.4-ff69b4.svg" alt="Version 0.2.4" />
-  <img src="https://img.shields.io/badge/Platform-Android%20%7C%20Windows-0969da.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/Platform-Android-0969da.svg" alt="Platform" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20Tauri%20v2-ea580c.svg" alt="Tauri v2" />
   <img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Naive%20UI-10b981.svg" alt="Vue 3" />
 </p>
@@ -19,9 +19,9 @@
 
 ## 📌 项目概述
 
-**JoyManga** 是一套面向桌面端与移动端的全功能漫画工具。它不仅具备工业级的批量高速下载引擎，还深度集成了现代化离线漫画阅读器与书库管理系统。
+**JoyManga** 是一套面向 Android 的全功能漫画工具。它不仅具备工业级的批量高速下载引擎，还深度集成了现代化离线漫画阅读器与书库管理系统。
 
-底层基于 **Rust** 编写核心异步运行时与反混淆切片图像还原算法，兼顾极致性能与极低内存占用；前端采用 **Vue 3 + Naive UI + UnoCSS**，提供自适应响应式的操作界面。无论是 Windows 上的绿色便携使用，还是 Android 手机平板上的离线阅读，均能获得流畅的原生级体验。
+底层基于 **Rust** 编写核心异步运行时与反混淆切片图像还原算法，兼顾极致性能与极低内存占用；前端采用 **Vue 3 + Naive UI + UnoCSS**，提供适配手机与平板的操作界面，在 Android 设备上获得流畅的原生级体验。
 
 ---
 
@@ -36,7 +36,7 @@
 
 ### 2. 📖 内置轻量漫画阅读器
 - **单页阅读**：直接打开已归档的 CBZ 或下载目录，单页显示；支持"适合宽度 / 适合屏幕"切换。
-- **手势与键鼠翻页**：移动端跟手滑动、边界回弹，桌面端滚轮累积翻页；`←/→`、`A/D`、空格均可用，`Esc` 关闭。
+- **手势与按键翻页**：跟手滑动、边界回弹；外接键盘的 `←/→`、`A/D`、空格均可用，`Esc` 关闭。
 - **进度控制与微调**：底部悬浮进度条支持拖动定位、页码显示，以及前后逐页按钮；章末自动衔接下一章。
 - **阅读记忆与书签**：自动记忆每部漫画的已读章节与页码，支持在任意页添加书签并跳转。
 
@@ -52,12 +52,6 @@
 - **公共存储卸载保护**：漫画默认下载至系统公共目录 `Download/JoyManga`，卸载或更新应用时**漫画文件绝不丢失**，支持第三方应用直接访问。
 - **移动交互细节**：适配沉浸式全面屏、多级返回手势拦截、后台下载防系统休眠与通知中心进度推送。
 
-### 5. 💻 Windows 桌面端专属优化
-- **免安装纯绿色便携版**：
-  - 核心程序、配置文件（`config.json`）、运行日志（`logs/`）与默认下载目录同级自包含。
-  - 放进 U 盘或便携硬盘即插即用，不向系统盘写入杂项配置。
-- **超长标题文件系统保护**：内置 UTF-8 字节长度安全截断，彻底解决 Windows `MAX_PATH` 或部分文件系统导致的 `File name too long` 保存失败问题。
-
 ---
 
 ## 📥 下载与安装
@@ -66,9 +60,7 @@
 
 | 平台 | 文件包格式 | 适用场景与说明 |
 | :--- | :--- | :--- |
-| **Android** | `joymanga-arm64-v8a.apk` | 推荐！主流 64 位安卓手机/平板设备，支持无缝覆盖更新 |
-| **Windows** | `joymanga_v0.2.4_windows_x64_portable.zip` | 推荐！解压即用，纯绿色免安装便携版，便于随身携带 |
-| **Windows** | `joymanga_v0.2.4_windows_x64.exe` | 传统安装向导版（NSIS），适合桌面固定安装 |
+| **Android** | `joymanga-arm64-v8a.apk` | 主流 64 位安卓手机/平板设备，支持无缝覆盖更新 |
 
 ---
 
@@ -117,7 +109,7 @@
 ### 前置依赖
 - **Node.js** (>= 18.0) 及 **pnpm** (>= 9.0)
 - **Rust** 稳定版工具链 (`rustc`, `cargo` >= 1.78)
-- （仅 Android 构建需要）**Android SDK 34**, **NDK 26+**, **Java 17**
+- **Android SDK 34**, **NDK 26+**, **Java 17**
 
 ### 常用命令
 
@@ -127,7 +119,7 @@ git clone https://github.com/Beyondoooars/JoyManga.git
 cd JoyManga
 pnpm install
 
-# 2. 启动桌面端调试环境 (热重载)
+# 2. 启动前端调试环境 (热重载)
 pnpm dev
 
 # 3. 运行代码检查与测试套件
@@ -135,10 +127,7 @@ pnpm exec eslint .
 pnpm test
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
-# 4. 编译 Windows 绿色便携版
-pnpm release
-
-# 5. 编译 Android arm64-v8a APK
+# 4. 编译 Android arm64-v8a APK
 pnpm build:android
 ```
 
