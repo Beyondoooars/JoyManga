@@ -201,7 +201,7 @@ class MainActivity : TauriActivity() {
         val clean = name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "file" }
         if (clean == "." || clean == "..") return "file"
         val extension = clean.substringAfterLast('.', "").lowercase()
-        val suffix = if (extension in listOf("cbz", "pdf", "json", "jpg", "jpeg", "png", "webp")) ".$extension" else ""
+        val suffix = if (extension in listOf("cbz", "json", "jpg", "jpeg", "png", "webp")) ".$extension" else ""
         val stem = if (suffix.isEmpty()) clean else clean.dropLast(extension.length + 1)
         val result = StringBuilder()
         var bytes = 0
@@ -269,14 +269,14 @@ class MainActivity : TauriActivity() {
         require(allowed.any { canonical.path == it.path || canonical.path.startsWith(it.path + File.separator) }) { "请先将文件导出到应用专用目录" }
         val files = if (canonical.isFile) listOf(canonical) else canonical.walkTopDown().filter { it.isFile }.take(1001).toList()
         require(files.size <= 1000) { "单次最多导出 1000 个文件" }
-        return files.filter { file -> listOf("cbz", "pdf", "json").contains(file.extension.lowercase()) }
+        return files.filter { file -> listOf("cbz", "json").contains(file.extension.lowercase()) }
     }
 
-    private fun mime(file: File) = when (file.extension.lowercase()) { "pdf" -> "application/pdf"; "json" -> "application/json"; else -> "application/zip" }
+    private fun mime(file: File) = when (file.extension.lowercase()) { "json" -> "application/json"; else -> "application/zip" }
 
     private fun publishDownloads(path: File): Int {
         val files = exportFiles(path)
-        require(files.isNotEmpty()) { "没有可导出的 CBZ/PDF/备份文件" }
+        require(files.isNotEmpty()) { "没有可导出的 CBZ/备份文件" }
         for (file in files) {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)

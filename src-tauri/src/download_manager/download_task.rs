@@ -399,7 +399,10 @@ impl DownloadTask {
             let should_keep = path
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif"))
+                .map(str::to_ascii_lowercase)
+                .is_some_and(|ext| {
+                    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif")
+                })
                 && path
                     .file_stem()
                     .and_then(|stem| stem.to_str())

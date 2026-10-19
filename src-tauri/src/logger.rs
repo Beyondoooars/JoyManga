@@ -98,8 +98,19 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
             Ok(())
         })
     });
-    tauri::async_runtime::spawn(file_log_watcher(app.clone()));
-    tauri::async_runtime::spawn(auto_cleanup_logs_task(app.clone()));
+    if ENABLE_FILE_LOGGER {
+        tauri::async_runtime::spawn(file_log_watcher(app.clone()));
+        tauri::async_runtime::spawn(auto_cleanup_logs_task(app.clone()));
+    } else if let Ok(dir) = logs_dir(app) {
+        // 文件日志关闭时不再常驻监听与定时扫描；启动时清理一次，
+        // 避免崩溃报告长期堆积。
+        cleanup_managed_logs(
+            &dir,
+            DEFAULT_LOG_RETENTION,
+            MAX_LOGS_TOTAL_SIZE,
+            TARGET_LOGS_TOTAL_SIZE,
+        );
+    }
 
     Ok(())
 }

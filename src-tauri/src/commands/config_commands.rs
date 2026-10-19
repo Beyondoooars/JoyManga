@@ -285,7 +285,8 @@ pub fn restore_app_data(app: AppHandle, backup_path: String) -> CommandResult<Co
 
     let mut restored_config: Config = serde_json::from_value(config_value.clone())
         .context("解析备份配置失败")
-        .map_err(|err| CommandError::from("恢复备份失败", err))?;    restored_config.apply_storage_policy();
+        .map_err(|err| CommandError::from("恢复备份失败", err))?;
+    restored_config.apply_storage_policy();
     restored_config
         .validate()
         .map_err(|err| CommandError::from("备份配置校验失败", err))?;
