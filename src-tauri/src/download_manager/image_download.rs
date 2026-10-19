@@ -241,9 +241,10 @@ pub(crate) async fn save_img(
     let save_path = save_path.to_path_buf();
     let process_img = move || -> anyhow::Result<()> {
         // 这里必然需要反混淆：block_num == 0 的情况已在上面直接落盘返回
+        // 用 into_rgb8：解码器已产出 Rgb8 时直接移交缓冲区，省掉一次全图拷贝
         let mut src_img = image::load_from_memory(&src_img_data)
             .context("解码图片失败")?
-            .to_rgb8();
+            .into_rgb8();
         let dst_img = stitch_img(&mut src_img, block_num);
         // 用来存图片编码后的数据
         let mut dst_img_data = Vec::new();

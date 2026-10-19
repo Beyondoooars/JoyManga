@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
 
 use crate::{
-    extensions::{AppHandleExt, WalkDirEntryExt},
+    extensions::{AppHandleExt, PathIsImg, WalkDirEntryExt},
     types::Comic,
 };
 
@@ -531,6 +531,26 @@ pub fn cbz_filename(
     };
 
     format!("{comic_part}{middle}{chapter_part}{EXTENSION}")
+}
+
+/// 收集章节目录中的有效页面：按自然序排序，并按文件主名去重
+/// （同一页可能残留不同扩展名的旧文件）。
+pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut image_paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("读取章节目录`{}`失败", dir.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_img() && path.is_file())
+        .collect();
+
+    image_paths.sort_by(|a, b| {
+        let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        natural_cmp(name_a, name_b)
+    });
+    let mut page_numbers = std::collections::HashSet::new();
+    image_paths.retain(|path| page_numbers.insert(path.file_stem().unwrap_or_default().to_owned()));
+    Ok(image_paths)
 }
 
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {

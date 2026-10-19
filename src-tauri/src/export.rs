@@ -337,14 +337,14 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
                     .unwrap_or("jpg")
                     .to_lowercase();
                 let target_name = format!("{:04}.{extension}", page_idx + 1);
-                zip_writer
-                    .start_file(&target_name, SimpleFileOptions::default())
-                    .context(format!("在分部CBZ创建条目`{target_name}`失败"))?;
                 let mut entry = archive
                     .by_name(entry_name)
                     .context(format!("读取原章节图片`{entry_name}`失败"))?;
                 // 从已有归档复制时同样要保证单条目不超过 ZIP32 上限
                 crate::zip_limits::ensure_archive_entry_size(&entry, entry_name)?;
+                zip_writer
+                    .start_file(&target_name, crate::zip_limits::image_entry_options())
+                    .context(format!("在分部CBZ创建条目`{target_name}`失败"))?;
                 std::io::copy(&mut entry, &mut zip_writer)
                     .context(format!("将图片写入分部CBZ条目`{target_name}`失败"))?;
             }
@@ -369,16 +369,7 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
         }
 
         // 遍历下载目录，将文件写入cbz
-        let mut image_paths = std::fs::read_dir(chapter_download_dir)
-            .context(format!(
-                "章节`{chapter_title}`读取目录`{}`失败",
-                chapter_download_dir.display()
-            ))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.is_img())
-            .collect::<Vec<_>>();
-        image_paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        let image_paths = utils::collect_page_images(chapter_download_dir)?;
 
         let mut comic_info = ComicInfo::from(comic, chapter_info);
         comic_info.page_count = i64::try_from(image_paths.len()).unwrap_or(0);
@@ -412,7 +403,7 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
             // 将文件写入cbz
             crate::zip_limits::ensure_entry_size(&image_path)?;
             zip_writer
-                .start_file(&filename, SimpleFileOptions::default())
+                .start_file(&filename, crate::zip_limits::image_entry_options())
                 .context(format!(
                     "章节`{chapter_title}`在`{}`创建`{filename}`失败",
                     save_path.display()
@@ -654,31 +645,18 @@ pub(crate) fn write_merged_cbz_archive(
                     format!("{chapter_dir_name}/{:04}.{ext}", page_idx + 1)
                 };
 
-                zip_writer
-                    .start_file(&target_entry_name, SimpleFileOptions::default())
-                    .context(format!("在合并CBZ创建条目`{target_entry_name}`失败"))?;
                 let mut entry = archive
                     .by_name(entry_name)
                     .context(format!("读取原章节图片`{entry_name}`失败"))?;
                 crate::zip_limits::ensure_archive_entry_size(&entry, entry_name)?;
+                zip_writer
+                    .start_file(&target_entry_name, crate::zip_limits::image_entry_options())
+                    .context(format!("在合并CBZ创建条目`{target_entry_name}`失败"))?;
                 std::io::copy(&mut entry, &mut zip_writer)
                     .context(format!("将图片写入合并CBZ条目`{target_entry_name}`失败"))?;
             }
         } else if chapter_download_dir.is_dir() {
-            let mut image_paths: Vec<PathBuf> = std::fs::read_dir(chapter_download_dir)
-                .context(format!(
-                    "读取章节目录`{}`失败",
-                    chapter_download_dir.display()
-                ))?
-                .filter_map(Result::ok)
-                .map(|e| e.path())
-                .filter(|p| p.is_img())
-                .collect();
-            image_paths.sort_by(|a, b| {
-                let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                utils::natural_cmp(name_a, name_b)
-            });
+            let image_paths = utils::collect_page_images(chapter_download_dir)?;
             total_pages += i64::try_from(image_paths.len()).unwrap_or(0);
 
             for (page_idx, img_path) in image_paths.into_iter().enumerate() {
@@ -695,7 +673,7 @@ pub(crate) fn write_merged_cbz_archive(
 
                 crate::zip_limits::ensure_entry_size(&img_path)?;
                 zip_writer
-                    .start_file(&target_entry_name, SimpleFileOptions::default())
+                    .start_file(&target_entry_name, crate::zip_limits::image_entry_options())
                     .context(format!("在合并CBZ创建条目`{target_entry_name}`失败"))?;
                 let mut file = std::fs::File::open(&img_path)
                     .context(format!("打开图片`{}`失败", img_path.display()))?;

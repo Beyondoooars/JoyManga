@@ -11,6 +11,15 @@
 /// ZIP32 单条目上限（未启用 ZIP64 时）。
 pub const MAX_ENTRY_BYTES: u64 = u32::MAX as u64;
 
+/// 图片条目的写入选项：不压缩（Stored）。
+///
+/// 漫画页都是 JPEG/PNG/WebP/GIF，本身已是熵编码数据，deflate 收益约 0%
+/// 却要消耗整章打包的 CPU。元数据（XML/JSON）仍走默认的 Deflate。
+pub fn image_entry_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+}
+
 /// 检查待写入条目的体积；超限时返回带文件名与体积的可读错误。
 pub fn ensure_entry_size(path: &std::path::Path) -> anyhow::Result<()> {
     let size = std::fs::metadata(path)
