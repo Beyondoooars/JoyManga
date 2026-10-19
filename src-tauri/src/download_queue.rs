@@ -10,7 +10,7 @@ use crate::{
     atomic_fs,
     config::Config,
     download_manager::DownloadTaskState,
-    types::{ChapterInfo, Comic, DownloadFormat},
+    types::{ChapterInfo, Comic},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -29,16 +29,12 @@ pub struct DownloadTaskSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DownloadSettings {
     pub download_dir: PathBuf,
-    pub dir_fmt: String,
-    pub download_format: DownloadFormat,
 }
 
 impl From<&Config> for DownloadSettings {
     fn from(config: &Config) -> Self {
         Self {
             download_dir: config.download_dir.clone(),
-            dir_fmt: config.dir_fmt.clone(),
-            download_format: config.download_format,
         }
     }
 }
@@ -52,13 +48,8 @@ pub struct StoredDownload {
 impl StoredDownload {
     pub fn resumed_state(&self, settings: &DownloadSettings) -> anyhow::Result<DownloadTaskState> {
         ensure!(
-            self.settings.download_dir == settings.download_dir
-                && self.settings.dir_fmt == settings.dir_fmt
-                && (self.settings.download_format == settings.download_format
-                    // 升级到新保存策略（PNG / 原始格式）后，旧格式的队列可以按新策略续传
-                    || settings.download_format == DownloadFormat::Png
-                    || settings.download_format == DownloadFormat::Original),
-            "下载目录或命名规则已改变，请恢复原配置后重试，或按当前配置重新下载"
+            self.settings.download_dir == settings.download_dir,
+            "下载目录已改变，请恢复原配置后重试，或按当前配置重新下载"
         );
         Ok(match self.snapshot.state {
             DownloadTaskState::Downloading => DownloadTaskState::Pending,
@@ -290,8 +281,6 @@ mod tests {
             },
             settings: DownloadSettings {
                 download_dir: PathBuf::from("downloads"),
-                dir_fmt: "{comic_id}/{chapter_id}".into(),
-                download_format: DownloadFormat::Jpeg,
             },
         }
     }
@@ -406,12 +395,6 @@ mod tests {
         let mut changed = download.settings.clone();
         changed.download_dir = PathBuf::from("different");
         assert!(download.resumed_state(&changed).is_err());
-        changed = download.settings.clone();
-        changed.download_format = DownloadFormat::Webp;
-        assert!(download.resumed_state(&changed).is_err());
-        changed = download.settings.clone();
-        changed.dir_fmt = "{comic_id}/new/{chapter_id}".into();
-        assert!(download.resumed_state(&changed).is_err());
     }
 
     #[test]
@@ -495,13 +478,12 @@ mod tests {
 }
 
 #[cfg(test)]
-mod png_upgrade_tests {
+mod resumed_state_tests {
     use super::*;
     #[test]
-    fn old_jpeg_queue_can_resume_with_png_without_accepting_a_changed_root() {
+    fn old_queue_resumes_under_current_settings_without_accepting_a_changed_root() {
         let current = DownloadSettings::from(&Config::default(std::path::Path::new("library")));
-        let mut old = current.clone();
-        old.download_format = DownloadFormat::Jpeg;
+        let old = current.clone();
         let stored = StoredDownload {
             settings: old,
             snapshot: DownloadTaskSnapshot {

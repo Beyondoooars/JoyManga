@@ -403,7 +403,6 @@ export const events = __makeEvents__<{
 comicArchiveEvent: ComicArchiveEvent,
 configChangedEvent: ConfigChangedEvent,
 downloadAllFavoritesEvent: DownloadAllFavoritesEvent,
-downloadSleepingEvent: DownloadSleepingEvent,
 downloadSpeedEvent: DownloadSpeedEvent,
 downloadTaskEvent: DownloadTaskEvent,
 exportCbzEvent: ExportCbzEvent,
@@ -415,7 +414,6 @@ updateDownloadedComicsEvent: UpdateDownloadedComicsEvent
 comicArchiveEvent: "comic-archive-event",
 configChangedEvent: "config-changed-event",
 downloadAllFavoritesEvent: "download-all-favorites-event",
-downloadSleepingEvent: "download-sleeping-event",
 downloadSpeedEvent: "download-speed-event",
 downloadTaskEvent: "download-task-event",
 exportCbzEvent: "export-cbz-event",
@@ -496,7 +494,7 @@ export type CommandErrorKind =
  * 其他未归类
  */
 "Unknown"
-export type Config = { revision?: number; schemaVersion?: number; apiDomainMigrationPending?: boolean; autoLogin?: boolean; androidStorageInitialized?: boolean; username: string; password: string; downloadDir: string; exportDir: string; downloadFormat: DownloadFormat; dirFmt: string; proxyMode: ProxyMode; proxyHost: string; proxyPort: number; enableFileLogger: boolean; chapterConcurrency: number; chapterDownloadIntervalSec: number; imgConcurrency: number; imgDownloadIntervalSec: number; downloadAllFavoritesIntervalSec: number; updateDownloadedComicsIntervalSec: number; apiDomainMode: ApiDomainMode; customApiDomain: string; imageDomainMode: ImageDomainMode; customImageDomain: string; shouldDownloadCover: boolean; 
+export type Config = { revision?: number; schemaVersion?: number; apiDomainMigrationPending?: boolean; autoLogin?: boolean; androidStorageInitialized?: boolean; username: string; password: string; downloadDir: string; exportDir: string; proxyMode: ProxyMode; proxyHost: string; proxyPort: number; chapterConcurrency: number; imgConcurrency: number; apiDomainMode: ApiDomainMode; customApiDomain: string; imageDomainMode: ImageDomainMode; customImageDomain: string; 
 /**
  * 下载完成后 CBZ 自动整合的默认方式（单次下载可在界面上另行选择）。
  */
@@ -519,13 +517,6 @@ volumeKeyPaging?: boolean;
 downloadOnlyWifi?: boolean }
 export type ConfigChangedEvent = { config: Config }
 export type DownloadAllFavoritesEvent = { event: "GetFavoritesStart" } | { event: "GetComicsProgress"; data: { current: number; total: number } } | { event: "StartCreateDownloadTasks"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreatingDownloadTask"; data: { comicId: number; current: number } } | { event: "EndCreateDownloadTasks"; data: { comicId: number } } | { event: "GetComicsEnd" }
-export type DownloadFormat = "Jpeg" | "Png" | "Webp" | 
-/**
- * 未混淆的图片直接保存网络原始字节（保持原格式）；
- * 需要反混淆重组的图片编码为无损 WebP。
- */
-"Original"
-export type DownloadSleepingEvent = { id: number; remainingSec: number }
 export type DownloadSpeedEvent = { speed: string }
 export type DownloadTaskEvent = { event: "Create"; data: DownloadTaskSnapshot } | { event: "Update"; data: { chapterId: number; revision: number; state: DownloadTaskState; downloadedImgCount: number; totalImgCount: number; errorMessage: string | null } }
 export type DownloadTaskSnapshot = { taskId: string; revision: number; state: DownloadTaskState; comic: Comic; chapterInfo: ChapterInfo; downloadedImgCount: number; totalImgCount: number; errorMessage: string | null }

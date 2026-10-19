@@ -1,6 +1,6 @@
 use anyhow::Context;
 use events::{
-    DownloadAllFavoritesEvent, DownloadSleepingEvent, DownloadSpeedEvent, DownloadTaskEvent,
+    DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent,
     ExportCbzEvent, LogEvent, UpdateDownloadedComicsEvent,
 };
 use parking_lot::RwLock;
@@ -103,7 +103,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
         ])
         .events(tauri_specta::collect_events![
             DownloadSpeedEvent,
-            DownloadSleepingEvent,
             DownloadTaskEvent,
             DownloadAllFavoritesEvent,
             UpdateDownloadedComicsEvent,

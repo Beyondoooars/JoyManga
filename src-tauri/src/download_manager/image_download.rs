@@ -3,20 +3,16 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use bytes::Bytes;
-use image::codecs::png::{self, PngEncoder};
 use image::ImageFormat;
 use tauri::AppHandle;
 use tokio::sync::watch;
-use tokio::time::sleep;
 
 use crate::atomic_fs;
 use crate::download_scheduler::DownloadPermit;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
-use crate::types::DownloadFormat;
 
 use super::download_task::{DownloadTask, TaskFileWrites};
 use super::scramble::stitch_img;
@@ -91,20 +87,10 @@ impl DownloadImgTask {
         let temp_download_path = &self.temp_download_path;
 
         let index_filename = format!("{:04}", self.index + 1);
-        let download_format = self.download_task.settings.download_format;
-        let ext = download_format.extension();
 
-        let user_format_path = temp_download_path.join(format!("{index_filename}.{ext}"));
-        let gif_path = temp_download_path.join(format!("{index_filename}.gif"));
-
-        let already_saved = if download_format == DownloadFormat::Original {
-            // 原始模式下扩展名随源格式而定，任一图片格式的有效文件都算已保存
-            find_existing_page(temp_download_path, self.index + 1)
-                .is_some_and(|path| is_valid_saved_image(&path))
-        } else {
-            is_valid_saved_image(&user_format_path)
-                || (download_format != DownloadFormat::Png && is_valid_saved_image(&gif_path))
-        };
+        // 只保留原始格式：未混淆图片按源格式原样落盘，需反混淆的图片编码为无损 WebP。
+        let already_saved = find_existing_page(temp_download_path, self.index + 1)
+            .is_some_and(|path| is_valid_saved_image(&path));
         if already_saved {
             // 如果图片已经存在，直接返回
             self.download_task
@@ -134,17 +120,10 @@ impl DownloadImgTask {
 
         tracing::trace!(url, comic_title, chapter_title, "图片成功下载到内存");
 
-        let save_ext = if download_format == DownloadFormat::Original {
-            // 未混淆的图片保持源格式；需要反混淆重组的图片编码为无损 WebP
-            if self.block_num == 0 {
-                source_extension(format)
-            } else {
-                "webp"
-            }
-        } else if format == ImageFormat::Gif && download_format != DownloadFormat::Png {
-            "gif"
+        let save_ext = if self.block_num == 0 {
+            source_extension(format)
         } else {
-            download_format.extension()
+            "webp"
         };
         let save_path = temp_download_path.join(format!("{index_filename}.{save_ext}"));
 
@@ -152,7 +131,6 @@ impl DownloadImgTask {
         // 保存图片
         if let Err(err) = save_img(
             &save_path,
-            download_format,
             block_num,
             img_data,
             format,
@@ -188,9 +166,6 @@ impl DownloadImgTask {
             .fetch_add(1, Ordering::Relaxed);
 
         self.download_task.emit_download_task_update_event();
-
-        let img_download_interval_sec = self.app.get_config().read().img_download_interval_sec;
-        sleep(Duration::from_secs(img_download_interval_sec)).await;
     }
 
     async fn acquire_img_permit(&self, permit: &mut Option<DownloadPermit>) -> ControlFlow<()> {
@@ -244,36 +219,22 @@ pub(crate) fn release_inactive_image_permit(
 
 pub(crate) async fn save_img(
     save_path: &Path,
-    download_format: DownloadFormat,
     block_num: u32,
     src_img_data: Bytes,
     src_format: ImageFormat,
     file_writes: Arc<TaskFileWrites>,
 ) -> anyhow::Result<()> {
-    if src_format == ImageFormat::Gif && download_format != DownloadFormat::Png {
-        // 如果是GIF格式，直接保存
+    if src_format == ImageFormat::Gif {
+        // GIF 原样保存，避免二次编码丢帧
         file_writes
             .run(|| atomic_fs::write(save_path, src_img_data))
             .context(format!("保存图片`{}`失败", save_path.display()))?;
         return Ok(());
     }
 
-    let block_num = if src_format == ImageFormat::Gif {
-        0
-    } else {
-        block_num
-    };
-    let matches_user_format = download_format == DownloadFormat::Original
-        || matches!(
-            (download_format, src_format),
-            (DownloadFormat::Jpeg, ImageFormat::Jpeg)
-                | (DownloadFormat::Png, ImageFormat::Png)
-                | (DownloadFormat::Webp, ImageFormat::WebP)
-        );
-
-    if block_num == 0 && matches_user_format {
-        // 未切片混淆且无需转换格式时，直接写入网络原始字节
-        // 避免二次编解码的严重CPU开销与JPEG二次有损压缩导致的画质损失
+    if block_num == 0 {
+        // 未切片混淆：直接写入网络原始字节，避免二次编解码的 CPU 开销
+        // 与 JPEG 二次有损压缩导致的画质损失
         file_writes
             .run(|| atomic_fs::write(save_path, src_img_data))
             .context(format!("保存图片`{}`失败", save_path.display()))?;
@@ -295,23 +256,8 @@ pub(crate) async fn save_img(
         };
         // 用来存图片编码后的数据
         let mut dst_img_data = Vec::new();
-        match download_format {
-            DownloadFormat::Jpeg => {
-                dst_img.write_to(&mut Cursor::new(&mut dst_img_data), ImageFormat::Jpeg)?;
-            }
-            DownloadFormat::Png => {
-                let encoder = PngEncoder::new_with_quality(
-                    Cursor::new(&mut dst_img_data),
-                    png::CompressionType::Default,
-                    png::FilterType::default(),
-                );
-                dst_img.write_with_encoder(encoder)?;
-            }
-            DownloadFormat::Webp | DownloadFormat::Original => {
-                // 无损 WebP：体积明显小于 PNG，且不引入有损压缩
-                dst_img.write_to(&mut Cursor::new(&mut dst_img_data), ImageFormat::WebP)?;
-            }
-        }
+        // 反混淆后的图片统一编码为无损 WebP：体积明显小于 PNG，且不引入有损压缩
+        dst_img.write_to(&mut Cursor::new(&mut dst_img_data), ImageFormat::WebP)?;
         // 保存编码后的图片数据
         file_writes
             .run(|| atomic_fs::write(&save_path, dst_img_data))
@@ -405,12 +351,7 @@ fn read_page(reader: impl Read) -> anyhow::Result<Vec<u8>> {
 }
 
 /// 从最终章节中只复用可完整解码的页面；页面编号保持与服务器一致。
-pub(crate) fn seed_valid_pages(
-    source: &Path,
-    temp: &Path,
-    download_format: DownloadFormat,
-    expected: usize,
-) -> anyhow::Result<()> {
+pub(crate) fn seed_valid_pages(source: &Path, temp: &Path, expected: usize) -> anyhow::Result<()> {
     if !source.is_file() {
         return Ok(());
     }
@@ -426,13 +367,8 @@ pub(crate) fn seed_valid_pages(
         let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
             continue;
         };
-        let ext_matches = match download_format {
-            // 原始模式复用任意图片格式
-            DownloadFormat::Original => matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif"),
-            DownloadFormat::Png => ext == "png" || matches!(ext, "jpg" | "jpeg" | "webp"),
-            format => ext == format.extension() || ext == "gif",
-        };
-        if !ext_matches {
+        // 只复用图片格式的页面（扩展名随源格式，不做格式转换）
+        if !matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif") {
             continue;
         }
         let Ok(page) = path
@@ -446,26 +382,13 @@ pub(crate) fn seed_valid_pages(
         if page == 0 || page > expected {
             continue;
         }
-        let target_extension = if download_format == DownloadFormat::Png {
-            "png"
-        } else {
-            ext
-        };
-        let target = temp.join(format!("{page:04}.{target_extension}"));
+        let target = temp.join(format!("{page:04}.{ext}"));
         if is_valid_saved_image(&target) {
             continue;
         }
         if let Ok(bytes) = read_page(entry) {
             if valid_page(&bytes) {
-                if target_extension == "png" && image::guess_format(&bytes)? != ImageFormat::Png {
-                    crate::image_data::validate_image(&bytes)?;
-                    let image = image::load_from_memory(&bytes)?;
-                    let mut png = Cursor::new(Vec::new());
-                    image.write_to(&mut png, ImageFormat::Png)?;
-                    atomic_fs::write(&target, png.into_inner())?;
-                } else {
-                    atomic_fs::write(&target, bytes)?;
-                }
+                atomic_fs::write(&target, bytes)?;
             }
         }
     }
@@ -497,7 +420,7 @@ mod tests {
             zip.write_all(&bytes).unwrap();
         }
         zip.finish().unwrap();
-        seed_valid_pages(&source, &root.join("temp"), DownloadFormat::Png, 4).unwrap();
+        seed_valid_pages(&source, &root.join("temp"), 4).unwrap();
         assert!(root.join("temp/0001.png").exists());
         assert!(!root.join("temp/0003.png").exists());
         assert!(source.exists());
@@ -506,12 +429,12 @@ mod tests {
 }
 
 #[cfg(test)]
-mod png_reuse_tests {
+mod page_reuse_tests {
     use super::*;
     use std::io::Write;
     #[test]
-    fn old_jpeg_archive_is_preserved_and_reused_page_is_real_png() {
-        let root = std::env::temp_dir().join(format!("jm-png-migrate-{}", uuid::Uuid::new_v4()));
+    fn old_archive_is_preserved_and_reused_page_keeps_its_source_extension() {
+        let root = std::env::temp_dir().join(format!("jm-page-reuse-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("old.cbz");
         let mut jpeg = Cursor::new(Vec::new());
@@ -525,27 +448,28 @@ mod png_reuse_tests {
         archive.write_all(&jpeg.into_inner()).unwrap();
         archive.finish().unwrap();
         let original = std::fs::read(&source).unwrap();
-        seed_valid_pages(&source, &root.join("stage"), DownloadFormat::Png, 1).unwrap();
-        let page = std::fs::read(root.join("stage/0001.png")).unwrap();
-        assert_eq!(image::guess_format(&page).unwrap(), ImageFormat::Png);
+        seed_valid_pages(&source, &root.join("stage"), 1).unwrap();
+        // 扩展名随源格式，不做格式转换
+        let page = std::fs::read(root.join("stage/0001.jpg")).unwrap();
+        assert_eq!(image::guess_format(&page).unwrap(), ImageFormat::Jpeg);
         assert_eq!(std::fs::read(source).unwrap(), original);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
 
 #[cfg(test)]
-mod gif_png_tests {
+mod gif_passthrough_tests {
     use super::*;
     #[tokio::test]
-    async fn gif_source_uses_a_static_png_first_frame_under_png_policy() {
-        let path = std::env::temp_dir().join(format!("jm-gif-png-{}.png", uuid::Uuid::new_v4()));
+    async fn gif_source_is_written_verbatim_instead_of_re_encoding() {
+        let path = std::env::temp_dir().join(format!("jm-gif-{}.gif", uuid::Uuid::new_v4()));
         let mut gif = Vec::new();
         image::codecs::gif::GifEncoder::new(&mut gif)
             .encode_frame(image::Frame::new(image::RgbaImage::new(2, 2)))
             .unwrap();
+        let original = gif.clone();
         save_img(
             &path,
-            DownloadFormat::Png,
             20,
             Bytes::from(gif),
             ImageFormat::Gif,
@@ -553,10 +477,8 @@ mod gif_png_tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            image::guess_format(&std::fs::read(&path).unwrap()).unwrap(),
-            ImageFormat::Png
-        );
+        // GIF 原样保存，避免二次编码丢帧
+        assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -21,7 +21,7 @@ use tracing_subscriber::{
 use crate::{
     config::ConfigStorage,
     events::LogEvent,
-    extensions::{AnyhowErrorToStringChain, AppHandleExt},
+    extensions::AnyhowErrorToStringChain,
 };
 
 struct LogEventWriter {
@@ -108,12 +108,9 @@ pub fn reload_file_logger() -> anyhow::Result<()> {
     RELOAD_FN.get().context("RELOAD_FN未初始化")?()
 }
 
-pub fn disable_file_logger() -> anyhow::Result<()> {
-    if let Some(guard) = GUARD.get().context("GUARD未初始化")?.lock().take() {
-        drop(guard);
-    }
-    Ok(())
-}
+/// 文件日志开关：桌面端保留文件日志，供「导出诊断日志」收集历史记录；
+/// Android 上持续写入会消耗电量与存储，固定关闭。
+const ENABLE_FILE_LOGGER: bool = !cfg!(target_os = "android");
 
 fn create_file_layer<S>(
     app: &AppHandle,
@@ -121,9 +118,8 @@ fn create_file_layer<S>(
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    let enable_file_logger = app.get_config().read().enable_file_logger;
-    // 如果不启用文件日志，则返回一个占位用的sink layer，不创建也不输出日志文件
-    if !enable_file_logger {
+    // 不启用文件日志时返回占位用的sink layer，不创建也不输出日志文件
+    if !ENABLE_FILE_LOGGER {
         let sink_layer = layer()
             .with_writer(std::io::sink)
             .with_timer(LocalTime::rfc_3339())

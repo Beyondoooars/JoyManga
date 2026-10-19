@@ -474,7 +474,6 @@ export const useStore = defineStore('store', () => {
   const taskLoadError = ref('')
   const loadingTasks = ref(false)
   let taskUnlisten: (() => void) | undefined
-  let sleepingUnlisten: (() => void) | undefined
   let tasksHydrating = true
   let taskListenerPromise: Promise<void> | undefined
   const bufferedTasks: DownloadTaskEvent[] = []
@@ -515,13 +514,9 @@ export const useStore = defineStore('store', () => {
         if (tasksHydrating) bufferedTasks.push(payload)
         else handleTaskEvent(payload)
       })
-      sleepingUnlisten = await events.downloadSleepingEvent.listen(({ payload }) => {
-        const task = progresses.value.get(payload.id)
-        if (task) task.indicator = `将在${payload.remainingSec}秒后继续下载`
-      })
       await reloadTasks()
     })().catch((error) => {
-      taskUnlisten?.(); sleepingUnlisten?.(); taskListenerPromise = undefined
+      taskUnlisten?.(); taskListenerPromise = undefined
       throw error
     })
     return taskListenerPromise
