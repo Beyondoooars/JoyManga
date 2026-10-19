@@ -30,9 +30,6 @@ src/components.d.ts
 
 # Distribution binaries
 dist-apk/
-dist-release/
-artifacts_latest/
-*.exe
 __pycache__/
 *.pyc
 docs/handoffs/

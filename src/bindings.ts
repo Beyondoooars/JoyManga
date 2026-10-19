@@ -496,15 +496,15 @@ defaultCbzMode?: CbzMode;
  */
 readingDirection?: ReadingDirection; 
 /**
- * 阅读时保持屏幕常亮（移动端与桌面端均生效）。
+ * 阅读时保持屏幕常亮。
  */
 keepScreenOn?: boolean; 
 /**
- * Android 音量键翻页（仅移动端有意义，桌面端忽略）。
+ * 音量键翻页。
  */
 volumeKeyPaging?: boolean; 
 /**
- * 仅在非计费网络（通常为 Wi-Fi）下允许下载。桌面端无网络计费概念，恒放行。
+ * 仅在非计费网络（通常为 Wi-Fi）下允许下载。
  */
 downloadOnlyWifi?: boolean }
 export type ConfigChangedEvent = { config: Config }
