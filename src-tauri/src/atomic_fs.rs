@@ -193,57 +193,6 @@ pub fn recover_file_backup(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub fn commit_dir_checked<F>(
-    temp_path: &Path,
-    target_path: &Path,
-    validate_existing: F,
-) -> Result<()>
-where
-    F: FnOnce(&Path) -> Result<()>,
-{
-    let _guard = replace_guard();
-    if !target_path.exists() {
-        return std::fs::rename(temp_path, target_path).context(format!(
-            "将临时目录`{}`替换为`{}`失败",
-            temp_path.display(),
-            target_path.display()
-        ));
-    }
-
-    validate_existing(target_path)
-        .context(format!("拒绝替换已有目录`{}`", target_path.display()))?;
-
-    let backup_path = sibling_path(target_path, "backup")?;
-    std::fs::rename(target_path, &backup_path)
-        .context(format!("备份旧目录`{}`失败", target_path.display()))?;
-
-    if let Err(err) = std::fs::rename(temp_path, target_path) {
-        let restore_result = std::fs::rename(&backup_path, target_path);
-        return match restore_result {
-            Ok(()) => Err(err).context(format!(
-                "将临时目录`{}`替换为`{}`失败，旧目录已恢复",
-                temp_path.display(),
-                target_path.display()
-            )),
-            Err(restore_err) => Err(anyhow::anyhow!(
-                "替换目录`{}`失败：{err}；恢复备份`{}`也失败：{restore_err}",
-                target_path.display(),
-                backup_path.display()
-            )),
-        };
-    }
-
-    if let Err(err) = std::fs::remove_dir_all(&backup_path) {
-        tracing::warn!(
-            path = %backup_path.display(),
-            error = %err,
-            "新目录已启用，但清理旧目录备份失败"
-        );
-    }
-    Ok(())
-}
-
 /// 将文件或目录原子重命名移出到隐藏的 .trash-UUID 临时目录中，
 /// 在文件系统同卷下 rename 属于毫秒级原子操作，实现瞬间与资料库解绑。
 #[cfg(test)]
@@ -318,7 +267,7 @@ pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_residual_trash, commit_dir_checked, commit_file, evict_to_trash,
+        cleanup_residual_trash, commit_file, evict_to_trash,
         recover_file_backup, sibling_path, write, write_checked,
     };
     use anyhow::anyhow;
@@ -396,23 +345,6 @@ mod tests {
         assert!(recover_file_backup(&target).is_err());
         assert!(!target.exists());
         assert_eq!(std::fs::read_dir(sandbox.path()).unwrap().count(), 2);
-    }
-
-    #[test]
-    fn rejected_directory_replacement_preserves_both_directories() {
-        let sandbox = TestDir::new();
-        let target = sandbox.path().join("chapter");
-        let staged = sandbox.path().join("chapter.part");
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::create_dir_all(&staged).unwrap();
-        std::fs::write(target.join("old.txt"), "old").unwrap();
-        std::fs::write(staged.join("new.txt"), "new").unwrap();
-
-        let result = commit_dir_checked(&staged, &target, |_| Err(anyhow!("wrong chapter")));
-
-        assert!(result.is_err());
-        assert!(target.join("old.txt").exists());
-        assert!(staged.join("new.txt").exists());
     }
 
     #[test]

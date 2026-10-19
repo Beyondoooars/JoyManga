@@ -60,18 +60,6 @@ fn validate_reveal_path(app: &AppHandle, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn show_logs_in_file_manager(app: AppHandle) -> CommandResult<()> {
-    let logs_dir =
-        logger::logs_dir(&app).map_err(|err| CommandError::from("获取日志目录失败", err))?;
-    std::fs::create_dir_all(&logs_dir)
-        .context(format!("创建日志目录`{}`失败", logs_dir.display()))
-        .map_err(|err| CommandError::from("打开日志目录失败", err))?;
-    reveal_path_in_file_manager(&app, &logs_dir, "打开日志目录失败")
-}
-
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command(async)]
 #[specta::specta]

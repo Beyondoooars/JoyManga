@@ -78,7 +78,7 @@ mockIPC(async (command, args) => {
     sessionStorage.setItem('jm-ui-fixture-removed', JSON.stringify([...removedComics]))
     return null
   }
-  if (command === 'export_cbz' || command === 'export_pdf') return null
+  if (command === 'export_cbz' || command === 'export_merged_cbz') return null
   if (command === 'login') return { uid: 'fixture-user', username: '模拟读者', photo: '', level: 1 }
   if (command === 'get_favorite_folder') return {
     folderList: [], total: 1, count: 20,

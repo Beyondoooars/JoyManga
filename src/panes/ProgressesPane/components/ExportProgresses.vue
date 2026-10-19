@@ -120,7 +120,7 @@ function handleProgressContextMenu(p: ProgressData) {
     <div v-if="progresses.size === 0" class="export-empty">
       <div><PhExport :size="27" weight="duotone" /></div>
       <strong>暂无导出任务</strong>
-      <span>从本地库存导出 CBZ 或 PDF</span>
+      <span>从本地库存导出 CBZ</span>
     </div>
     <div v-else class="flex">
       <span class="export-hint">拖动框选 · 右键操作</span>
