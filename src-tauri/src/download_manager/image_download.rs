@@ -244,16 +244,11 @@ pub(crate) async fn save_img(
     // 图像处理的闭包
     let save_path = save_path.to_path_buf();
     let process_img = move || -> anyhow::Result<()> {
+        // 这里必然需要反混淆：block_num == 0 的情况已在上面直接落盘返回
         let mut src_img = image::load_from_memory(&src_img_data)
             .context("解码图片失败")?
             .to_rgb8();
-        // 如果无需拼接，直接根据格式保存图片
-        // 否则拼接图片
-        let dst_img = if block_num == 0 {
-            src_img
-        } else {
-            stitch_img(&mut src_img, block_num)
-        };
+        let dst_img = stitch_img(&mut src_img, block_num);
         // 用来存图片编码后的数据
         let mut dst_img_data = Vec::new();
         // 反混淆后的图片统一编码为无损 WebP：体积明显小于 PNG，且不引入有损压缩
