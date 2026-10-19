@@ -219,7 +219,6 @@ pub async fn download_comic(
 async fn dispatch_uncompleted_chapters<OnStart, OnProgress, OnEnd>(
     app: &AppHandle,
     comic: &Comic,
-    interval_sec: u64,
     batch_errors: &mut Vec<String>,
     task_context: &str,
     mut on_start: OnStart,
@@ -237,7 +236,6 @@ async fn dispatch_uncompleted_chapters<OnStart, OnProgress, OnEnd>(
         .collect();
 
     if chapter_infos.is_empty() {
-        sleep(Duration::from_secs(interval_sec)).await;
         return;
     }
 
@@ -266,7 +264,6 @@ async fn dispatch_uncompleted_chapters<OnStart, OnProgress, OnEnd>(
     }
 
     on_end();
-    sleep(Duration::from_secs(interval_sec)).await;
 }
 
 fn format_batch_errors(action_name: &str, batch_errors: Vec<String>) -> CommandResult<()> {
@@ -364,7 +361,6 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
     let mut seen_ids = std::collections::HashSet::new();
     favorite_comics.retain(|comic| seen_ids.insert(comic.id));
     let total = favorite_comics.len() as i64;
-    let interval_sec = config.read().download_all_favorites_interval_sec;
     for (i, comic) in favorite_comics.into_iter().enumerate() {
         ensure_account().map_err(|err| CommandError::from("下载收藏夹中止", err))?;
         let comic_title = &comic.name;
@@ -378,7 +374,6 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
                 let string_chain = err.to_string_chain();
                 tracing::error!(err_title, message = string_chain);
                 batch_errors.push(format!("获取漫画`{comic_title}`失败"));
-                sleep(Duration::from_secs(interval_sec)).await;
                 continue;
             }
         };
@@ -392,7 +387,6 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
         dispatch_uncompleted_chapters(
             &app,
             &comic,
-            interval_sec,
             &mut batch_errors,
             "批量创建收藏章节下载任务",
             |total_chapters| {
@@ -442,7 +436,6 @@ pub async fn update_downloaded_comics(app: AppHandle) -> CommandResult<()> {
         .collect();
 
     let total = downloaded_comics.len() as i64;
-    let interval_sec = config.read().update_downloaded_comics_interval_sec;
     let _ = UpdateDownloadedComicsEvent::GetComicStart { total }.emit(&app);
 
     for (i, downloaded_comic) in downloaded_comics.into_iter().enumerate() {
@@ -462,7 +455,6 @@ pub async fn update_downloaded_comics(app: AppHandle) -> CommandResult<()> {
                 let string_chain = err.to_string_chain();
                 tracing::error!(err_title, message = string_chain);
                 batch_errors.push(format!("更新漫画`{comic_title}`失败"));
-                sleep(Duration::from_secs(interval_sec)).await;
                 continue;
             }
         };
@@ -473,7 +465,6 @@ pub async fn update_downloaded_comics(app: AppHandle) -> CommandResult<()> {
             .any(|chapter_info| chapter_info.is_downloaded == Some(true));
 
         if !has_downloaded_chapter {
-            sleep(Duration::from_secs(interval_sec)).await;
             continue;
         }
 
@@ -483,7 +474,6 @@ pub async fn update_downloaded_comics(app: AppHandle) -> CommandResult<()> {
         dispatch_uncompleted_chapters(
             &app,
             &comic,
-            interval_sec,
             &mut batch_errors,
             "更新库存时创建章节下载任务",
             |total_chapters| {

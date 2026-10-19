@@ -348,7 +348,6 @@ pub fn export_logs(
     log_content.push_str(&format!("导出目录: {}\n", config.export_dir.display()));
     log_content.push_str(&format!("当前API域名: {}\n", config.get_api_domain()));
     log_content.push_str(&format!("当前图片域名: {}\n", config.get_image_domain()));
-    log_content.push_str(&format!("文件日志记录: {}\n\n", config.enable_file_logger));
 
     if let Some(fe_logs) = frontend_logs {
         if !fe_logs.is_empty() {

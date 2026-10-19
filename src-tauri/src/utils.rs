@@ -123,33 +123,6 @@ pub(crate) fn validate_delete_target(root: &Path, target: &Path) -> anyhow::Resu
     Ok(())
 }
 
-pub(crate) fn validate_chapter_directory_format(format: &str) -> anyhow::Result<()> {
-    let parts: Vec<_> = format
-        .split('/')
-        .filter(|part| !part.trim().is_empty())
-        .collect();
-    ensure!(parts.len() >= 2, "下载目录格式至少需要两个层级");
-    let (chapter, parents) = parts.split_last().context("下载目录格式不能为空")?;
-    let chapter_keys = ["{chapter_id", "{chapter_title", "{order"];
-    ensure!(
-        chapter_keys.iter().any(|key| chapter.contains(key)),
-        "下载目录格式最后一级必须包含章节ID、标题或序号"
-    );
-    ensure!(
-        !parents
-            .iter()
-            .any(|part| chapter_keys.iter().any(|key| part.contains(key))),
-        "章节ID、标题和序号只能出现在下载目录格式的最后一级"
-    );
-    ensure!(
-        parents
-            .iter()
-            .any(|part| part.contains("{comic_id") || part.contains("{comic_title")),
-        "章节目录的上级必须包含漫画ID或标题"
-    );
-    Ok(())
-}
-
 /// 在`root`下安全创建`relative`目录，并返回最终目录的规范化路径。
 ///
 /// `relative`只能包含普通路径组件。创建前会检查当前已存在的最近祖先，创建后会再次
@@ -652,30 +625,6 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
         let disguised_root = std::fs::canonicalize(child.join("..")).unwrap();
         assert!(super::validate_delete_target(&root, &disguised_root).is_err());
-    }
-
-    #[test]
-    fn directory_format_keeps_chapter_variables_in_last_level() {
-        for format in [
-            "{comic_title}/{chapter_id}/images",
-            "{chapter_id}/{comic_title}",
-            "{comic_title}/{order}/{chapter_id}",
-            "fixed/{comic_id}-{chapter_id}",
-        ] {
-            assert!(
-                super::validate_chapter_directory_format(format).is_err(),
-                "{format}"
-            );
-        }
-        for format in [
-            "{comic_title}/{chapter_title}",
-            "{author}/{comic_id}/{order}-{chapter_id}",
-        ] {
-            assert!(
-                super::validate_chapter_directory_format(format).is_ok(),
-                "{format}"
-            );
-        }
     }
 
     #[test]

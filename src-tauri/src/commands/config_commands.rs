@@ -9,7 +9,6 @@ use crate::config::{Config, ConfigStorage};
 use crate::download_queue::{DownloadQueue, DownloadSettings, StoredDownload};
 use crate::errors::{CommandError, CommandResult};
 use crate::extensions::AppHandleExt;
-use crate::logger;
 use crate::utils;
 
 #[tauri::command]
@@ -59,17 +58,6 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
         || previous.img_concurrency != next.img_concurrency
     {
         app.get_download_manager().reload_concurrency();
-    }
-    if previous.enable_file_logger != next.enable_file_logger {
-        let enabled = app.get_config().read().enable_file_logger;
-        let result = if enabled {
-            logger::reload_file_logger()
-        } else {
-            logger::disable_file_logger()
-        };
-        if let Err(error) = result {
-            tracing::warn!(error = %error, "设置已保存，但日志服务更新失败");
-        }
     }
 }
 
@@ -297,10 +285,7 @@ pub fn restore_app_data(app: AppHandle, backup_path: String) -> CommandResult<Co
 
     let mut restored_config: Config = serde_json::from_value(config_value.clone())
         .context("解析备份配置失败")
-        .map_err(|err| CommandError::from("恢复备份失败", err))?;
-
-    restored_config.apply_download_policy();
-    restored_config.apply_storage_policy();
+        .map_err(|err| CommandError::from("恢复备份失败", err))?;    restored_config.apply_storage_policy();
     restored_config
         .validate()
         .map_err(|err| CommandError::from("备份配置校验失败", err))?;

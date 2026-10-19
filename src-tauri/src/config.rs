@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
 
-use crate::types::{CbzMode, DownloadFormat, ProxyMode, ReadingDirection};
+use crate::types::{CbzMode, ProxyMode, ReadingDirection};
 use crate::{atomic_fs, utils};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -196,23 +196,15 @@ pub struct Config {
     pub password: String,
     pub download_dir: PathBuf,
     pub export_dir: PathBuf,
-    pub download_format: DownloadFormat,
-    pub dir_fmt: String,
     pub proxy_mode: ProxyMode,
     pub proxy_host: String,
     pub proxy_port: u16,
-    pub enable_file_logger: bool,
     pub chapter_concurrency: usize,
-    pub chapter_download_interval_sec: u64,
     pub img_concurrency: usize,
-    pub img_download_interval_sec: u64,
-    pub download_all_favorites_interval_sec: u64,
-    pub update_downloaded_comics_interval_sec: u64,
     pub api_domain_mode: ApiDomainMode,
     pub custom_api_domain: String,
     pub image_domain_mode: ImageDomainMode,
     pub custom_image_domain: String,
-    pub should_download_cover: bool,
     /// 下载完成后 CBZ 自动整合的默认方式（单次下载可在界面上另行选择）。
     #[serde(default)]
     pub default_cbz_mode: CbzMode,
@@ -233,15 +225,6 @@ pub struct Config {
 impl Config {
     pub fn apply_storage_policy(&mut self) {
         self.export_dir.clone_from(&self.download_dir);
-    }
-    pub fn apply_download_policy(&mut self) {
-        // 原始格式策略：未混淆图片按源格式原样落盘，重组图片使用无损 WebP，
-        // 相比统一转 PNG 显著降低体积与 CPU 开销，同时不引入有损压缩。
-        self.download_format = DownloadFormat::Original;
-        self.chapter_download_interval_sec = 0;
-        self.img_download_interval_sec = 0;
-        self.download_all_favorites_interval_sec = 0;
-        self.update_downloaded_comics_interval_sec = 0;
     }
     pub fn new(storage: &ConfigStorage) -> anyhow::Result<Self> {
         let base_dir = storage.base_dir();
@@ -276,7 +259,6 @@ impl Config {
                 "检测到无效或旧版配置，已逐字段恢复并保留原文件备份"
             );
         }
-        config.apply_download_policy();
         config.apply_storage_policy();
         config.validate()?;
         // 启动期回写失败（只读目录、磁盘满、杀软占用）不应让应用无法打开：
@@ -314,45 +296,6 @@ impl Config {
             (1..=50).contains(&self.img_concurrency),
             "图片并发数必须在1到50之间（移动端建议3~10）"
         );
-
-        for (name, value) in [
-            ("章节下载间隔", self.chapter_download_interval_sec),
-            ("图片下载间隔", self.img_download_interval_sec),
-            (
-                "下载整个收藏夹间隔",
-                self.download_all_favorites_interval_sec,
-            ),
-            (
-                "更新本地库存间隔",
-                self.update_downloaded_comics_interval_sec,
-            ),
-        ] {
-            ensure!(value <= 3_600, "{name}不能超过3600秒（1小时）");
-        }
-
-        let dir_fmt = self.dir_fmt.trim();
-        ensure!(!dir_fmt.is_empty(), "下载目录格式不能为空");
-        ensure!(
-            dir_fmt
-                .split('/')
-                .filter(|part| !part.trim().is_empty())
-                .count()
-                >= 2,
-            "下载目录格式至少需要两个层级"
-        );
-        ensure!(
-            ["{comic_id}", "{comic_title}"]
-                .iter()
-                .any(|key| dir_fmt.contains(key)),
-            "下载目录格式必须包含comic_id或comic_title"
-        );
-        ensure!(
-            ["{chapter_id}", "{chapter_title}", "{order}"]
-                .iter()
-                .any(|key| dir_fmt.contains(key)),
-            "下载目录格式必须包含chapter_id、chapter_title或order"
-        );
-        utils::validate_chapter_directory_format(dir_fmt)?;
 
         if self.api_domain_mode == ApiDomainMode::Custom {
             validate_custom_domain(&self.custom_api_domain, "自定义API域名")?;
@@ -444,24 +387,15 @@ impl Config {
             password: String::new(),
             download_dir,
             export_dir,
-            download_format: DownloadFormat::default(),
-            dir_fmt: "{comic_title}/{chapter_title}".to_string(),
             proxy_mode: ProxyMode::default(),
             proxy_host: "127.0.0.1".to_string(),
             proxy_port: 7890,
-            // Android 上文件日志持续写入会消耗电量和存储，默认关闭
-            enable_file_logger: false,
             chapter_concurrency,
-            chapter_download_interval_sec: 0,
             img_concurrency,
-            img_download_interval_sec: 0,
-            download_all_favorites_interval_sec: 0,
-            update_downloaded_comics_interval_sec: 0,
             api_domain_mode: ApiDomainMode::Domain2,
             custom_api_domain: API_DOMAIN_2.to_string(),
             image_domain_mode: ImageDomainMode::Domain3,
             custom_image_domain: IMAGE_DOMAIN_3.to_string(),
-            should_download_cover: true,
             default_cbz_mode: CbzMode::default(),
             reading_direction: ReadingDirection::default(),
             keep_screen_on: true,
@@ -665,7 +599,7 @@ mod tests {
         std::fs::rename(&path, &backup).unwrap();
         assert_eq!(super::Config::new(&storage).unwrap().img_concurrency, 7);
         assert!(!backup.exists());
-        config.dir_fmt = "{comic_title}/{chapter_id}/images".into();
+        config.img_concurrency = 0;
         assert!(config.validate().is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -756,22 +690,5 @@ mod route_migration_tests {
         let once = value.clone();
         migrate_config_schema(&mut value);
         assert_eq!(once, value);
-    }
-}
-
-#[cfg(test)]
-mod simplified_settings_tests {
-    use super::*;
-    #[test]
-    fn default_and_loaded_download_policy_are_original_without_sleep_intervals() {
-        let mut config = Config::default(Path::new("app"));
-        assert_eq!(config.download_format, DownloadFormat::Original);
-        config.download_format = DownloadFormat::Jpeg;
-        config.img_download_interval_sec = 5;
-        config.chapter_download_interval_sec = 10;
-        config.apply_download_policy();
-        assert_eq!(config.download_format, DownloadFormat::Original);
-        assert_eq!(config.img_download_interval_sec, 0);
-        assert_eq!(config.chapter_download_interval_sec, 0);
     }
 }

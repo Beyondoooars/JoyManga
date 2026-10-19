@@ -12,13 +12,6 @@ pub struct DownloadSpeedEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadSleepingEvent {
-    pub id: i64,
-    pub remaining_sec: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 #[serde(tag = "event", content = "data")]
 pub enum DownloadTaskEvent {
     Create(crate::download_queue::DownloadTaskSnapshot),

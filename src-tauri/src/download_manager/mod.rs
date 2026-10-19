@@ -296,11 +296,11 @@ mod regression_tests {
     use super::*;
     use crate::atomic_fs;
     use crate::download_scheduler::DownloadLimiter;
-    use crate::types::{ChapterInfo, Comic, DownloadFormat};
+    use crate::types::{ChapterInfo, Comic};
     use bytes::Bytes;
     use image::{ImageFormat, RgbImage};
     use std::io::Cursor;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tokio::sync::watch;
 
     #[test]
@@ -321,8 +321,6 @@ mod regression_tests {
         };
         let settings = DownloadSettings {
             download_dir: root.clone(),
-            dir_fmt: "{comic_title}/{chapter_title}".into(),
-            download_format: DownloadFormat::Jpeg,
         };
         super::download_task::save_download_metadata(&comic, &settings).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), original);
@@ -420,25 +418,10 @@ mod regression_tests {
         let writes = Arc::new(TaskFileWrites::default());
         writes.cancel();
         let source = Bytes::from(source.into_inner());
-        let result = save_img(
-            &path,
-            DownloadFormat::Png,
-            0,
-            source.clone(),
-            ImageFormat::Png,
-            writes,
-        )
-        .await;
+        let result = save_img(&path, 0, source.clone(), ImageFormat::Png, writes).await;
         assert!(result.unwrap_err().to_string().contains("保存图片"));
         assert!(!root.exists());
-        save_img(
-            &path,
-            DownloadFormat::Png,
-            0,
-            source,
-            ImageFormat::Png,
-            Arc::default(),
-        )
+        save_img(&path, 0, source, ImageFormat::Png, Arc::default())
         .await
         .unwrap();
         assert!(is_valid_saved_image(&path));
@@ -446,8 +429,19 @@ mod regression_tests {
     }
 
     #[test]
-    fn invalid_nested_chapter_layout_is_rejected_before_changing_paths() {
+    fn flat_layout_is_applied_and_missing_chapters_are_rejected() {
+        let settings = DownloadSettings {
+            download_dir: PathBuf::from("downloads"),
+        };
+        // 没有章节信息时拒绝更新，避免写入一个指向空目录的库路径
+        let mut empty = Comic::default();
+        assert!(empty.apply_download_dir(&settings).is_err());
+        assert!(empty.comic_download_dir.is_none());
+
+        // 固定平铺布局：书库目录 + 本子名 - 序号 - 话名.cbz
         let mut comic = Comic {
+            id: 42,
+            name: "测试本子".into(),
             chapter_infos: vec![ChapterInfo {
                 chapter_id: 1,
                 chapter_title: "第一章".into(),
@@ -457,14 +451,14 @@ mod regression_tests {
             }],
             ..Comic::default()
         };
-        let settings = DownloadSettings {
-            download_dir: PathBuf::from("downloads"),
-            dir_fmt: "{comic_title}/{chapter_id}/images".into(),
-            download_format: DownloadFormat::Jpeg,
-        };
-        assert!(comic.update_download_dir_fields_by_fmt(&settings).is_err());
-        assert!(comic.comic_download_dir.is_none());
-        assert!(comic.chapter_infos[0].chapter_download_dir.is_none());
+        comic.apply_download_dir(&settings).unwrap();
+        assert_eq!(comic.comic_download_dir.as_deref(), Some(Path::new("downloads")));
+        let chapter_dir = comic.chapter_infos[0].chapter_download_dir.as_ref().unwrap();
+        assert_eq!(chapter_dir.parent(), Some(Path::new("downloads")));
+        assert_eq!(
+            chapter_dir.file_name().and_then(|name| name.to_str()),
+            Some("测试本子 [JM42-1].cbz")
+        );
     }
 
     #[test]

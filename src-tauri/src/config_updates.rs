@@ -45,7 +45,6 @@ pub fn commit_locked(
     next.revision = current.revision.checked_add(1).context("设置版本耗尽")?;
     ensure!(next.revision < (1_u64 << 53), "设置版本超出客户端范围");
     next.schema_version = 1;
-    next.apply_download_policy();
     next.apply_storage_policy();
     next.validate()?;
     std::fs::create_dir_all(&next.download_dir).context("创建书库目录失败")?;

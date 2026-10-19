@@ -1,25 +1,20 @@
-use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, Context};
 use parking_lot::{Mutex, RwLock};
-use serde::{Deserialize, Serialize};
-use specta::Type;
 use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::watch;
-use tokio::time::sleep;
 
 use crate::download_queue::{DownloadSettings, DownloadTaskSnapshot};
 use crate::download_scheduler::{run_bounded, DownloadPermit};
-use crate::events::{DownloadSleepingEvent, DownloadTaskEvent};
+use crate::events::DownloadTaskEvent;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
 use crate::types::{ChapterInfo, Comic};
-use crate::utils::{self, filename_filter};
+use crate::utils;
 
 use super::image_download::DownloadImgTask;
 use super::package::package_chapter_to_cbz;
@@ -54,16 +49,6 @@ pub(crate) fn save_download_metadata(
     comic.save_comic_metadata()
 }
 
-#[derive(Default, Debug, PartialEq, Clone, Serialize, Deserialize, Type)]
-pub struct DirFmtParams {
-    pub comic_id: i64,
-    pub comic_title: String,
-    pub author: String,
-    pub chapter_id: i64,
-    pub chapter_title: String,
-    pub order: i64,
-}
-
 #[derive(Clone)]
 pub(crate) struct DownloadTask {
     pub(crate) task_id: uuid::Uuid,
@@ -84,7 +69,7 @@ impl DownloadTask {
     pub(crate) fn new(app: AppHandle, mut comic: Comic, chapter_id: i64) -> anyhow::Result<Self> {
         let settings = DownloadSettings::from(&*app.get_config().read());
         comic
-            .update_download_dir_fields_by_fmt(&settings)
+            .apply_download_dir(&settings)
             .context(format!("漫画`{}`更新`download_dir`字段失败", comic.name))?;
 
         let chapter_info = comic
@@ -145,9 +130,6 @@ impl DownloadTask {
         }
 
         let completed = *self.state_sender.borrow() == DownloadTaskState::Completed;
-        if completed {
-            self.sleep_between_chapter().await;
-        }
         self.download_manager
             .remove_finished_task(self.chapter_info.chapter_id, self.task_id);
         if completed {
@@ -196,7 +178,7 @@ impl DownloadTask {
         let Some(temp_download_dir) = self.create_temp_download_dir() else {
             return;
         };
-        // 清理临时下载目录中与`config.download_format`对不上的文件
+        // 清理临时下载目录中不属于当前页码或不是图片的文件
         self.clean_temp_download_dir(&temp_download_dir);
 
         // 重新下载时保留原CBZ，复用可读取的页面，只请求缺失或损坏页面。
@@ -212,7 +194,6 @@ impl DownloadTask {
                 super::image_download::seed_valid_pages(
                     source,
                     &temp_download_dir,
-                    self.settings.download_format,
                     urls_with_block_num.len(),
                 )
             }) {
@@ -395,7 +376,7 @@ impl DownloadTask {
         Some(urls_with_block_num)
     }
 
-    /// 删除临时下载目录中与`config.download_format`对不上的文件
+    /// 删除临时下载目录中不属于当前页码或不是图片的文件
     fn clean_temp_download_dir(&self, temp_download_dir: &Path) {
         let comic_title = &self.comic.name;
         let chapter_title = &self.chapter_info.chapter_title;
@@ -413,23 +394,12 @@ impl DownloadTask {
             }
         };
 
-        let download_format = self.settings.download_format;
-        let extension = download_format.extension();
         for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
-            // path有扩展名，且能转换为utf8，并与`config.download_format`一致或是gif，则保留
+            // 只保留合法页码的图片文件（扩展名随源格式，不做格式转换）
             let should_keep = path
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| {
-                    if download_format == crate::types::DownloadFormat::Original {
-                        // 原始模式：任意图片扩展名都保留
-                        matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif")
-                    } else {
-                        ext == extension
-                            || (ext == "gif"
-                                && download_format != crate::types::DownloadFormat::Png)
-                    }
-                })
+                .is_some_and(|ext| matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif"))
                 && path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
@@ -500,20 +470,6 @@ impl DownloadTask {
                 ControlFlow::Break(())
             }
             _ => ControlFlow::Continue(()),
-        }
-    }
-
-    async fn sleep_between_chapter(&self) {
-        let mut remaining_sec = self.app.get_config().read().chapter_download_interval_sec;
-        while remaining_sec > 0 {
-            // 发送章节休眠事件
-            let _ = DownloadSleepingEvent {
-                id: self.chapter_info.chapter_id,
-                remaining_sec,
-            }
-            .emit(&self.app);
-            sleep(Duration::from_secs(1)).await;
-            remaining_sec -= 1;
         }
     }
 
@@ -590,30 +546,16 @@ impl DownloadTask {
 }
 
 impl Comic {
-    /// 根据fmt更新`comic_download_dir`和`chapter_infos.chapter_download_dir`字段
-    pub(crate) fn update_download_dir_fields_by_fmt(
+    /// 根据下载设置更新 `comic_download_dir` 与 `chapter_infos.chapter_download_dir`。
+    ///
+    /// 目录布局已固定为「书库目录 / 本子名 [JM本子号-章节号].cbz」的平铺结构，
+    /// 不再支持用户自定义目录模板。
+    pub(crate) fn apply_download_dir(
         &mut self,
         settings: &DownloadSettings,
     ) -> anyhow::Result<()> {
-        utils::validate_chapter_directory_format(&settings.dir_fmt)?;
         if self.chapter_infos.is_empty() {
             return Err(anyhow!("没有章节信息，无法更新下载目录字段"));
-        }
-
-        for chapter_info in &mut self.chapter_infos {
-            let chapter_title = &chapter_info.chapter_title;
-
-            let dir_fmt_params = DirFmtParams {
-                comic_id: self.id,
-                comic_title: self.name.clone(),
-                author: self.author.join(", "),
-                chapter_id: chapter_info.chapter_id,
-                chapter_title: chapter_info.chapter_title.clone(),
-                order: chapter_info.order,
-            };
-
-            let _ = ChapterInfo::get_chapter_download_dir_by_fmt(settings, &dir_fmt_params)
-                .context(format!("章节`{chapter_title}`根据fmt获取章节下载目录失败"))?;
         }
 
         let comic_dir = settings.download_dir.clone();
@@ -652,57 +594,6 @@ impl Comic {
 }
 
 impl ChapterInfo {
-    fn get_chapter_download_dir_by_fmt(
-        settings: &DownloadSettings,
-        fmt_params: &DirFmtParams,
-    ) -> anyhow::Result<PathBuf> {
-        use strfmt::strfmt;
-
-        let json_value =
-            serde_json::to_value(fmt_params).context("将DirFmtParams转为serde_json::Value失败")?;
-
-        let json_map = json_value.as_object().context("DirFmtParams不是JSON对象")?;
-
-        let vars: HashMap<String, String> = json_map
-            .into_iter()
-            .map(|(k, v)| {
-                let key = k.clone();
-                let value = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    _ => v.to_string(),
-                };
-                (key, value)
-            })
-            .collect();
-
-        let download_dir = settings.download_dir.clone();
-        let dir_fmt = &settings.dir_fmt;
-
-        let dir_fmt_parts: Vec<&str> = dir_fmt.split('/').collect();
-
-        let mut dir_names = Vec::new();
-        for fmt in dir_fmt_parts {
-            let dir_name = strfmt(fmt, &vars).context("格式化目录名失败")?;
-            let dir_name = filename_filter(&dir_name);
-            if !dir_name.is_empty() {
-                dir_names.push(dir_name);
-            }
-        }
-
-        if dir_names.len() < 2 {
-            let err_msg =
-                "配置中的下载目录格式至少要有两个层级，例如：{comic_title}/{chapter_title}";
-            return Err(anyhow!(err_msg));
-        }
-        // 将格式化后的目录名拼接成完整的目录路径
-        let mut chapter_download_dir = download_dir;
-        for dir_name in dir_names {
-            chapter_download_dir = chapter_download_dir.join(dir_name);
-        }
-
-        Ok(chapter_download_dir)
-    }
-
     fn get_temp_download_dir(&self) -> anyhow::Result<PathBuf> {
         let chapter_download_dir = self
             .chapter_download_dir

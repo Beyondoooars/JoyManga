@@ -9,12 +9,10 @@ import '../src/styles.css'
 
 const config = {
   username: '', password: '', downloadDir: 'D:/模拟下载', exportDir: 'D:/模拟导出',
-  downloadFormat: 'Jpeg', dirFmt: '{comic_title}/{chapter_title}', proxyMode: 'NoProxy',
-  proxyHost: '127.0.0.1', proxyPort: 7890, enableFileLogger: false,
-  chapterConcurrency: 3, chapterDownloadIntervalSec: 0, imgConcurrency: 8, imgDownloadIntervalSec: 0,
-  downloadAllFavoritesIntervalSec: 0, updateDownloadedComicsIntervalSec: 0,
+  proxyMode: 'NoProxy', proxyHost: '127.0.0.1', proxyPort: 7890,
+  chapterConcurrency: 3, imgConcurrency: 8,
   apiDomainMode: 'Custom', customApiDomain: 'fixture.invalid',
-  imageDomainMode: 'Custom', customImageDomain: 'fixture.invalid', shouldDownloadCover: false,
+  imageDomainMode: 'Custom', customImageDomain: 'fixture.invalid',
 }
 try {
   Object.assign(config, JSON.parse(sessionStorage.getItem('jm-ui-fixture-config') ?? '{}'))
