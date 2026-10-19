@@ -334,6 +334,22 @@ class MainActivity : TauriActivity() {
 
     inner class AndroidBridge {
         @JavascriptInterface fun libraryPath(): String = libraryRoot().absolutePath
+        /** 公共下载目录下的默认书库：文件管理器直接可见，卸载应用不随之删除。 */
+        @JavascriptInterface fun downloadsPath(): String =
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JoyManga").absolutePath
+        /** 是否已具备公共存储写权限：API 29+ 看「所有文件访问」，更老版本看 WRITE_EXTERNAL_STORAGE 运行时权限。 */
+        @JavascriptInterface fun hasAllFilesAccess(): Boolean =
+            if (Build.VERSION.SDK_INT >= 29) Environment.isExternalStorageManager()
+            else checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        /** 跳系统页授予「所有文件访问」；API 29 以下弹运行时权限对话框（结果由系统处理，无需回传）。 */
+        @JavascriptInterface fun requestAllFilesAccess() {
+            if (Build.VERSION.SDK_INT >= 29) {
+                try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
+                catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Exception) {} }
+            } else {
+                runOnUiThread { requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 102) }
+            }
+        }
         @JavascriptInterface fun exitApp() { runOnUiThread { moveTaskToBack(true) } }
         @JavascriptInterface fun pickDocuments(id: String, mode: String) {
             if (!validId(id)) return

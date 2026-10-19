@@ -14,6 +14,9 @@ declare global {
       exitApp(): void
       setKeepScreenOn(enabled: boolean): void
       setVolumeKeyPaging(enabled: boolean): void
+      downloadsPath(): string
+      hasAllFilesAccess(): boolean
+      requestAllFilesAccess(): void
     }
   }
 }
@@ -51,6 +54,21 @@ export async function withAndroidSelection<T>(mode: PickMode, action: (paths: st
 
 export function exportToAndroidDownloads(path: string) {
   return request((id) => window.JmAndroid!.exportDocuments(id, path))
+}
+
+/** 公共下载目录（Android Download）的绝对路径；桥不可用时返回空串。 */
+export function downloadsPath() {
+  return window.JmAndroid?.downloadsPath() ?? ''
+}
+
+/** 是否已持有「所有文件访问」权限；桥不可用时视为未授权。 */
+export function hasAllFilesAccess() {
+  return window.JmAndroid?.hasAllFilesAccess() ?? false
+}
+
+/** 跳转到系统设置申请「所有文件访问」权限（结果由用户在系统页决定）。 */
+export function requestAllFilesAccess() {
+  window.JmAndroid?.requestAllFilesAccess()
 }
 
 /**

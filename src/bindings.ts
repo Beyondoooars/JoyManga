@@ -334,6 +334,22 @@ async getSyncedComicInWeekly(comic: ComicInWeekly) : Promise<Result<ComicInWeekl
     else return { status: "error", error: e  as any };
 }
 },
+async listDirectoryEntries(path: string) : Promise<Result<DirectoryEntry[], CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_directory_entries", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async validateDownloadDir(path: string) : Promise<Result<ValidatedDownloadDir, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_download_dir", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async testDomainLatency(domain: string) : Promise<Result<number, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("test_domain_latency", { domain }) };
@@ -506,8 +522,13 @@ volumeKeyPaging?: boolean;
 /**
  * 仅在非计费网络（通常为 Wi-Fi）下允许下载。
  */
-downloadOnlyWifi?: boolean }
+downloadOnlyWifi?: boolean; 
+/**
+ * 文件日志收集等级：写入应用数据目录的滚动日志；`Off` 完全不落盘。
+ */
+logLevel?: LogLevel }
 export type ConfigChangedEvent = { config: Config }
+export type DirectoryEntry = { name: string; path: string }
 export type DownloadAllFavoritesEvent = { event: "GetFavoritesStart" } | { event: "GetComicsProgress"; data: { current: number; total: number } } | { event: "StartCreateDownloadTasks"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreatingDownloadTask"; data: { comicId: number; current: number } } | { event: "EndCreateDownloadTasks"; data: { comicId: number } } | { event: "GetComicsEnd" }
 export type DownloadSpeedEvent = { speed: string }
 export type DownloadTaskEvent = { event: "Create"; data: DownloadTaskSnapshot } | { event: "Update"; data: { chapterId: number; revision: number; state: DownloadTaskState; downloadedImgCount: number; totalImgCount: number; errorMessage: string | null } }
@@ -533,7 +554,18 @@ export type ImageDomainPreset = { mode: ImageDomainMode; label: string; domain: 
 export type ImportReport = { imported: number; skipped: number; errors: string[] }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
 export type LogEvent = { timestamp: string; level: LogLevel; fields: { [key in string]: JsonValue }; target: string; filename: string; line_number: number }
-export type LogLevel = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR"
+/**
+ * 日志等级。
+ * 
+ * `Trace`~`Error` 的 serde 字符串与 tracing JSON 输出的 `level` 字段一致，
+ * 既用于 `LogEvent` 的等级反序列化，也用于设置页的文件日志收集等级；
+ * `Off` 只在收集等级场景出现（表示不落盘），默认收集 `Info` 及以上。
+ */
+export type LogLevel = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" | 
+/**
+ * 不写入文件日志（仍输出到前端事件层）。仅用于设置页的收集等级。
+ */
+"OFF"
 export type LoginRespData = { profile: GetUserProfileRespData; sessionEpoch: number; switchedApiDomainMode: ApiDomainMode | null }
 export type NetworkCheckReport = { api: NetworkProbe; image: NetworkProbe; domain: NetworkProbe }
 export type NetworkProbe = { label: string; state: string; elapsedMs: number | null; message: string }
@@ -558,6 +590,7 @@ export type SearchResultVariant = { SearchResult: SearchResult } | { Comic: Comi
 export type SearchSort = "Latest" | "View" | "Picture" | "Like"
 export type SessionChangedEvent = { sessionEpoch: number; profile: GetUserProfileRespData | null }
 export type UpdateDownloadedComicsEvent = { event: "GetComicStart"; data: { total: number } } | { event: "GetComicProgress"; data: { current: number; total: number } } | { event: "CreateDownloadTasksStart"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreateDownloadTaskProgress"; data: { comicId: number; current: number } } | { event: "CreateDownloadTasksEnd"; data: { comicId: number } } | { event: "GetComicEnd" }
+export type ValidatedDownloadDir = { canonicalPath: string }
 export type WeeklyType = { id: string; title: string }
 
 /** tauri-specta globals **/

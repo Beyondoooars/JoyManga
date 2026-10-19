@@ -3,14 +3,15 @@ import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { PhFolder, PhGlobe, PhWrench, PhInfo, PhX, PhArrowClockwise, PhCaretDown, PhBookOpen } from '@phosphor-icons/vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
-import { commands, type CbzMode, type ImageDomainPreset, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection } from '../bindings.ts'
+import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
 import { withAndroidSelection, exportToAndroidDownloads } from '../utils/androidStorage.ts'
-import { getErrorMessage } from '../utils/errors.ts'
+import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
 import PathField from '../components/PathField.vue'
+import StorageLocationDialog from './StorageLocationDialog.vue'
 
 const showing = defineModel<boolean>('showing', { required: true })
 const store = useStore()
@@ -27,6 +28,15 @@ function updateProxyPort(value: number | null) {
 }
 const advancedData = ref(false)
 const manualNetwork = ref(false)
+const showStoragePicker = ref(false)
+const logLevelOptions: Array<{ label: string; value: LogLevel }> = [
+  { label: '详细（INFO）', value: 'INFO' },
+  { label: '仅警告（WARN）', value: 'WARN' },
+  { label: '仅错误（ERROR）', value: 'ERROR' },
+  { label: '关闭（OFF）', value: 'OFF' },
+]
+const logsDirSize = ref<number | undefined>(undefined)
+const logsSizeLoading = ref(false)
 const imagePresets = ref<ImageDomainPreset[]>([])
 const checking = ref(false)
 const checkResult = ref<NetworkCheckReport>()
@@ -85,6 +95,7 @@ const cbzModeOptions = [
   { label: '逐话保留 CBZ', value: 'perChapter' },
 ]
 const cbzMode = computed({ get: () => store.config?.defaultCbzMode ?? 'merge', set: (value: CbzMode) => { if (store.config) store.config.defaultCbzMode = value } })
+const logLevel = computed({ get: () => store.config?.logLevel ?? 'INFO', set: (value: LogLevel) => { if (store.config) store.config.logLevel = value } })
 const readingDirectionOptions = [
   { label: '从右往左（日漫）', value: 'RightToLeft' },
   { label: '从左往右', value: 'LeftToRight' },
@@ -193,6 +204,53 @@ async function exportLogs() {
     await exportToAndroidDownloads(result.data.filePath)
   })
 }
+
+/** 目录选择器确认后的书库位置变更；exportDir 由后端随配置自动同步 */
+function chooseDownloadDir(path: string) {
+  dialog.warning({
+    title: '更改漫画书库位置',
+    content: `新下载将写入 ${path}；已下载内容保留在原处，不会被移动。`,
+    positiveText: '确认更改',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      if (!store.config) return
+      store.config.downloadDir = path
+      message.success('书库位置已更新')
+    },
+  })
+}
+
+async function refreshLogsDirSize() {
+  logsSizeLoading.value = true
+  try {
+    const result = await commands.getLogsDirSize()
+    if (result.status === 'ok') logsDirSize.value = result.data
+    else message.error(formatCommandError(result.error))
+  } catch (error) {
+    message.error(getErrorMessage(error))
+  } finally {
+    logsSizeLoading.value = false
+  }
+}
+
+async function clearLogsAction() {
+  await dataAction('logs-clear', async () => {
+    const result = await store.runConfigMaintenance(() => commands.clearLogs())
+    if (result.status === 'error') throw new Error(formatCommandError(result.error))
+    message.success('日志已清理')
+    await refreshLogsDirSize()
+  })
+}
+
+const logsSizeText = computed(() => {
+  if (logsDirSize.value === undefined) return ''
+  if (logsDirSize.value === 0) return '暂无日志'
+  return `日志占用 ${(logsDirSize.value / 1048576).toFixed(1)} MB`
+})
+
+watch(advancedData, (open) => {
+  if (open && logsDirSize.value === undefined) void refreshLogsDirSize()
+})
 </script>
 
 <template>
@@ -209,11 +267,15 @@ async function exportLogs() {
             <PathField v-model:value="store.config.downloadDir" label="漫画书库" />
           </div>
           <div class="setting-row">
+            <n-button secondary size="small" @click="showStoragePicker = true">更改位置</n-button>
+          </div>
+          <div class="setting-row">
             <label class="setting-label" for="cbz-mode">下载整理</label>
             <n-select aria-label="下载完成后 CBZ 整理方式" v-model:value="cbzMode" :options="cbzModeOptions" />
           </div>
-          <p class="settings-note">下载后自动整理；单次下载时可在本子详情页临时选择。</p>
+          <p class="settings-note">下载后自动整理；单次下载时可在本子详情页临时选择。更改后仅影响新下载，已下载内容保留在原处。</p>
           <p v-if="isAndroid" class="settings-note">应用专用书库随卸载清理；长期保留请导出到系统下载。</p>
+          <StorageLocationDialog v-model:show="showStoragePicker" @select="chooseDownloadDir" />
         </section>
 
         <section class="settings-section">
@@ -286,7 +348,20 @@ async function exportLogs() {
           <p class="settings-note">备份含设置和任务；不含漫画文件与账号密码。</p>
           <n-alert v-if="dataError" type="error" :show-icon="false">{{ dataError }}</n-alert>
           <button class="disclosure" type="button" :aria-expanded="advancedData" aria-controls="maintenance-settings" @click="advancedData = !advancedData"><span>更多维护</span><PhCaretDown :size="16" :class="{ expanded: advancedData }" aria-hidden="true" /></button>
-          <div v-if="advancedData" id="maintenance-settings" class="advanced-content"><div class="data-actions"><n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs'" @click="exportLogs">导出诊断日志</n-button><n-button :disabled="!!dataBusy" type="error" secondary @click="resetSettings">重置设置</n-button></div></div>
+          <div v-if="advancedData" id="maintenance-settings" class="advanced-content">
+            <div class="data-actions"><n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs'" @click="exportLogs">导出诊断日志</n-button><n-button :disabled="!!dataBusy" type="error" secondary @click="resetSettings">重置设置</n-button></div>
+            <div class="log-settings">
+              <div class="setting-row">
+                <label class="setting-label" for="log-level">日志收集等级</label>
+                <n-select aria-label="日志收集等级" v-model:value="logLevel" :options="logLevelOptions" />
+              </div>
+              <div class="setting-row log-usage-row">
+                <span class="log-usage" aria-live="polite">{{ logsSizeLoading ? '正在统计日志占用…' : logsSizeText }}</span>
+                <n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs-clear'" @click="clearLogsAction">清理日志</n-button>
+              </div>
+              <p class="settings-note">日志按天滚动保存在应用数据目录，保留 7 天，总量上限 20MB；出问题可用于导出诊断。</p>
+            </div>
+          </div>
         </section>
 
         <section class="settings-section">
@@ -361,6 +436,9 @@ async function exportLogs() {
 .advanced-content { display: grid; gap: 12px; padding: 8px 0; }
 .proxy-fields { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: 12px; }.proxy-fields .setting-label { margin-bottom: 8px; }
 .data-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.log-settings { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--settings-border); }
+.log-usage-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 16px; }
+.log-usage { color: var(--settings-muted); font-size: 14px; line-height: 1.65; }
 .connection-results { display: grid; gap: 8px; margin-top: 16px; }
 .connection-result { padding: 12px 14px; border: 1px solid var(--settings-border); border-radius: 10px; background: var(--bg-subtle); }
 .connection-result > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 14px; }.connection-result p { margin: 6px 0 0; color: var(--settings-muted); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }

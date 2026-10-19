@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
 
-use crate::types::{CbzMode, ProxyMode, ReadingDirection};
+use crate::types::{CbzMode, LogLevel, ProxyMode, ReadingDirection};
 use crate::{atomic_fs, utils};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -23,6 +23,22 @@ const IMAGE_DOMAIN_5: &str = "cdn-msp.jmapinodeudzn.net";
 const IMAGE_DOMAIN_6: &str = "cdn-msp3.jmapinodeudzn.net";
 
 const CONFIG_FILE_NAME: &str = "config.json";
+
+/// Android 公共下载目录下的默认书库：用户可在文件管理器直接查看，
+/// 卸载应用不会随之删除。需要「所有文件访问」权限（首次启动引导授予）。
+pub const ANDROID_PUBLIC_LIBRARY_DIR: &str = "/storage/emulated/0/Download/JoyManga";
+
+/// 判断候选路径是否为公共默认书库：以 `Download/JoyManga` 结尾且位于
+/// `/storage` 之下，兼容 SD 卡等不同存储卷的 `/storage/<volume>/Download/JoyManga` 布局。
+/// 仅在 Android 构建中使用。
+#[cfg(target_os = "android")]
+pub fn is_public_library_dir(candidate: &Path) -> bool {
+    let Some(candidate_str) = candidate.to_str() else {
+        return false;
+    };
+    const PUBLIC_SUFFIX: &str = "Download/JoyManga";
+    candidate_str.ends_with(PUBLIC_SUFFIX) && candidate_str.starts_with("/storage/")
+}
 const LOGS_DIR_NAME: &str = "日志";
 
 #[derive(Debug)]
@@ -220,6 +236,9 @@ pub struct Config {
     /// 仅在非计费网络（通常为 Wi-Fi）下允许下载。
     #[serde(default)]
     pub download_only_wifi: bool,
+    /// 文件日志收集等级：写入应用数据目录的滚动日志；`Off` 完全不落盘。
+    #[serde(default)]
+    pub log_level: LogLevel,
 }
 
 impl Config {
@@ -401,6 +420,7 @@ impl Config {
             keep_screen_on: true,
             volume_key_paging: false,
             download_only_wifi: false,
+            log_level: LogLevel::default(),
         }
     }
 

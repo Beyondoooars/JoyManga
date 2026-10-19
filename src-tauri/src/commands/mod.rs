@@ -5,6 +5,7 @@ pub mod library_commands;
 pub mod library_features;
 pub mod reader_commands;
 pub mod screen_commands;
+pub mod storage_commands;
 pub mod system_commands;
 
 pub use config_commands::*;
@@ -14,4 +15,5 @@ pub use library_commands::*;
 pub use library_features::*;
 pub use reader_commands::*;
 pub use screen_commands::*;
+pub use storage_commands::*;
 pub use system_commands::*;
