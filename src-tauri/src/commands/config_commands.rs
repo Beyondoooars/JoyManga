@@ -47,6 +47,9 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
             cache.invalidate();
         }
     }
+    if previous.log_level != next.log_level {
+        crate::logger::apply_log_level(next.log_level);
+    }
     if previous.proxy_mode != next.proxy_mode
         || previous.proxy_host != next.proxy_host
         || previous.proxy_port != next.proxy_port
@@ -73,7 +76,11 @@ pub fn initialize_android_storage(app: AppHandle, library_dir: String) -> Comman
             .join(&app.config().identifier)
             .join("files")
             .join("library");
-        if !candidate.is_absolute() || (candidate != internal && !candidate.ends_with(suffix)) {
+        if !candidate.is_absolute()
+            || (candidate != internal
+                && !candidate.ends_with(suffix)
+                && !crate::config::is_public_library_dir(&candidate))
+        {
             return Err(CommandError::from(
                 "初始化书库失败",
                 anyhow!("应用书库路径无效"),

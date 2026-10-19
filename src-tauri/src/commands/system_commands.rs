@@ -168,7 +168,8 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
 
     let storage = app.state::<ConfigStorage>();
     let defaults = Config::default(storage.base_dir());
-    let allowed_root = storage.base_dir().to_path_buf();
+    let public_default =
+        PathBuf::from(crate::config::ANDROID_PUBLIC_LIBRARY_DIR.to_ascii_lowercase());
     app.get_download_manager()
         .with_idle_downloads(|| {
             let roots = [
@@ -177,9 +178,13 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
             ];
             let mut existing_roots = Vec::new();
             for (name, configured, expected) in roots {
-                if let Some(canonical) =
-                    validate_clear_root(name, configured, expected, &allowed_root)?
-                {
+                if let Some(canonical) = validate_clear_root(
+                    name,
+                    configured,
+                    expected,
+                    storage.base_dir(),
+                    &public_default,
+                )? {
                     existing_roots.push((name, canonical));
                 }
             }
@@ -209,15 +214,20 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
+/// 批量清空只允许两个默认位置：应用数据目录内的专用 library，或公共
+/// `Download/JoyManga`；自定义路径一律拒绝，保护目录中的其他文件。
 fn validate_clear_root(
     name: &str,
     configured: &Path,
     expected: &Path,
-    allowed_root: &Path,
+    app_data_root: &Path,
+    public_default: &Path,
 ) -> anyhow::Result<Option<PathBuf>> {
+    let is_default = configured == expected;
+    let is_public_default = configured.to_string_lossy().to_lowercase() == *public_default;
     ensure!(
-        configured == expected,
-        "{name}目录是自定义路径；为保护目录中的其他文件，请只在应用默认专用目录使用批量清空"
+        is_default || is_public_default,
+        "{name}目录是自定义路径；为保护目录中的其他文件，请只在应用默认书库目录使用批量清空"
     );
     if !configured.exists() {
         return Ok(None);
@@ -227,12 +237,19 @@ fn validate_clear_root(
         "{name}目录是链接，拒绝批量清空"
     );
     let canonical = std::fs::canonicalize(configured).context(format!("规范化{name}目录失败"))?;
-    // 即使配置指向默认目录，也必须落在应用数据根目录内，避免异常配置清空到别处。
-    let canonical_root = std::fs::canonicalize(allowed_root)?;
-    ensure!(
-        canonical.starts_with(&canonical_root) && canonical != canonical_root,
-        "{name}目录不在应用数据目录内，拒绝清空"
-    );
+    // 即使配置指向默认目录，也要确认落在预期位置内，避免异常配置清空到别处。
+    if is_public_default {
+        ensure!(
+            canonical.starts_with("/storage/"),
+            "{name}目录不在公共存储内，拒绝清空"
+        );
+    } else {
+        let canonical_root = std::fs::canonicalize(app_data_root)?;
+        ensure!(
+            canonical.starts_with(&canonical_root) && canonical != canonical_root,
+            "{name}目录不在应用数据目录内，拒绝清空"
+        );
+    }
     for entry in walkdir::WalkDir::new(&canonical).follow_links(false) {
         let entry = entry.context(format!("检查{name}目录内容失败"))?;
         ensure!(
@@ -426,12 +443,30 @@ mod tests {
         std::fs::create_dir_all(&custom).unwrap();
         let unrelated = custom.join("重要资料.txt");
         std::fs::write(&unrelated, b"keep").unwrap();
-        assert!(validate_clear_root("下载", &custom, &expected, &root).is_err());
-        assert!(validate_clear_root("下载", &root, &expected, &root).is_err());
+        let public = PathBuf::from(crate::config::ANDROID_PUBLIC_LIBRARY_DIR.to_lowercase());
+        assert!(validate_clear_root("下载", &custom, &expected, &root, &public).is_err());
+        assert!(validate_clear_root("下载", &root, &expected, &root, &public).is_err());
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
-        assert!(validate_clear_root("下载", &expected, &expected, &root)
+        assert!(validate_clear_root("下载", &expected, &expected, &root, &public)
             .unwrap()
             .is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bulk_clear_rejects_public_like_paths_outside_storage() {
+        let root = std::env::temp_dir().join(format!("jm-clear-pub-{}", uuid::Uuid::new_v4()));
+        let expected = root.join("漫画下载");
+        std::fs::create_dir_all(&expected).unwrap();
+        let public = PathBuf::from(crate::config::ANDROID_PUBLIC_LIBRARY_DIR.to_lowercase());
+        // 形似公共默认目录但不在 /storage 下：拒绝
+        let fake_public = root.join("download/joymanga");
+        std::fs::create_dir_all(&fake_public).unwrap();
+        let fake_public = std::fs::canonicalize(&fake_public).unwrap();
+        assert!(
+            validate_clear_root("下载", &fake_public, &expected, &root, &public).is_err(),
+            "不在 /storage 下的伪公共目录必须被拒绝"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -10,7 +10,7 @@ use tracing_appender::{
     rolling::{RollingFileAppender, Rotation},
 };
 use tracing_subscriber::{
-    filter::{filter_fn, FilterExt, Targets},
+    filter::{filter_fn, FilterExt, LevelFilter, Targets},
     fmt::{layer, time::LocalTime},
     layer::SubscriberExt,
     registry::LookupSpan,
@@ -21,7 +21,8 @@ use tracing_subscriber::{
 use crate::{
     config::ConfigStorage,
     events::LogEvent,
-    extensions::AnyhowErrorToStringChain,
+    extensions::{AnyhowErrorToStringChain, AppHandleExt},
+    types::LogLevel,
 };
 
 struct LogEventWriter {
@@ -49,8 +50,19 @@ impl Write for LogEventWriter {
     }
 }
 
-static RELOAD_FN: OnceLock<Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>> = OnceLock::new();
+static RELOAD_FN: OnceLock<Box<dyn Fn(LogLevel) -> anyhow::Result<()> + Send + Sync>> =
+    OnceLock::new();
 static GUARD: OnceLock<parking_lot::Mutex<Option<WorkerGuard>>> = OnceLock::new();
+/// 当前文件日志收集等级：供 watcher 重建文件层与定时清理任务读取，
+/// 随设置页切换更新，而不是停留在启动时的等级。
+static CURRENT_LEVEL: OnceLock<parking_lot::RwLock<LogLevel>> = OnceLock::new();
+
+fn current_level() -> LogLevel {
+    CURRENT_LEVEL
+        .get()
+        .map(|cell| *cell.read())
+        .unwrap_or(LogLevel::Off)
+}
 
 pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     let lib_module_path = module_path!();
@@ -59,8 +71,10 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     ))?;
     // 过滤掉来自其他库的日志
     let target_filter = Targets::new().with_target(lib_target, Level::TRACE);
+    let level = app.get_config().read().log_level;
+    CURRENT_LEVEL.get_or_init(|| parking_lot::RwLock::new(level));
     // 输出到文件
-    let (file_layer, guard) = create_file_layer(app)?;
+    let (file_layer, guard) = create_file_layer(app, level)?;
     let (reloadable_file_layer, reload_handle) = tracing_subscriber::reload::Layer::new(file_layer);
     // 输出到控制台
     let console_layer = layer()
@@ -91,19 +105,19 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     GUARD.get_or_init(|| parking_lot::Mutex::new(guard));
     RELOAD_FN.get_or_init(move || {
         let app = app.clone();
-        Box::new(move || {
-            let (file_layer, guard) = create_file_layer(&app)?;
+        Box::new(move |level: LogLevel| {
+            let (file_layer, guard) = create_file_layer(&app, level)?;
             reload_handle.reload(file_layer).context("reload失败")?;
             *GUARD.get().context("GUARD未初始化")?.lock() = guard;
             Ok(())
         })
     });
-    if ENABLE_FILE_LOGGER {
-        tauri::async_runtime::spawn(file_log_watcher(app.clone()));
-        tauri::async_runtime::spawn(auto_cleanup_logs_task(app.clone()));
-    } else if let Ok(dir) = logs_dir(app) {
-        // 文件日志关闭时不再常驻监听与定时扫描；启动时清理一次，
-        // 避免崩溃报告长期堆积。
+    // watcher 与定时清理常驻，但每轮动作前都按当前等级判断是否跳过：
+    // 等级为 Off 时它们不产生任何 I/O，避免「Off 时也要停掉后台任务」的生命周期问题。
+    tauri::async_runtime::spawn(file_log_watcher(app.clone()));
+    tauri::async_runtime::spawn(auto_cleanup_logs_task(app.clone()));
+    if let Ok(dir) = logs_dir(app) {
+        // 启动时清理一次过期日志，避免 Off 期间堆积的崩溃报告长期占位。
         cleanup_managed_logs(
             &dir,
             DEFAULT_LOG_RETENTION,
@@ -115,22 +129,39 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn reload_file_logger() -> anyhow::Result<()> {
-    RELOAD_FN.get().context("RELOAD_FN未初始化")?()
+/// 切换文件日志收集等级：设置页保存后立即生效，无需重启。
+pub fn apply_log_level(level: LogLevel) {
+    if let Some(cell) = CURRENT_LEVEL.get() {
+        *cell.write() = level;
+    }
+    let _ = reload_file_logger(level);
 }
 
-/// 文件日志开关：项目仅面向 Android，持续写入会消耗电量与存储，固定关闭。
-/// 崩溃报告由 panic hook 单独写入日志目录，不受此开关影响。
-const ENABLE_FILE_LOGGER: bool = false;
+pub fn reload_file_logger(level: LogLevel) -> anyhow::Result<()> {
+    RELOAD_FN.get().context("RELOAD_FN未初始化")?(level)
+}
+
+/// 文件日志收集等级 → tracing `LevelFilter`；`Off` 对应无文件输出。
+fn level_filter(level: LogLevel) -> LevelFilter {
+    match level {
+        LogLevel::Off => LevelFilter::OFF,
+        LogLevel::Trace => LevelFilter::TRACE,
+        LogLevel::Debug => LevelFilter::DEBUG,
+        LogLevel::Info => LevelFilter::INFO,
+        LogLevel::Warn => LevelFilter::WARN,
+        LogLevel::Error => LevelFilter::ERROR,
+    }
+}
 
 fn create_file_layer<S>(
     app: &AppHandle,
+    level: LogLevel,
 ) -> anyhow::Result<(Box<dyn Layer<S> + Send + Sync>, Option<WorkerGuard>)>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    // 不启用文件日志时返回占位用的sink layer，不创建也不输出日志文件
-    if !ENABLE_FILE_LOGGER {
+    // 关闭收集时返回占位用的sink layer，不创建也不输出日志文件
+    if level == LogLevel::Off {
         let sink_layer = layer()
             .with_writer(std::io::sink)
             .with_timer(LocalTime::rfc_3339())
@@ -158,7 +189,8 @@ where
         .with_timer(LocalTime::rfc_3339())
         .with_ansi(false)
         .with_file(true)
-        .with_line_number(true);
+        .with_line_number(true)
+        .with_filter(level_filter(level));
     Ok((Box::new(file_layer), Some(guard)))
 }
 
@@ -213,10 +245,14 @@ async fn file_log_watcher(app: AppHandle) {
         match res.map_err(anyhow::Error::from) {
             Ok(event) => {
                 if let notify::EventKind::Remove(_) = event.kind {
-                    if let Err(err) = reload_file_logger() {
-                        let err_title = "重置日志文件失败";
-                        let string_chain = err.to_string_chain();
-                        tracing::error!(err_title, message = string_chain);
+                    // 当前等级为 Off 时文件层是 sink，重建无意义，跳过。
+                    let level = current_level();
+                    if level != LogLevel::Off {
+                        if let Err(err) = reload_file_logger(level) {
+                            let err_title = "重置日志文件失败";
+                            let string_chain = err.to_string_chain();
+                            tracing::error!(err_title, message = string_chain);
+                        }
                     }
                 }
             }
@@ -320,6 +356,10 @@ async fn auto_cleanup_logs_task(app: AppHandle) {
     let mut interval = tokio::time::interval(Duration::from_secs(30 * 60)); // 每30分钟自动检查清理一次
     loop {
         interval.tick().await;
+        // 等级为 Off 时不产生任何清理 I/O（崩溃报告由启动时的那次清理兜底）。
+        if current_level() == LogLevel::Off {
+            continue;
+        }
         if let Ok(dir) = logs_dir(&app) {
             cleanup_managed_logs(
                 &dir,

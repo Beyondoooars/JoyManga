@@ -16,11 +16,12 @@ import { getErrorMessage } from './utils/errors.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
 import { useIsMobile } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
-import { watchNetworkMetered } from './utils/androidStorage.ts'
+import { downloadsPath, hasAllFilesAccess, watchNetworkMetered } from './utils/androidStorage.ts'
 
 const UserCenterDialog = defineAsyncComponent(() => import('./dialogs/UserCenterDialog.vue'))
 const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
 const AndroidGuideDialog = defineAsyncComponent(() => import('./dialogs/AndroidGuideDialog.vue'))
+const StorageOnboardingDialog = defineAsyncComponent(() => import('./dialogs/StorageOnboardingDialog.vue'))
 const ReaderDialog = defineAsyncComponent(() => import('./dialogs/ReaderDialog.vue'))
 const UpdateDialog = defineAsyncComponent(() => import('./dialogs/UpdateDialog.vue'))
 const ChapterPane = defineAsyncComponent(() => import('./panes/ChapterPane.vue'))
@@ -44,6 +45,8 @@ const settingsDialogShowing = ref<boolean>(false)
 
 const initializing = ref(false)
 const initializationError = ref('')
+// 首次启动（未完成过存储初始化且未获所有文件权限）时弹存储引导；不阻塞应用使用
+const storageOnboardingShowing = ref(false)
 // 配置加载与监听注册全部完成前不渲染主界面：否则“拿到配置但监听注册失败”时
 // 错误页永远不出现，用户只看到一闪而过的提示、下载事件却无人接收。
 const appReady = ref(false)
@@ -151,9 +154,16 @@ async function initializeApp() {
     await store.initStateListeners()
     store.applyConfig(await commands.getConfig())
     if (isAndroid && store.config && !store.config.androidStorageInitialized && window.JmAndroid) {
-      const result = await commands.initializeAndroidStorage(window.JmAndroid.libraryPath())
-      if (result.status === 'error') throw new Error(result.error.err_message)
-      store.applyConfig(result.data)
+      if (hasAllFilesAccess()) {
+        // 已持有「所有文件访问」：直接落到公共下载，无需再引导
+        const result = await commands.initializeAndroidStorage(downloadsPath())
+        if (result.status === 'error') throw new Error(result.error.err_message)
+        store.applyConfig(result.data)
+      } else {
+        // 未授权：弹引导弹窗让用户选公共下载（需授权）或应用专用目录；
+        // 不阻塞应用使用，跳过的话下次启动仍会引导
+        storageOnboardingShowing.value = true
+      }
     }
     await store.initDownloadListener()
     await nextTick()
@@ -309,6 +319,7 @@ onUnmounted(() => {
     <UserCenterDialog v-if="userCenterShowing" v-model:showing="userCenterShowing" />
     <SettingsDialog v-if="settingsDialogShowing" v-model:showing="settingsDialogShowing" />
     <AndroidGuideDialog v-if="store.androidGuideShowing" v-model:showing="store.androidGuideShowing" />
+    <StorageOnboardingDialog v-if="storageOnboardingShowing" v-model:show="storageOnboardingShowing" />
     <ReaderDialog v-if="store.activeReaderTarget" />
     <UpdateDialog />
   </div>

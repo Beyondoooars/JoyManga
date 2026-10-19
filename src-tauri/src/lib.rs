@@ -93,6 +93,8 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             get_synced_comic_in_favorite,
             get_synced_comic_in_search,
             get_synced_comic_in_weekly,
+            list_directory_entries,
+            validate_download_dir,
             test_domain_latency,
             get_chapter_reader_data,
             get_local_image_data_url,
