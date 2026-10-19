@@ -2,7 +2,7 @@
 //!
 //! Android 上由 Kotlin 侧通过 `ConnectivityManager` 判断当前网络是否计费
 //! （移动数据/热点为计费，Wi-Fi 通常不计费），并在变化时推送；
-//! 桌面端一律视为不计费（用户自行管理网络）。
+//! 非 Android 环境（开发/测试）一律视为不计费。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

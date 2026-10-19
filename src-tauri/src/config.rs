@@ -211,13 +211,13 @@ pub struct Config {
     /// 阅读方向：决定点击区域、键盘、滑动与翻页按钮的语义。
     #[serde(default)]
     pub reading_direction: ReadingDirection,
-    /// 阅读时保持屏幕常亮（移动端与桌面端均生效）。
+    /// 阅读时保持屏幕常亮。
     #[serde(default = "default_true")]
     pub keep_screen_on: bool,
-    /// Android 音量键翻页（仅移动端有意义，桌面端忽略）。
+    /// 音量键翻页。
     #[serde(default)]
     pub volume_key_paging: bool,
-    /// 仅在非计费网络（通常为 Wi-Fi）下允许下载。桌面端无网络计费概念，恒放行。
+    /// 仅在非计费网络（通常为 Wi-Fi）下允许下载。
     #[serde(default)]
     pub download_only_wifi: bool,
 }

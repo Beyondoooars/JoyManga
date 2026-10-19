@@ -108,9 +108,9 @@ pub fn reload_file_logger() -> anyhow::Result<()> {
     RELOAD_FN.get().context("RELOAD_FN未初始化")?()
 }
 
-/// 文件日志开关：桌面端保留文件日志，供「导出诊断日志」收集历史记录；
-/// Android 上持续写入会消耗电量与存储，固定关闭。
-const ENABLE_FILE_LOGGER: bool = !cfg!(target_os = "android");
+/// 文件日志开关：项目仅面向 Android，持续写入会消耗电量与存储，固定关闭。
+/// 崩溃报告由 panic hook 单独写入日志目录，不受此开关影响。
+const ENABLE_FILE_LOGGER: bool = false;
 
 fn create_file_layer<S>(
     app: &AppHandle,

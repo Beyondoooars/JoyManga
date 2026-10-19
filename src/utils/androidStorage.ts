@@ -66,7 +66,7 @@ export function setVolumeKeyPaging(enabled: boolean) {
 
 /**
  * Android 原生侧会把当前网络是否计费通过事件推上来（启动与切换网络时各一次）。
- * 桌面端没有计费概念，直接视为不计费。返回值用于取消订阅。
+ * 非 Android 环境（开发/测试）直接视为不计费。返回值用于取消订阅。
  */
 export function watchNetworkMetered(handler: (metered: boolean) => void): () => void {
   if (!isAndroid) {
