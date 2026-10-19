@@ -120,11 +120,7 @@ impl DownloadImgTask {
 
         tracing::trace!(url, comic_title, chapter_title, "图片成功下载到内存");
 
-        let save_ext = if self.block_num == 0 {
-            source_extension(format)
-        } else {
-            "webp"
-        };
+        let save_ext = saved_page_extension(format, self.block_num);
         let save_path = temp_download_path.join(format!("{index_filename}.{save_ext}"));
 
         let block_num = self.block_num;
@@ -293,6 +289,18 @@ fn source_extension(format: ImageFormat) -> &'static str {
     }
 }
 
+/// 页面落盘扩展名，必须与实际写入的字节一致。
+///
+/// GIF 由 `save_img` 原样保存、不参与反混淆，扩展名恒为 `gif`；
+/// 未混淆的页面保留源格式；需要反混淆的页面统一编码为 WebP。
+fn saved_page_extension(format: ImageFormat, block_num: u32) -> &'static str {
+    if format == ImageFormat::Gif || block_num == 0 {
+        source_extension(format)
+    } else {
+        "webp"
+    }
+}
+
 /// 原始模式：查找指定页码已存在的任意**有效**图片格式文件。
 ///
 /// 同一页可能同时存在多个扩展名（旧格式残留、上次下载中断），必须返回能解码的那个；
@@ -359,11 +367,15 @@ pub(crate) fn seed_valid_pages(source: &Path, temp: &Path, expected: usize) -> a
         };
         let name = entry.name().to_owned();
         let path = Path::new(&name);
-        let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        let Some(ext) = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+        else {
             continue;
         };
-        // 只复用图片格式的页面（扩展名随源格式，不做格式转换）
-        if !matches!(ext, "jpg" | "jpeg" | "png" | "webp" | "gif") {
+        // 只复用图片格式的页面（扩展名随源格式，统一小写后落盘）
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif") {
             continue;
         }
         let Ok(page) = path
@@ -475,5 +487,24 @@ mod gif_passthrough_tests {
         // GIF 原样保存，避免二次编码丢帧
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod saved_page_extension_tests {
+    use super::*;
+
+    #[test]
+    fn extension_always_matches_the_bytes_actually_written() {
+        // GIF 原样落盘，即使 block_num 非零也不能命名为 webp
+        assert_eq!(saved_page_extension(ImageFormat::Gif, 0), "gif");
+        assert_eq!(saved_page_extension(ImageFormat::Gif, 20), "gif");
+        // 未混淆页面保留源格式
+        assert_eq!(saved_page_extension(ImageFormat::Jpeg, 0), "jpg");
+        assert_eq!(saved_page_extension(ImageFormat::Png, 0), "png");
+        assert_eq!(saved_page_extension(ImageFormat::WebP, 0), "webp");
+        // 需要反混淆的页面统一编码为 WebP
+        assert_eq!(saved_page_extension(ImageFormat::Jpeg, 20), "webp");
+        assert_eq!(saved_page_extension(ImageFormat::Png, 20), "webp");
     }
 }

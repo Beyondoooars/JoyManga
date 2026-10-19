@@ -27,9 +27,6 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "nsis"
-    ],
     "licenseFile": "../LICENSE",
     "shortDescription": "漫画下载与本地阅读工具",
     "longDescription": "面向 Android 的漫画下载与本地阅读工具，支持批量下载、CBZ 归档、书库管理与内置阅读器。",
@@ -39,14 +36,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "perMachine",
-        "languages": [
-          "SimpChinese"
-        ]
-      }
-    }
+    ]
   }
 }

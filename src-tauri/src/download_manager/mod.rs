@@ -438,7 +438,7 @@ mod regression_tests {
         assert!(empty.apply_download_dir(&settings).is_err());
         assert!(empty.comic_download_dir.is_none());
 
-        // 固定平铺布局：书库目录 + 本子名 - 序号 - 话名.cbz
+        // 固定平铺布局：书库目录 + 本子名 [JM本子号-章节号].cbz
         let mut comic = Comic {
             id: 42,
             name: "测试本子".into(),

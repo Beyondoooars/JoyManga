@@ -335,7 +335,7 @@ pub fn export_logs(
     log_content.push_str(&format!("下载目录: {}\n", config.download_dir.display()));
     log_content.push_str(&format!("导出目录: {}\n", config.export_dir.display()));
     log_content.push_str(&format!("当前API域名: {}\n", config.get_api_domain()));
-    log_content.push_str(&format!("当前图片域名: {}\n", config.get_image_domain()));
+    log_content.push_str(&format!("当前图片域名: {}\n\n", config.get_image_domain()));
 
     if let Some(fe_logs) = frontend_logs {
         if !fe_logs.is_empty() {
