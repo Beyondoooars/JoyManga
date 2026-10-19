@@ -2101,7 +2101,6 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
- "flate2",
  "image",
  "indexmap 2.10.0",
  "md5",
