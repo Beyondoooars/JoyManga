@@ -150,19 +150,8 @@ pub(crate) fn chapter_reader_data_from_comic(
             .map(|entry_name| format!("{chapter_target_str}|{entry_name}"))
             .collect::<Vec<_>>()
     } else if chapter_target.is_dir() {
-        let mut image_paths: Vec<PathBuf> = std::fs::read_dir(chapter_target)
-            .context(format!("读取章节目录`{}`失败", chapter_target.display()))
-            .map_err(|err| CommandError::from("读取章节图片失败", err))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.is_img())
-            .collect();
-
-        image_paths.sort_by(|a, b| {
-            let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            utils::natural_cmp(name_a, name_b)
-        });
+        let image_paths = utils::collect_page_images(chapter_target)
+            .map_err(|err| CommandError::from("读取章节图片失败", err))?;
 
         image_paths
             .into_iter()

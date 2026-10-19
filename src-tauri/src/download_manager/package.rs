@@ -10,32 +10,6 @@ use crate::atomic_fs;
 use crate::types::{ChapterInfo, Comic, ComicInfo};
 use crate::utils;
 
-/// 收集临时目录中的有效页面：按自然序排序，并按文件主名去重
-/// （同一页可能残留不同扩展名的旧文件）。
-fn collect_page_images(temp_download_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut image_paths: Vec<PathBuf> = std::fs::read_dir(temp_download_dir)
-        .context(format!(
-            "读取临时下载目录`{}`失败",
-            temp_download_dir.display()
-        ))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            use crate::extensions::PathIsImg;
-            path.is_img()
-        })
-        .collect();
-
-    image_paths.sort_by(|a, b| {
-        let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        utils::natural_cmp(name_a, name_b)
-    });
-    let mut page_numbers = std::collections::HashSet::new();
-    image_paths.retain(|path| page_numbers.insert(path.file_stem().unwrap_or_default().to_owned()));
-    Ok(image_paths)
-}
-
 pub(crate) fn package_chapter_to_cbz(
     comic: &Comic,
     chapter_info: &ChapterInfo,
@@ -71,7 +45,7 @@ pub(crate) fn package_chapter_to_cbz(
 
     // 图片列表要提前收集：ComicInfo.xml 的 PageCount 必须在写入条目前确定
     // （ZIP 条目不可原地修改），且后续校验/打包都复用同一份列表。
-    let image_paths = collect_page_images(temp_download_dir)?;
+    let image_paths = utils::collect_page_images(temp_download_dir)?;
     anyhow::ensure!(
         expected_pages > 0 && image_paths.len() == expected_pages,
         "打包图片数量与章节页数不一致"
@@ -133,7 +107,7 @@ pub(crate) fn package_chapter_to_cbz(
         // 单条目超过 ZIP32 上限会让整章打包失败在半路，先按体积给出可读错误
         crate::zip_limits::ensure_entry_size(&image_path)?;
         zip_writer
-            .start_file(&entry_name, SimpleFileOptions::default())
+            .start_file(&entry_name, crate::zip_limits::image_entry_options())
             .context(format!("在CBZ创建条目`{entry_name}`失败"))?;
         let mut file = std::fs::File::open(&image_path)
             .context(format!("打开图片`{}`失败", image_path.display()))?;
