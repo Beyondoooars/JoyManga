@@ -58,7 +58,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             cancel_login,
             logout,
             set_favorite_comic,
-            show_logs_in_file_manager,
             clear_logs,
             clear_cache,
             clear_all_downloads,

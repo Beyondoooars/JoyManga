@@ -60,14 +60,6 @@ async setFavoriteComic(comicId: number, desired: boolean, sessionEpoch: number) 
     else return { status: "error", error: e  as any };
 }
 },
-async showLogsInFileManager() : Promise<Result<null, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("show_logs_in_file_manager") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async clearLogs() : Promise<Result<null, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("clear_logs") };

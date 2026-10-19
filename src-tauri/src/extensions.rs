@@ -40,8 +40,6 @@ impl PathIsImg for std::path::Path {
 
 pub trait WalkDirEntryExt {
     fn is_comic_metadata(&self) -> bool;
-    #[allow(dead_code)]
-    fn is_chapter_metadata(&self) -> bool;
 }
 impl WalkDirEntryExt for walkdir::DirEntry {
     fn is_comic_metadata(&self) -> bool {
@@ -49,17 +47,6 @@ impl WalkDirEntryExt for walkdir::DirEntry {
             return false;
         }
         if self.file_name() != "元数据.json" {
-            return false;
-        }
-
-        true
-    }
-
-    fn is_chapter_metadata(&self) -> bool {
-        if !self.file_type().is_file() {
-            return false;
-        }
-        if self.file_name() != "章节元数据.json" {
             return false;
         }
 
