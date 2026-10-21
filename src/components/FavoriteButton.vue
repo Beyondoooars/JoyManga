@@ -11,7 +11,7 @@ const known = computed(() => store.userProfile
   : undefined)
 const label = computed(() => !store.userProfile ? '登录后收藏' : known.value === true ? '已收藏，点击取消' : known.value === false ? '收藏' : '收藏状态待确认')
 async function act() {
-  if (!store.userProfile) { store.userCenterShowing = true; return }
+  if (!store.userProfile) { store.openAccount(); return }
   try {
     const result = await store.setFavorite(props.comicId, known.value !== true)
     if (result !== undefined) message.success(result ? '已收藏' : '已取消收藏')

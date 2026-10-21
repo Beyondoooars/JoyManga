@@ -1,0 +1,465 @@
+<script setup lang="ts">
+import { ref, onBeforeUnmount } from 'vue'
+import { commands } from '../bindings.ts'
+import { useMessage } from 'naive-ui'
+import FloatLabelInput from '../components/FloatLabelInput.vue'
+import FavoritePane from './FavoritePane.vue'
+import { useStore } from '../store.ts'
+import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
+import { PhHeart, PhSignOut, PhUser } from '@phosphor-icons/vue'
+
+const store = useStore()
+const message = useMessage()
+
+const username = ref<string>(store.config?.username ?? '')
+const password = ref<string>(store.config?.password ?? '')
+const remember = ref<boolean>(username.value !== '' && password.value !== '')
+const loggingIn = ref(false)
+const loggingOut = ref(false)
+let disposed = false
+onBeforeUnmount(() => {
+  disposed = true
+  if (loggingIn.value) void commands.cancelLogin().catch(console.error)
+})
+
+async function onLogin() {
+  if (store.config === undefined || loggingIn.value) {
+    return
+  }
+  const cleanUsername = username.value.trim()
+  const cleanPassword = password.value
+  if (cleanUsername === '') {
+    message.error('请输入用户名')
+    return
+  }
+  if (cleanPassword === '') {
+    message.error('请输入密码')
+    return
+  }
+
+  loggingIn.value = true
+  try {
+    const result = await commands.login(cleanUsername, cleanPassword)
+    if (disposed || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch)) return
+    if (result.status === 'error') {
+      console.error(result.error)
+      message.error(formatCommandError(result.error))
+      return
+    }
+    const switched = store.applyLoginResult(result.data)
+    const route = store.apiDomainPresets.find((preset) => preset.mode === switched)
+    message.success(switched ? `登录成功，已切换至${route?.label ?? switched}` : '登录成功')
+    if (remember.value) {
+      store.config.username = cleanUsername
+      store.config.password = cleanPassword
+      store.config.autoLogin = true
+    } else {
+      store.config.username = ''
+      store.config.password = ''
+      store.config.autoLogin = false
+    }
+  } catch (error) {
+    console.error(error)
+    message.error(`登录失败：${getErrorMessage(error)}`)
+  } finally {
+    loggingIn.value = false
+  }
+}
+
+async function handleLogout() {
+  if (loggingOut.value || loggingIn.value) return
+  loggingOut.value = true
+  try {
+    const result = await store.runConfigMaintenance(async () => {
+      if (store.config) {
+        store.config.username = ''
+        store.config.password = ''
+        store.config.autoLogin = false
+      }
+      const result = await commands.logout()
+      store.applyConfig(await commands.getConfig(), true)
+      store.applySession(await commands.getSession())
+      return result
+    })
+    if (result.status === 'error') message.error(result.error.err_message)
+    else {
+      username.value = ''
+      password.value = ''
+      remember.value = false
+      message.info('已退出登录并清除记住密码')
+    }
+  } catch (error) {
+    message.error(`退出登录失败：${getErrorMessage(error)}`)
+  } finally {
+    loggingOut.value = false
+  }
+}
+
+async function cancelLogin() {
+  await commands.cancelLogin()
+}
+
+async function clearUsernameAndPasswordInConfig() {
+  if (store.config === undefined) return
+  store.config.username = ''
+  store.config.password = ''
+  store.config.autoLogin = false
+  try {
+    await store.saveConfigNow()
+    message.success('已清除配置文件中的记住密码')
+  } catch (error) {
+    message.error(`清除记住密码未能保存：${getErrorMessage(error)}`)
+  }
+}
+</script>
+
+<template>
+  <div class="account-page">
+    <section class="account-hero">
+      <h1>我的<PhUser :size="20" weight="duotone" /></h1>
+    </section>
+
+    <!-- 已登录：账号信息 + 在线收藏 -->
+    <template v-if="store.userProfile !== undefined">
+      <div class="user-profile-bar">
+        <n-avatar
+          round
+          :size="48"
+          :src="store.userProfile.photo"
+          fallback-src="https://cdn-msp.18comic.vip/templates/frontend/airav/img/title-png/more-ms-jm.webp?v=2"
+          class="user-avatar" />
+        <div class="user-info">
+          <div class="user-name-row">
+            <span class="user-name">{{ store.userProfile.username }}</span>
+            <span v-if="store.userProfile.level_name || store.userProfile.level" class="vip-badge">
+              {{ store.userProfile.level_name || `Lv.${store.userProfile.level}` }}
+            </span>
+          </div>
+          <div class="user-sub">
+            <span>UID: {{ store.userProfile.uid }}</span>
+            <span class="dot-sep">•</span>
+            <span class="text-neutral-500">云端收藏</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="logout-btn"
+          title="退出登录"
+          :disabled="loggingIn || loggingOut"
+          @click="handleLogout">
+          <PhSignOut :size="16" />
+          <span>退出登录</span>
+        </button>
+      </div>
+
+      <div class="favorites-header-title">
+        <span class="pink-bar"></span>
+        <PhHeart :size="15" weight="duotone" class="favorites-icon" />
+        <h4>我的在线收藏</h4>
+        <span class="sub-hint">点击任意漫画直接展开章节详情</span>
+      </div>
+      <div class="favorites-content">
+        <FavoritePane />
+      </div>
+    </template>
+
+    <!-- 未登录：页内登录表单 -->
+    <div v-else class="login-form-wrapper">
+      <div class="login-card">
+        <div class="login-headline">
+          <div class="login-icon-box"><PhUser :size="22" weight="bold" /></div>
+          <h2>登录 JoyManga 账号</h2>
+          <p class="login-tip">登录后可同步收藏夹，并一键收藏。账号信息只保存在本机。</p>
+        </div>
+        <div class="form-fields">
+          <FloatLabelInput label="用户名" v-model:value="username" @keydown.enter="onLogin" />
+          <FloatLabelInput label="密码" v-model:value="password" type="password" @keydown.enter="onLogin" />
+        </div>
+        <div class="login-options">
+          <n-tooltip>
+            账密以明文保存在本机配置文件中
+            <template #trigger>
+              <n-checkbox v-model:checked="remember">记住我</n-checkbox>
+            </template>
+          </n-tooltip>
+          <button type="button" class="clear-cred-btn" @click="clearUsernameAndPasswordInConfig">
+            清除保存的账密
+          </button>
+        </div>
+        <n-button
+          type="primary"
+          class="submit-login-btn"
+          :loading="loggingIn"
+          :disabled="loggingIn"
+          @click="onLogin">
+          立即登录
+        </n-button>
+        <n-button v-if="loggingIn" size="small" @click="cancelLogin">取消登录</n-button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.account-page {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: #fff;
+}
+
+.account-hero {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #f0edf3;
+  background: #fff;
+}
+
+.account-hero h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: #282739;
+  font-size: 22px;
+}
+
+.account-hero h1 svg {
+  color: #fb7299;
+}
+
+.user-profile-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border-bottom: 1px solid #f1f2f3;
+}
+
+.user-avatar {
+  flex-shrink: 0;
+  border: 2px solid #fb7299;
+  box-shadow: 0 2px 8px rgba(251, 114, 153, 0.25);
+}
+
+.user-info {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.user-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.user-name {
+  overflow: hidden;
+  color: #18191c;
+  font-size: 16px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vip-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  color: #fff;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #fb7299 0%, #ff85ad 100%);
+  box-shadow: 0 2px 6px rgba(251, 114, 153, 0.35);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.user-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #9499a0;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dot-sep {
+  opacity: 0.5;
+}
+
+.logout-btn {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  color: #61666d;
+  border: 1px solid #e3e5e7;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.logout-btn:hover {
+  color: #fb7299;
+  border-color: #fb7299;
+  background: #fff0f5;
+}
+
+.favorites-header-title {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 20px 10px;
+}
+
+.pink-bar {
+  width: 4px;
+  height: 16px;
+  border-radius: 2px;
+  background-color: #fb7299;
+}
+
+.favorites-icon {
+  color: #fb7299;
+}
+
+.favorites-header-title h4 {
+  margin: 0;
+  color: #18191c;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.sub-hint {
+  margin-left: 4px;
+  color: #9499a0;
+  font-size: 12px;
+}
+
+.favorites-content {
+  flex: 1;
+  min-height: 0;
+}
+
+.login-form-wrapper {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 32px 20px;
+}
+
+.login-card {
+  display: flex;
+  width: 100%;
+  max-width: 400px;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.login-headline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.login-headline h2 {
+  margin: 0;
+  color: #18191c;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.login-icon-box {
+  display: flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  color: #fb7299;
+  border-radius: 12px;
+  background: rgba(251, 114, 153, 0.12);
+}
+
+.login-tip {
+  margin: 0;
+  color: #61666d;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.clear-cred-btn {
+  color: #9499a0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.clear-cred-btn:hover {
+  color: #fb7299;
+}
+
+.submit-login-btn {
+  width: 100%;
+  height: 42px;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.35);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .account-hero {
+    padding: 14px;
+  }
+
+  .user-profile-bar {
+    padding: 14px;
+  }
+
+  .favorites-header-title {
+    padding: 12px 14px 8px;
+  }
+
+  .sub-hint {
+    display: none;
+  }
+}
+</style>

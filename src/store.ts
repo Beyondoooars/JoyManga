@@ -38,7 +38,6 @@ export const useStore = defineStore('store', () => {
   const config = ref<Config>()
   const authoritativeConfig = ref<Config>()
   const apiDomainPresets = ref<ApiDomainPreset[]>([])
-  const userCenterShowing = ref(false)
   const sessionEpoch = ref(0)
   const favoriteStatuses = ref(new Map<number, boolean | undefined>())
   const favoritePending = ref(new Set<number>())
@@ -99,7 +98,8 @@ export const useStore = defineStore('store', () => {
   }
 
   async function setFavorite(comicId: number, desired: boolean) {
-    if (!userProfile.value) { userCenterShowing.value = true; return }
+    // 未登录时跳到「我的」页登录（原先是弹窗，现在是与发现/书库同级的页面）
+    if (!userProfile.value) { openAccount(); return }
     if (favoritePending.value.has(comicId)) return
     const epoch = sessionEpoch.value
     favoritePending.value.add(comicId)
@@ -270,6 +270,12 @@ export const useStore = defineStore('store', () => {
     chapterDetailShowing.value = false
     currentTabName.value = 'downloaded'
     downloadedSubTab.value = 'transfers'
+  }
+
+  /** 打开「我的」页（账号/登录/在线收藏）。 */
+  function openAccount() {
+    chapterDetailShowing.value = false
+    currentTabName.value = 'account'
   }
   const imageDomain = computed(() =>
     resolveImageDomain(config.value?.imageDomainMode, config.value?.customImageDomain),
@@ -614,7 +620,7 @@ function trimProgressHistory() {
   return {
     config,
     authoritativeConfig, apiDomainPresets, applyConfig, persistConfig, configIsDirty,
-    userCenterShowing, sessionEpoch, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
+    openAccount, sessionEpoch, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
     archivingComics, isArchiving,
