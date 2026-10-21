@@ -1,6 +1,6 @@
 import type { DownloadTaskEvent } from './bindings.ts'
 
-export type CurrentTabName = 'search' | 'favorite' | 'weekly' | 'downloaded' | 'chapter'
+export type CurrentTabName = 'search' | 'favorite' | 'weekly' | 'downloaded' | 'chapter' | 'account'
 
 export type ProgressesPaneTabName = 'uncompleted' | 'completed' | 'export'
 

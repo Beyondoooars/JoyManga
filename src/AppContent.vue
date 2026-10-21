@@ -19,7 +19,6 @@ import { useAppUpdate } from './composables/useAppUpdate.ts'
 import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
 import { onOpenExternalComic } from './libraryApi.ts'
 
-const UserCenterDialog = defineAsyncComponent(() => import('./dialogs/UserCenterDialog.vue'))
 const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
 const StorageOnboardingDialog = defineAsyncComponent(() => import('./dialogs/StorageOnboardingDialog.vue'))
 const ReaderDialog = defineAsyncComponent(() => import('./dialogs/ReaderDialog.vue'))
@@ -32,6 +31,7 @@ const pageComponents: Record<CurrentTabName, Component> = {
   weekly: defineAsyncComponent(() => import('./panes/WeeklyPane.vue')),
   downloaded: defineAsyncComponent(() => import('./panes/DownloadedPane/DownloadedPane.vue')),
   chapter: defineAsyncComponent(() => import('./panes/ChapterPane.vue')),
+  account: defineAsyncComponent(() => import('./panes/AccountPane.vue')),
 }
 
 const store = useStore()
@@ -40,7 +40,6 @@ const notification = useNotification()
 const { isAndroid } = useIsMobile()
 const { checkForUpdates } = useAppUpdate()
 
-const userCenterShowing = computed({ get: () => store.userCenterShowing, set: (value: boolean) => { store.userCenterShowing = value } })
 const settingsDialogShowing = ref<boolean>(false)
 
 const initializing = ref(false)
@@ -77,10 +76,6 @@ const currentPaneComponent = computed(() => pageComponents[store.currentTabName]
 useBackHandler(() => {
   if (store.activeReaderTarget !== null) {
     store.closeReader()
-    return true
-  }
-  if (userCenterShowing.value) {
-    userCenterShowing.value = false
     return true
   }
   if (settingsDialogShowing.value) {
@@ -313,7 +308,7 @@ onUnmounted(() => {
             v-else
             :is="currentPaneComponent"
             :key="store.currentTabName"
-            @open-login="userCenterShowing = true" />
+            @open-login="navigateToTab('account')" />
         </KeepAlive>
       </section>
     </main>
@@ -344,15 +339,14 @@ onUnmounted(() => {
       <!-- 我的 Tab -->
       <button
         type="button"
-        :class="['mobile-nav-btn', { active: userCenterShowing }]"
-        @click="userCenterShowing = true">
+        :class="['mobile-nav-btn', { active: store.currentTabName === 'account' }]"
+        @click="navigateToTab('account')">
         <PhUser :size="20" weight="duotone" />
         <span>我的</span>
       </button>
     </nav>
 
     <!-- Modals and Dialogs -->
-    <UserCenterDialog v-if="userCenterShowing" v-model:showing="userCenterShowing" />
     <SettingsDialog v-if="settingsDialogShowing" v-model:showing="settingsDialogShowing" />
     <StorageOnboardingDialog v-if="storageOnboardingShowing" v-model:show="storageOnboardingShowing" />
     <ReaderDialog v-if="store.activeReaderTarget" />
