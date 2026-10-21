@@ -77,21 +77,10 @@ pub fn clear_logs(app: AppHandle) -> CommandResult<()> {
         .context("获取日志目录失败")
         .map_err(|err| CommandError::from("获取日志目录失败", err))?;
     if logs_dir.exists() {
-        for entry in walkdir::WalkDir::new(&logs_dir)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            // 只删除本应用管理的日志，用户放进日志目录的其他文件保持原样
-            let managed = entry
-                .file_name()
-                .to_str()
-                .is_some_and(logger::is_managed_log_file);
-            if managed {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        // 只删除本应用管理的日志，用户放进日志目录的其他文件保持原样
+        let failures = logger::clear_managed_logs(&logs_dir);
+        if failures > 0 {
+            tracing::warn!(failures, "部分日志文件删除失败");
         }
     }
     tracing::info!("已清空应用日志");
@@ -303,22 +292,6 @@ pub struct ExportLogsResult {
     pub message: String,
 }
 
-fn check_directory_writable(dir: &Path) -> bool {
-    if !dir.exists() && std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let test_file = dir.join(format!(".write_test_{}", uuid::Uuid::new_v4()));
-    if let Ok(mut f) = std::fs::File::create(&test_file) {
-        use std::io::Write;
-        let _ = f.write_all(b"test");
-        drop(f);
-        let _ = std::fs::remove_file(&test_file);
-        true
-    } else {
-        false
-    }
-}
-
 #[tauri::command(async)]
 #[specta::specta]
 #[allow(clippy::needless_pass_by_value)]
@@ -331,7 +304,7 @@ pub fn export_logs(
     // 优先写入书库下的 logs 目录（用户可通过文件管理器访问）；不可写时退回应用数据目录。
     let target_dir = {
         let preferred = config.download_dir.join("logs");
-        if check_directory_writable(&preferred) {
+        if crate::utils::probe_directory_writable(&preferred) {
             preferred
         } else {
             let app_data = app
@@ -517,7 +490,7 @@ mod tests {
     fn test_check_directory_writable() {
         let temp_dir =
             std::env::temp_dir().join(format!("jm-writable-test-{}", uuid::Uuid::new_v4()));
-        assert!(check_directory_writable(&temp_dir));
+        assert!(crate::utils::probe_directory_writable(&temp_dir));
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

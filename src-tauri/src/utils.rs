@@ -539,28 +539,33 @@ pub fn cbz_filename(
 /// 同一页有多个扩展名时保留**最近写入**的那个：断点续传的 `find_existing_page`
 /// 也按同样规则挑选可解码的文件，两边保持一致，避免阅读/导出拿到旧的坏页。
 pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut image_paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("读取章节目录`{}`失败", dir.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_img() && path.is_file())
-        .collect();
-
     let name_of = |path: &Path| -> String {
         path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_owned()
     };
-    image_paths.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
+
+    // 用 DirEntry 自带的文件类型与元数据：不必再为每个条目额外 stat 两次
+    // （`path.is_file()` 与 `fs::metadata()` 各自都是一次系统调用）。
+    let mut image_paths: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(dir)
+        .with_context(|| format!("读取章节目录`{}`失败", dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()) && entry.path().is_img())
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (entry.path(), modified)
+        })
+        .collect();
 
     // 先按自然序排好，再逐页挑最近修改的文件；最终结果仍按自然序输出。
+    image_paths.sort_by(|(a, _), (b, _)| natural_cmp(&name_of(a), &name_of(b)));
     let mut newest_by_stem: HashMap<std::ffi::OsString, (PathBuf, std::time::SystemTime)> =
         HashMap::new();
-    for path in image_paths {
-        let modified = std::fs::metadata(&path)
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    for (path, modified) in image_paths {
         let stem = path.file_stem().unwrap_or_default().to_owned();
         match newest_by_stem.get(&stem) {
             Some((_, existing)) if *existing >= modified => {}
@@ -572,6 +577,22 @@ pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut pages: Vec<PathBuf> = newest_by_stem.into_values().map(|(path, _)| path).collect();
     pages.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
     Ok(pages)
+}
+
+/// 在`dir`下写入并删除一个临时文件，确认目录可写。
+///
+/// 目录不存在时先创建。导出日志与书库位置校验都依赖同一语义，不要各自内联一份
+/// （Android 桥的 `canWritePublicDownloads` 是跨语言的另一份实现）。
+pub(crate) fn probe_directory_writable(dir: &Path) -> bool {
+    if !dir.exists() && std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let test_file = dir.join(format!(".write_test_{}", uuid::Uuid::new_v4()));
+    if std::fs::write(&test_file, b"test").is_err() {
+        return false;
+    }
+    let _ = std::fs::remove_file(&test_file);
+    true
 }
 
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {

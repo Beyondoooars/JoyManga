@@ -6,7 +6,7 @@ use base64::Engine as _;
 
 use crate::{
     atomic_fs,
-    extensions::PathIsImg,
+    extensions::{mime_for_image, PathIsImg},
     types::{ChapterInfo, Comic, ComicInfo},
     utils,
 };
@@ -98,24 +98,13 @@ pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
                     continue;
                 };
                 if !bytes.is_empty() {
-                    let ext = Path::new(first_img)
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("jpeg")
-                        .to_lowercase();
-                    let mime = match ext.as_str() {
-                        "png" => "image/png",
-                        "webp" => "image/webp",
-                        "gif" => "image/gif",
-                        _ => "image/jpeg",
-                    };
                     // 缩略图按「CBZ 路径 + mtime + 大小」落盘缓存：同一本书重复扫描时
                     // 不必再解压解码，只有归档被替换后才会重新生成。
                     let thumbnail =
                         crate::cover_cache::cached_thumbnail(cbz_path, || render_thumbnail(&bytes));
                     return Some(match thumbnail {
-                        Some(thumbnail) => data_url(&thumbnail),
-                        None => raw_cover_data_url(&bytes, mime)?,
+                        Some(thumbnail) => base64_data_url("image/jpeg", &thumbnail),
+                        None => raw_cover_data_url(&bytes, mime_for_image(Path::new(first_img)))?,
                     });
                 }
             }
@@ -150,33 +139,28 @@ pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
                     .and_then(|bytes| render_thumbnail(&bytes))
             });
             if let Some(thumbnail) = thumbnail {
-                return Some(data_url(&thumbnail));
+                return Some(base64_data_url("image/jpeg", &thumbnail));
             }
             // 解码失败时退回原图（体积很小才允许），与 CBZ 分支一致
             if let Ok(bytes) = std::fs::read(path) {
-                return raw_cover_data_url(&bytes, "image/jpeg");
+                return raw_cover_data_url(&bytes, mime_for_image(path));
             }
         }
     }
     None
 }
 
-fn data_url(thumbnail: &[u8]) -> String {
+fn base64_data_url(mime: &str, bytes: &[u8]) -> String {
     format!(
-        "data:image/jpeg;base64,{}",
-        general_purpose::STANDARD.encode(thumbnail)
+        "data:{mime};base64,{}",
+        general_purpose::STANDARD.encode(bytes)
     )
 }
 
 /// 封面来源不是可解码图片时（例如测试或损坏的极小文件），
 /// 只要体积够小就原样返回，保证书库仍能显示缩略图。
 fn raw_cover_data_url(bytes: &[u8], fallback_mime: &str) -> Option<String> {
-    (bytes.len() <= 256 * 1024).then(|| {
-        format!(
-            "data:{fallback_mime};base64,{}",
-            general_purpose::STANDARD.encode(bytes)
-        )
-    })
+    (bytes.len() <= 256 * 1024).then(|| base64_data_url(fallback_mime, bytes))
 }
 
 /// 把任意来源图片渲染成立即能用的封面缩略图。

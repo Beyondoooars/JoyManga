@@ -167,9 +167,7 @@ export function useAppUpdate() {
       const errStr = err instanceof Error ? err.message : String(err)
       errorMessage.value = errStr
       markChecked(false)
-      if (!silent) {
-        // 手动检查时若出错，由调用方或界面显示提示
-      }
+      // 静默检查失败不打扰用户；手动检查的错误由调用方读取 errorMessage 显示
     } finally {
       checking.value = false
     }

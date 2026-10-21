@@ -10,17 +10,11 @@ const IMAGE_HOST = 'http://jmimg.localhost'
 /**
  * 把页面标识编码成阅读器可用的图片地址。
  *
- * 页面标识是绝对路径（`/storage/...`）或 `归档路径|条目名`，只保留
- * RFC 3986 的非保留字符，其余按 UTF-8 字节做百分号编码，避免中文/空格/`|`
- * 被 URL 解析改写。`retryToken` 只用来在失败重试时换一个 URL 触发重新请求。
+ * 页面标识是绝对路径（`/storage/...`）或 `归档路径|条目名`。`encodeURIComponent`
+ * 按 UTF-8 对 `/`、空格、`|`、中文等全部百分号编码，正好避免这些字符被 URL
+ * 解析层改写；后端按百分号编码逐字节还原。`retryToken` 只用来在失败重试时
+ * 换一个 URL 触发重新请求。
  */
 export function imageUrlFor(filePath: string, retryToken = 0): string {
-  const encoded = new TextEncoder().encode(filePath)
-    .reduce((text, byte) => {
-      const character = String.fromCharCode(byte)
-      return /[A-Za-z0-9\-._~]/.test(character)
-        ? text + character
-        : `${text}%${byte.toString(16).toUpperCase().padStart(2, '0')}`
-    }, '')
-  return `${IMAGE_HOST}/${encoded}${retryToken > 0 ? `?retry=${retryToken}` : ''}`
+  return `${IMAGE_HOST}/${encodeURIComponent(filePath)}${retryToken > 0 ? `?retry=${retryToken}` : ''}`
 }

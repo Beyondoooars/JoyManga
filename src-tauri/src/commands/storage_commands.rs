@@ -102,10 +102,12 @@ pub fn validate_download_dir(path: String) -> CommandResult<ValidatedDownloadDir
         let candidate = PathBuf::from(&path);
         let canonical = prepare_browsable_dir(&candidate)?;
         // 写探测：确认应用对该目录有写权限（如「所有文件访问」未授予时公共目录不可写）
-        let test_file = canonical.join(format!(".write_test_{}", uuid::Uuid::new_v4()));
-        std::fs::write(&test_file, b"test")
-            .map_err(|_| anyhow!("目录`{}`不可写，请检查存储权限", canonical.display()))?;
-        let _ = std::fs::remove_file(&test_file);
+        if !crate::utils::probe_directory_writable(&canonical) {
+            return Err(anyhow!(
+                "目录`{}`不可写，请检查存储权限",
+                canonical.display()
+            ));
+        }
         Ok(ValidatedDownloadDir {
             canonical_path: canonical.to_string_lossy().to_string(),
         })

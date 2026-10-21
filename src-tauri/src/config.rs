@@ -26,7 +26,10 @@ const CONFIG_FILE_NAME: &str = "config.json";
 
 /// Android 公共下载目录下的默认书库：用户可在文件管理器直接查看，
 /// 卸载应用不会随之删除。需要「所有文件访问」权限（首次启动引导授予）。
-#[cfg_attr(not(test), allow(dead_code))] // 运行时判定走 is_public_library_dir，常量供文档与测试引用
+///
+/// 运行时的位置由 Android 桥（`Environment.DIRECTORY_DOWNLOADS`）给出，不依赖该常量；
+/// 这里只保留给测试校验 `is_public_library_dir` 的典型布局。
+#[cfg(test)]
 pub const ANDROID_PUBLIC_LIBRARY_DIR: &str = "/storage/emulated/0/Download/JoyManga";
 
 /// 判断候选路径是否为公共默认书库：以 `Download/JoyManga` 结尾且位于

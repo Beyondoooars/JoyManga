@@ -262,6 +262,14 @@ async function refreshLogsDirSize() {
   }
 }
 
+/** 日志占用的展示文案（含加载态），只依赖上面两个状态，不再单独维护第三份。 */
+const logsSizeText = computed(() => {
+  if (logsSizeLoading.value) return '正在统计日志占用…'
+  if (logsDirSize.value === undefined) return ''
+  if (logsDirSize.value === 0) return '暂无日志'
+  return `日志占用 ${(logsDirSize.value / 1048576).toFixed(1)} MB`
+})
+
 async function clearLogsAction() {
   await dataAction('logs-clear', async () => {
     // runConfigMaintenance 会取消待执行的防抖保存；先显式落盘，避免用户的设置改动被静默丢弃
@@ -273,14 +281,9 @@ async function clearLogsAction() {
   })
 }
 
-const logsSizeText = computed(() => {
-  if (logsDirSize.value === undefined) return ''
-  if (logsDirSize.value === 0) return '暂无日志'
-  return `日志占用 ${(logsDirSize.value / 1048576).toFixed(1)} MB`
-})
-
+// 展开「更多维护」时统计一次；每次重新展开都刷新，避免展示过期的大小
 watch(advancedData, (open) => {
-  if (open && logsDirSize.value === undefined) void refreshLogsDirSize()
+  if (open) void refreshLogsDirSize()
 })
 </script>
 
@@ -387,7 +390,7 @@ watch(advancedData, (open) => {
                 <n-select input-id="log-level" aria-label="日志收集等级" v-model:value="logLevel" :options="logLevelOptions" />
               </div>
               <div class="setting-row log-usage-row">
-                <span class="log-usage" aria-live="polite">{{ logsSizeLoading ? '正在统计日志占用…' : logsSizeText }}</span>
+                <span class="log-usage" aria-live="polite">{{ logsSizeText }}</span>
                 <n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs-clear'" @click="clearLogsAction">清理日志</n-button>
               </div>
               <p class="settings-note">日志按天滚动保存在应用数据目录，保留 7 天，总量上限 20MB；出问题可用于导出诊断。</p>
