@@ -1,12 +1,23 @@
 name: Android Build
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本递增方式：patch / minor / major，或明确的 X.Y.Z'
+        required: false
+        default: patch
   push:
     branches:
       - main
       - 'agent/**'
     tags:
       - 'v*'
+
+# 主分支构建会把新版本号写回 main，并发运行会互相覆盖；串行执行且不取消已在跑的构建，
+# 避免一次发布被打断。
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-android:
@@ -16,6 +27,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # 版本号提交与打标签需要完整历史；main 上始终基于最新提交，
+          # 避免连续推送时两个构建各自从旧提交递增出同一个版本号。
+          fetch-depth: 0
+          ref: ${{ github.ref == 'refs/heads/main' && 'main' || github.ref }}
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -55,6 +71,14 @@ jobs:
         with:
           node-version: lts/*
 
+      # 主分支与手动触发的构建自动递增版本号：无需本地执行 pnpm bump 再手动提交。
+      # agent 分支与打 tag 的构建保持仓库里已有的版本号，不重复递增。
+      - name: Bump version
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          BUMP: ${{ github.event.inputs.version || 'patch' }}
+        run: node scripts/bump-version.mjs "$BUMP"
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -80,7 +104,14 @@ jobs:
       - name: Extract version info
         id: version_info
         run: |
-          VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # tag 构建以 tag 为准：手工补发的 tag 可能指向尚未更新版本号的提交
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            node scripts/bump-version.mjs "$VERSION" > /dev/null
+          else
+            # main 上由上一步自动递增；agent 分支沿用仓库里已有的版本号
+            VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
@@ -129,17 +160,45 @@ jobs:
           path: artifacts/joymanga-arm64-v8a.apk
           if-no-files-found: error
 
-      - name: Auto Publish or Update Release
+      # APK 校验通过后再把版本号写回 main：构建失败时仓库里不会留下一个没有产物的版本号。
+      # 用 GITHUB_TOKEN 推送不会再触发工作流，`[skip ci]` 只是额外保险。
+      # 非 main 分支（含手动触发的预构建）不回写，避免把测试版本号提交进仓库。
+      - name: Commit and push version bump
+        id: bump_commit
         if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock README.md
+          # 显式发布版本号时文件可能本来就是这个值，仍需一次提交作为 tag 的落点
+          git commit --allow-empty -m "chore: 发布 v${VERSION} [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then break; fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "版本号提交推送失败" >&2
+              exit 1
+            fi
+            git pull --rebase origin main
+          done
+          echo "SHA=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      # 每次 main 构建（含手动触发）都发布 Release：应用内更新依赖它发现新版本。
+      # agent 分支只产出构建产物，不发布。
+      - name: Publish release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v${{ env.VERSION }}
+          # main 上 tag 指向版本号提交；tag 构建沿用该 tag 自身的提交
+          target_commitish: ${{ steps.bump_commit.outputs.SHA || github.sha }}
           name: JoyManga v${{ env.VERSION }}
           body: |
             ### JoyManga v${{ env.VERSION }}
-            自动编译最新 Android 安装包已就绪。
+            自动编译并校验签名的 Android 安装包已就绪。
+          generate_release_notes: true
           files: |
             artifacts/joymanga-arm64-v8a.apk
           draft: false

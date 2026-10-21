@@ -129,6 +129,28 @@ pub fn export_bindings(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 应用自身的页面地址：开发时是 dev 服务器，打包后是 tauri 协议
+/// （Android 上 wry 会把它改写成 https://tauri.localhost）。只有这些地址才允许在窗口内导航。
+fn is_internal_webview_url(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" | "about" | "data" | "blob" => true,
+        // 打包后是 tauri.localhost，开发服务器是 localhost；自定义协议（jmimg 等）
+        // 在 Android 上也会被改写成 *.localhost
+        "http" | "https" => url
+            .host_str()
+            .is_some_and(|host| host == "localhost" || host.ends_with(".localhost")),
+        _ => false,
+    }
+}
+
+/// 把外部链接交给系统浏览器/默认应用打开；失败只记日志，不打断用户操作。
+fn open_in_system_browser(app: &tauri::AppHandle, url: &tauri::Url) {
+    use tauri_plugin_opener::OpenerExt;
+    if let Err(error) = app.opener().open_url(url.as_str(), None::<&str>) {
+        tracing::warn!(url = %url, %error, "无法交给系统打开链接");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 最先安装崩溃兜底：后续任何初始化步骤 panic 都能留下记录（release 无控制台）。
@@ -192,8 +214,21 @@ pub fn run() {
             app.state::<DownloadManager>().restore_pending();
 
             let window_config = app.config().app.windows.first().context("缺少主窗口配置")?;
+            let app_handle = app.handle().clone();
             WebviewWindowBuilder::from_config(app.handle(), window_config)
                 .context("读取主窗口配置失败")?
+                // 兜底：应用里出现的其他站内跳转一律交给系统浏览器，避免整页被网页替换后回不来。
+                // 导航回调运行在 WebView 主线程上，而 Android 的插件调用要等主线程处理
+                // MainPipe，同步调用会自锁，所以放到后台线程再打开。
+                .on_navigation(move |url| {
+                    if is_internal_webview_url(url) {
+                        return true;
+                    }
+                    let app_handle = app_handle.clone();
+                    let external = url.clone();
+                    std::thread::spawn(move || open_in_system_browser(&app_handle, &external));
+                    false
+                })
                 .build()
                 .context("创建主窗口失败")?;
 
@@ -228,5 +263,34 @@ mod tests {
             bindings.contains(&normalize(&event)),
             "事件类型需要重新生成：{event}"
         );
+    }
+
+    #[test]
+    fn webview_navigation_only_stays_inside_the_app() {
+        // 设置页的 GitHub / LICENSE 链接交给系统浏览器；应用自身页面（开发服务器、
+        // tauri 协议、Android 上的 *.localhost 改写）必须继续在窗口内导航。
+        for internal in [
+            "tauri://localhost",
+            "https://tauri.localhost/index.html",
+            "http://localhost:5005/",
+            "http://jmimg.localhost/a.jpg",
+            "about:blank",
+        ] {
+            assert!(
+                super::is_internal_webview_url(&internal.parse().unwrap()),
+                "{internal} 应视为应用内部地址"
+            );
+        }
+        for external in [
+            "https://github.com/Beyondoooars/JoyManga",
+            "https://github.com/Beyondoooars/JoyManga/blob/main/LICENSE",
+            "http://example.com/",
+            "mailto:someone@example.com",
+        ] {
+            assert!(
+                !super::is_internal_webview_url(&external.parse().unwrap()),
+                "{external} 应交给系统浏览器打开"
+            );
+        }
     }
 }

@@ -11,7 +11,9 @@ const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'))
 const currentVersion = pkg.version
 
 // 2. 解析目标版本号
-const arg = (process.argv[2] || 'patch').trim().toLowerCase()
+// 兼容 `v0.2.5` 这种带前缀写法：打 tag 的 CI 构建会把 tag 名直接传进来。
+const rawArg = (process.argv[2] || 'patch').trim().toLowerCase()
+const arg = rawArg.replace(/^v/, '')
 let targetVersion = ''
 
 const [major, minor, patch] = currentVersion.split('.').map(n => parseInt(n, 10) || 0)
@@ -23,9 +25,9 @@ if (arg === 'patch') {
 } else if (arg === 'major') {
   targetVersion = `${major + 1}.0.0`
 } else if (/^\d+\.\d+\.\d+/.test(arg)) {
-  targetVersion = arg.replace(/^v/, '')
+  targetVersion = arg
 } else {
-  console.error(`[bump-version] 无效的版本更新参数: ${arg}，请使用 patch, minor, major 或明确版本号如 0.2.2`)
+  console.error(`[bump-version] 无效的版本更新参数: ${rawArg}，请使用 patch, minor, major 或明确版本号如 0.2.2`)
   process.exit(1)
 }
 
@@ -56,6 +58,21 @@ if (fs.existsSync(cargoTomlPath)) {
   cargoContent = cargoContent.replace(/^version = ".*?"/m, `version = "${targetVersion}"`)
   fs.writeFileSync(cargoTomlPath, cargoContent, 'utf-8')
   console.log(`  ✓ 更新 src-tauri/Cargo.toml: ${targetVersion}`)
+}
+
+// 5.1 同步 src-tauri/Cargo.lock 中本包的版本号
+// `cargo --locked`（`pnpm gen:bindings` 就带了这个参数）会校验 lock 与 Cargo.toml 是否一致，
+// 漏掉这一步会让版本升级后的 --locked 命令直接失败。
+const cargoLockPath = path.join(rootDir, 'src-tauri', 'Cargo.lock')
+if (fs.existsSync(cargoLockPath)) {
+  let lockContent = fs.readFileSync(cargoLockPath, 'utf-8')
+  lockContent = lockContent.replace(
+    // 行尾随检出的 core.autocrlf 变化（本地 CRLF / CI LF），两种都要匹配
+    /(\[\[package\]\]\r?\nname = "joymanga"\r?\nversion = ")[^"]*(")/,
+    `$1${targetVersion}$2`,
+  )
+  fs.writeFileSync(cargoLockPath, lockContent, 'utf-8')
+  console.log(`  ✓ 更新 src-tauri/Cargo.lock: ${targetVersion}`)
 }
 
 // 6. 更新 src-tauri/gen/android/app/tauri.properties

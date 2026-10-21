@@ -9,6 +9,7 @@ import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
 import { withAndroidSelection, exportToAndroidDownloads, isUnderPublicDownloads } from '../utils/androidStorage.ts'
+import { openExternalUrl, REPOSITORY_URL } from '../utils/externalLink.ts'
 import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
 import PathField from '../components/PathField.vue'
 import StorageLocationDialog from './StorageLocationDialog.vue'
@@ -52,7 +53,7 @@ let disposed = false
 
 const domainStatus = ref<NetworkProbe>()
 const appVersion = ref('')
-const projectUrl = 'https://github.com/Beyondoooars/JoyManga'
+const projectUrl = REPOSITORY_URL
 const licenseUrl = `${projectUrl}/blob/main/LICENSE`
 const {
   checking: updateChecking,
@@ -423,9 +424,13 @@ watch(advancedData, (open) => {
                 <n-button size="small" secondary :loading="updateChecking" @click="handleCheckUpdate">检查更新</n-button>
               </div>
             </div>
-            <div class="about-row"><span>项目主页</span><n-a :href="projectUrl" target="_blank">GitHub 仓库</n-a></div>
+            <div class="about-row">
+              <span>项目主页</span>
+              <!-- 用系统浏览器打开：WebView 内直接导航会把整个应用界面替换成网页且无法返回 -->
+              <n-a :href="projectUrl" target="_blank" @click.prevent="openExternalUrl(projectUrl)">GitHub 仓库</n-a>
+            </div>
           </div>
-          <p class="settings-note">Copyright © 2024-2026 Beyondoooars · <n-a :href="licenseUrl" target="_blank">LICENSE</n-a></p>
+          <p class="settings-note">Copyright © 2024-2026 Beyondoooars · <n-a :href="licenseUrl" target="_blank" @click.prevent="openExternalUrl(licenseUrl)">LICENSE</n-a></p>
         </section>
       </div>
       <footer class="settings-footer"><span>更改后自动保存</span><n-button type="primary" color="#b73963" text-color="#ffffff" @click="showing = false">完成</n-button></footer>

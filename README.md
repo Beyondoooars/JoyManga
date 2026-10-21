@@ -131,6 +131,17 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
 pnpm build:android
 ```
 
+### 版本发布
+
+推送到 `main` 即触发云端打包，无需本地改版本号：
+
+1. GitHub Actions 自动递增 patch 版本（`package.json`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`、README 徽章同步）。
+2. 编译并校验 arm64-v8a 签名 APK。
+3. 校验通过后把版本号提交回 `main`，创建 `vX.Y.Z` Release 并上传 APK，应用内「检查更新」即可发现新版本。
+
+需要升 minor/major 时，在 Actions 面板手动运行 **Android Build**，`version` 输入 `minor`、`major` 或明确的 `X.Y.Z`。
+本地仍可用 `pnpm bump <patch|minor|major|X.Y.Z>` 手动同步版本号。
+
 ---
 
 ## 📜 声明
