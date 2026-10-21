@@ -38,6 +38,22 @@ impl PathIsImg for std::path::Path {
     }
 }
 
+/// 图片扩展名 → MIME；未知扩展名按 JPEG 处理（JM 的图片以 JPEG 为主）。
+pub fn mime_for_image(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("jpeg")
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/jpeg",
+    }
+}
+
 pub trait WalkDirEntryExt {
     fn is_comic_metadata(&self) -> bool;
 }

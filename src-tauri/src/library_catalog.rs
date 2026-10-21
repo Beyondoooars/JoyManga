@@ -39,7 +39,7 @@ impl Default for LibraryCatalog {
     }
 }
 
-pub(crate) fn root_key(root: &Path) -> String {
+fn root_key(root: &Path) -> String {
     let path = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     path.to_string_lossy().into_owned()
 }

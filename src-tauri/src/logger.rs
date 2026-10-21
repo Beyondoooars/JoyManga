@@ -329,6 +329,27 @@ pub fn is_managed_log_file(file_name: &str) -> bool {
         || (lower.starts_with(CRASH_LOG_PREFIX) && lower.ends_with(".log"))
 }
 
+/// 删除日志目录下所有由本应用管理的日志文件（用户放入的其他文件保持原样）。
+///
+/// 返回删除失败的文件数。设置页的「清理日志」与维护外壳共用这一份规则，
+/// 新增日志前缀时只需改 `is_managed_log_file`。
+pub fn clear_managed_logs(logs_dir: &std::path::Path) -> usize {
+    let mut failures = 0;
+    for entry in walkdir::WalkDir::new(logs_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let managed = entry.file_name().to_str().is_some_and(is_managed_log_file);
+        if managed && std::fs::remove_file(entry.path()).is_err() {
+            failures += 1;
+        }
+    }
+    failures
+}
+
 pub fn cleanup_managed_logs(
     logs_dir: &std::path::Path,
     retention: Duration,

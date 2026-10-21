@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::errors::{CommandError, CommandResult};
-use crate::extensions::{AppHandleExt, PathIsImg};
+use crate::extensions::{mime_for_image, AppHandleExt, PathIsImg};
 use crate::types::Comic;
 use crate::utils;
 
@@ -198,21 +198,6 @@ pub(crate) fn chapter_reader_data_from_comic(
     })
 }
 
-fn mime_for_extension(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("jpeg")
-        .to_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/jpeg",
-    }
-}
-
 /// 读取阅读器的一页，返回原始字节与 MIME。
 ///
 /// `file_path` 有两种形态：目录书库的图片绝对路径，或 CBZ 的
@@ -227,7 +212,7 @@ fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>,
             .with_context(|| format!("无法解析CBZ路径`{cbz_path_str}`"))?;
 
         if !canonical_cbz_path.starts_with(&canonical_download_dir)
-            && !is_imported_cbz(app, &download_dir, &canonical_cbz_path)
+            && !is_imported_cbz(app, &canonical_download_dir, &canonical_cbz_path)
         {
             return Err(anyhow!("CBZ文件不在下载根目录内"));
         }
@@ -270,7 +255,7 @@ fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>,
         drop(entry);
         drop(guard);
 
-        let mime = mime_for_extension(Path::new(entry_name));
+        let mime = mime_for_image(Path::new(entry_name));
         return Ok((bytes, mime));
     }
 
@@ -281,30 +266,31 @@ fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>,
     }
     let bytes = crate::image_data::read_image(&canonical_path)
         .with_context(|| format!("读取文件`{}`失败", canonical_path.display()))?;
-    Ok((bytes, mime_for_extension(&canonical_path)))
+    Ok((bytes, mime_for_image(&canonical_path)))
 }
 
 /// 判断 CBZ 是否来自「导入」：书库记录里登记过的外部归档。
 ///
 /// 阅读时每页都会调用，所以结果按记录文件的修改时间缓存，避免逐页同步读盘。
-fn is_imported_cbz(app: &AppHandle, download_dir: &Path, cbz_path: &Path) -> bool {
+fn is_imported_cbz(app: &AppHandle, canonical_root: &Path, cbz_path: &Path) -> bool {
     let catalog_path = crate::library_catalog::catalog_path(app);
     let fingerprint = std::fs::metadata(&catalog_path)
         .ok()
         .and_then(|meta| meta.modified().ok().map(|modified| (modified, meta.len())));
-    let root = PathBuf::from(crate::library_catalog::root_key(download_dir));
+    // 调用方已规范化过书库根目录，直接用它作缓存键：既省一次 canonicalize，
+    // 也避免目录暂时不可访问时键在「规范化/原始」两种形式间摆动导致缓存反复失效。
     let index_lock = IMPORTED_CBZ_INDEX.get_or_init(|| Mutex::new(None));
     let mut guard = index_lock.lock();
     let stale = guard
         .as_ref()
-        .is_none_or(|index| index.fingerprint != fingerprint || index.root != root);
+        .is_none_or(|index| index.fingerprint != fingerprint || index.root != canonical_root);
     if stale {
         let imported = {
             let _guard = crate::library_catalog::CATALOG_LOCK.lock();
             crate::library_catalog::LibraryCatalog::load(&catalog_path)
                 .map(|catalog| {
                     catalog
-                        .visible_imports(download_dir)
+                        .visible_imports(canonical_root)
                         .into_iter()
                         .map(|record| record.path)
                         .collect::<Vec<_>>()
@@ -315,7 +301,7 @@ fn is_imported_cbz(app: &AppHandle, download_dir: &Path, cbz_path: &Path) -> boo
                 })
         };
         *guard = Some(ImportedCbzIndex {
-            root,
+            root: canonical_root.to_path_buf(),
             fingerprint,
             paths: imported,
         });
@@ -333,21 +319,10 @@ fn is_imported_cbz(app: &AppHandle, download_dir: &Path, cbz_path: &Path) -> boo
 fn image_path_from_url(url: &tauri::Url) -> anyhow::Result<String> {
     anyhow::ensure!(url.scheme() == IMAGE_SCHEME, "图片地址协议不匹配");
     let encoded = url.path().trim_start_matches('/');
-    let mut decoded = Vec::with_capacity(encoded.len());
-    let mut bytes = encoded.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == b'%' {
-            let pair = [
-                bytes.next().context("图片地址编码不完整")?,
-                bytes.next().context("图片地址编码不完整")?,
-            ];
-            let text = std::str::from_utf8(&pair).context("图片地址编码无效")?;
-            decoded.push(u8::from_str_radix(text, 16).context("图片地址编码无效")?);
-        } else {
-            decoded.push(byte);
-        }
-    }
-    String::from_utf8(decoded).context("图片地址不是有效的 UTF-8")
+    percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .context("图片地址不是有效的 UTF-8")
+        .map(|decoded| decoded.into_owned())
 }
 
 /// `jmimg://` 协议处理器：直接返回图片字节，省掉 base64 编码与 IPC 往返。
@@ -396,6 +371,28 @@ mod tests {
     use crate::types::ChapterInfo;
     use std::io::Write;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn image_url_decodes_percent_encoded_page_identity() {
+        // 前端用 encodeURIComponent 编码：`/`、空格、`|`、中文都变成 %XX
+        let url = tauri::Url::parse(
+            "jmimg://localhost/%2Fstorage%2Femulated%2F0%2F%E6%BC%AB%E7%94%BB%20%E7%AC%AC1%E8%AF%9D%2F001.jpg",
+        )
+        .unwrap();
+        assert_eq!(
+            image_path_from_url(&url).unwrap(),
+            "/storage/emulated/0/漫画 第1话/001.jpg"
+        );
+
+        let cbz = tauri::Url::parse("jmimg://localhost/a.cbz%7C001.jpg").unwrap();
+        assert_eq!(image_path_from_url(&cbz).unwrap(), "a.cbz|001.jpg");
+    }
+
+    #[test]
+    fn image_url_rejects_other_schemes() {
+        let url = tauri::Url::parse("http://localhost/a.cbz").unwrap();
+        assert!(image_path_from_url(&url).is_err());
+    }
 
     #[test]
     fn merged_flat_cbz_reader_uses_each_chapters_file_and_skips_undownloaded_gaps() {
