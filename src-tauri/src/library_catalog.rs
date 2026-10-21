@@ -163,11 +163,6 @@ impl LibraryCatalog {
         Ok((id, true))
     }
 
-    pub fn allows_cbz(&self, root: &Path, path: &Path) -> bool {
-        self.visible_imports(root)
-            .iter()
-            .any(|record| root_key(&record.path) == root_key(path))
-    }
 }
 
 pub(crate) fn registered_cbz_comic(record: &RegisteredCbz) -> anyhow::Result<crate::types::Comic> {

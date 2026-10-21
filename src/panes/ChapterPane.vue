@@ -51,6 +51,9 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
 })
 
+/** 虚拟列表行高：与 `.chapter-item` 的 height 保持一致 */
+const CHAPTER_ROW_HEIGHT = 40
+
 const dropdownX = ref<number>(0)
 const dropdownY = ref<number>(0)
 const showDropdown = ref<boolean>(false)
@@ -522,7 +525,7 @@ function isDownloading(state: State) {
         </div>
       </div>
 
-      <!-- Chapter Selection Grid -->
+      <!-- Chapter Selection List：虚拟滚动，几百话的漫画也只渲染可视区域 -->
       <div class="chapters-section">
         <SelectionArea
           ref="selectionAreaRef"
@@ -531,21 +534,27 @@ function isDownloading(state: State) {
           @contextmenu="onContextMenu"
           @move="updateSelectedIds"
           @start="unselectAll">
-          <n-checkbox-group v-model:value="checkedIds" class="chapter-grid">
-            <n-checkbox
-              v-for="{ chapterId, chapterTitle, isDownloaded, state } in chapterInfos"
-              :key="chapterId"
-              :data-key="chapterId"
-              class="selectable chapter-item"
-              :value="chapterId"
-              :label="chapterTitle"
-              :disabled="isDownloaded === true || isDownloading(state)"
-              :class="{
-                selected: selectedIds.has(chapterId),
-                downloaded: isDownloaded,
-                downloading: !isDownloaded && isDownloading(state),
-              }"
-              @dblclick="handleChapterDoubleClick(chapterId, isDownloaded)" />
+          <n-checkbox-group v-model:value="checkedIds" class="chapter-checkbox-group">
+            <n-virtual-list
+              class="chapter-list"
+              :items="chapterInfos"
+              :item-size="CHAPTER_ROW_HEIGHT"
+              key-field="chapterId">
+              <template #default="{ item }">
+                <n-checkbox
+                  :data-key="item.chapterId"
+                  class="selectable chapter-item"
+                  :value="item.chapterId"
+                  :label="item.chapterTitle"
+                  :disabled="item.isDownloaded === true || isDownloading(item.state)"
+                  :class="{
+                    selected: selectedIds.has(item.chapterId),
+                    downloaded: item.isDownloaded,
+                    downloading: !item.isDownloaded && isDownloading(item.state),
+                  }"
+                  @dblclick="handleChapterDoubleClick(item.chapterId, item.isDownloaded)" />
+              </template>
+            </n-virtual-list>
           </n-checkbox-group>
         </SelectionArea>
       </div>
@@ -821,13 +830,17 @@ function isDownloading(state: State) {
   user-select: none;
 }
 
-.chapter-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 8px;
+.chapter-list {
+  height: 100%;
+}
+
+.chapter-checkbox-group {
+  display: block;
+  height: 100%;
 }
 
 .chapter-item {
+  height: 40px;
   padding: 8px 12px;
   background: #f6f7f8;
   border: 1px solid #e3e5e7;
@@ -1019,10 +1032,6 @@ function isDownloading(state: State) {
     display: none;
   }
 
-  .chapter-grid {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 6px;
-  }
 }
 
 @media (max-width: 640px) {

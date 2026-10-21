@@ -8,12 +8,12 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.Uri
 import android.os.*
 import android.provider.*
 import android.webkit.*
 import android.view.inputmethod.InputMethodManager
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.view.*
 import androidx.activity.OnBackPressedCallback
 import android.view.KeyEvent
@@ -27,8 +27,14 @@ class MainActivity : TauriActivity() {
     private var appWebView: WebView? = null
     private var pendingPicker: Picker? = null
     private val worker = Executors.newSingleThreadExecutor()
+    // 更新包下载单独占一个线程：大文件下载耗时可能很久，不能挡住导入/导出的暂存清理。
+    private val updateWorker = Executors.newSingleThreadExecutor()
+    @Volatile private var updateDownloading = false
     private var visible = false
     private var activeDownloads = 0
+    private val handler = Handler(Looper.getMainLooper())
+    private var serviceUpdateScheduled = false
+    private var pendingViewUri: Uri? = null
     private var downloadSpeed = ""
     private var downloadPagesCurrent = 0
     private var downloadPagesTotal = 0
@@ -41,12 +47,26 @@ class MainActivity : TauriActivity() {
         super.onCreate(savedInstanceState)
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         WindowCompat.setDecorFitsSystemWindows(window, true)
+        // 界面恒为浅色：系统深色模式下窗口背景会变深，与固定浅色的 WebView 冲突，
+        // 启动瞬间还会闪一下。显式锁成浅色并让状态栏图标对应深色文字。
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() { dispatchBack() }
         })
         worker.execute {
+            // 清理上次异常退出遗留的暂存；updates 目录里是下载好的 APK，保留给安装器读取
             try { importRoot().listFiles()?.forEach { it.deleteRecursively() } } catch (_: Exception) {}
+            try { openRoot().listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 24 * 60 * 60 * 1000 }?.forEach { it.deleteRecursively() } } catch (_: Exception) {}
+            try { File(cacheDir, "android-imports").deleteRecursively() } catch (_: Exception) {}
         }
+        // 冷启动时由「用 JoyManga 打开 CBZ」拉起：WebView 就绪后会自动导入
+        handleViewIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleViewIntent(intent)
     }
 
     override fun onWebViewCreate(webView: WebView) {
@@ -54,20 +74,66 @@ class MainActivity : TauriActivity() {
         appWebView = webView
         webView.addJavascriptInterface(AndroidBridge(), "JmAndroid")
         registerNetworkCallback()
+        pendingViewUri?.let { uri ->
+            pendingViewUri = null
+            dispatchViewUri(uri)
+        }
     }
 
-    /** 网络切换（Wi-Fi <-> 移动数据）时把"是否计费"推给前端，供「仅 Wi-Fi 下载」判断。 */
+    /**
+     * 「用 JoyManga 打开 CBZ」：把外部文件复制到导入暂存区，再通知前端导入。
+     * 前端可能还没挂载监听器，所以冷启动时先存起来，等 WebView 创建后再发。
+     */
+    private fun handleViewIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        intent.action = null
+        pendingViewUri = uri
+        appWebView?.let {
+            pendingViewUri = null
+            dispatchViewUri(uri)
+        }
+    }
+
+    private fun dispatchViewUri(uri: Uri) {
+        val requestId = UUID.randomUUID().toString()
+        worker.execute {
+            try {
+                val name = safeName(documentName(uri))
+                require(name.endsWith(".cbz", ignoreCase = true)) { "只支持打开 CBZ 文件" }
+                // 外部打开的漫画可能很大，cacheDir 在存储紧张时会被系统清理，
+                // 放到 filesDir 下的专门目录，导入完成后由前端调 discardImports 删除。
+                val staging = File(openRoot(), requestId).apply { mkdirs() }
+                val target = File(staging, name)
+                copyUri(uri, target, 2L * 1024 * 1024 * 1024)
+                runOnUiThread {
+                    appWebView?.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('jm-open-file', {detail:{id:${JSONObject.quote(requestId)},path:${JSONObject.quote(target.absolutePath)}}}))",
+                        null,
+                    )
+                }
+            } catch (error: Exception) {
+                File(openRoot(), requestId).deleteRecursively()
+                runOnUiThread { android.widget.Toast.makeText(this, "打开文件失败：${error.message ?: "未知错误"}", android.widget.Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    /**
+     * 网络切换（Wi-Fi <-> 移动数据）时把"是否计费"推给前端，供「仅 Wi-Fi 下载」判断。
+     *
+     * 必须监听**默认网络**：按 INTERNET 能力注册回调时，Wi-Fi 与移动数据会各自
+     * 触发一次，最后到达的那个说了算——Wi-Fi + 蜂窝并存（或开 VPN）时会把
+     * 不计费的 Wi-Fi 误判成计费网络，导致「仅 Wi-Fi 下载」无故暂停。
+     */
     private fun registerNetworkCallback() {
         try {
             val manager = getSystemService(ConnectivityManager::class.java)
-            val request = NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build()
-            manager.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
+            manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                     pushMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
                 }
-                override fun onLost(network: Network) { pushMetered(true) }
+                override fun onLost(network: Network) { pushMetered(manager.isActiveNetworkMetered) }
             })
             pushMetered(manager.isActiveNetworkMetered)
         } catch (error: Exception) {
@@ -93,8 +159,9 @@ class MainActivity : TauriActivity() {
     override fun onStop() {
         visible = false
         if (AppState.activity === this) AppState.activity = null
-        // 离开应用时清掉常亮，避免阅读器关闭回调丢失后一直不熄屏
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // 不要在这里清 KEEP_SCREEN_ON：窗口标志只在窗口可见时生效，不可见时本来就不会
+        // 阻止息屏；清掉后前端不会再设置（watcher 只在配置/阅读状态变化时触发），
+        // 用户切出去一次再回来，本次阅读就一直会息屏。
         super.onStop()
     }
 
@@ -129,7 +196,10 @@ class MainActivity : TauriActivity() {
     }
 
     private fun libraryRoot() = File(getExternalFilesDir(null) ?: filesDir, "library").apply { mkdirs() }
-    private fun importRoot() = File(cacheDir, "android-imports").apply { mkdirs() }
+    // 导入暂存放 filesDir 而不是 cacheDir：大文件复制耗时较长，期间系统可能清理缓存目录，
+    // 导致复制到一半的文件被删。导入结束后由前端 discardImports 清理。
+    private fun importRoot() = File(filesDir, "android-imports").apply { mkdirs() }
+    private fun openRoot() = File(filesDir, "android-opens").apply { mkdirs() }
     private fun validId(id: String): Boolean = try { UUID.fromString(id); true } catch (_: Exception) { false }
 
     private fun beginPicker(picker: Picker) {
@@ -333,6 +403,7 @@ class MainActivity : TauriActivity() {
     }
 
     private fun updateDownloadService() {
+        serviceUpdateScheduled = false
         if (activeDownloads <= 0) { stopService(Intent(this, DownloadService::class.java)); return }
         val intent = Intent(this, DownloadService::class.java)
             .putExtra("active", activeDownloads)
@@ -351,6 +422,33 @@ class MainActivity : TauriActivity() {
                         .setContentIntent(android.app.PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)).build())
             }
         } catch (error: Exception) { android.util.Log.w("JoyManga", "下载前台服务启动失败", error) }
+    }
+
+    /**
+     * 合并高频更新：每张图片下载完成前端都会推一次状态，多章节并发时每秒可达十几次。
+     * 每次都重建通知会被系统限流（通知被丢弃或延迟），所以这里按 750ms 合并，
+     * 最后一次调度总会用最新值执行。
+     */
+    private fun scheduleDownloadServiceUpdate() {
+        if (serviceUpdateScheduled) return
+        serviceUpdateScheduled = true
+        handler.postDelayed({ updateDownloadService() }, 750)
+    }
+
+    /** 全部任务结束时发一条可自动消失的完成通知（前台通知会随服务停止一起消失）。 */
+    private fun notifyDownloadsFinished() {
+        try {
+            DownloadService.ensureChannel(this)
+            val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val pending = android.app.PendingIntent.getActivity(this, 0, open, android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)
+            val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, DownloadService.CHANNEL) else Notification.Builder(this)
+            getSystemService(NotificationManager::class.java).notify(
+                DownloadService.DONE_ID,
+                builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
+                    .setContentTitle("下载完成").setContentText("点击查看下载与传输")
+                    .setContentIntent(pending).setAutoCancel(true).setOnlyAlertOnce(true).build(),
+            )
+        } catch (error: Exception) { android.util.Log.w("JoyManga", "发送下载完成通知失败", error) }
     }
 
     inner class AndroidBridge {
@@ -394,13 +492,89 @@ class MainActivity : TauriActivity() {
             }
         } catch (_: Exception) { false }
         @JavascriptInterface fun exitApp() { runOnUiThread { moveTaskToBack(true) } }
+        /**
+         * 应用内下载 APK 并拉起系统安装器。
+         *
+         * 浏览器下载再返回应用很折腾；这里下到私有缓存目录，经 FileProvider 授权后
+         * 交给 PackageInstaller（用户仍需在系统弹窗确认）。进度通过
+         * `jm-update-progress` 事件回传。
+         */
+        @JavascriptInterface fun downloadAndInstallApk(url: String, fileName: String) {
+            if (!url.startsWith("https://")) { emitUpdateEvent("error", message = "更新地址无效"); return }
+            // 先确认能装再下载：否则几十 MB 的安装包下完才发现没有权限，白费流量
+            if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+                emitUpdateEvent("permission", message = "请在设置中允许 JoyManga 安装未知应用，然后重新点击更新")
+                runOnUiThread {
+                    try { startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))) }
+                    catch (error: Exception) { android.util.Log.w("JoyManga", "无法打开安装未知应用设置页", error) }
+                }
+                return
+            }
+            if (updateDownloading) { emitUpdateEvent("error", message = "安装包正在下载中"); return }
+            updateDownloading = true
+            updateWorker.execute {
+                try {
+                    val safeName = safeName(fileName).ifBlank { "update.apk" }.let {
+                        if (it.endsWith(".apk", ignoreCase = true)) it else "$it.apk"
+                    }
+                    val dir = File(cacheDir, "updates").apply { mkdirs() }
+                    // 只清理旧安装包：系统安装器可能还在读取上一次下载的文件
+                    dir.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000 }?.forEach { it.delete() }
+                    val target = File(dir, safeName)
+                    val part = File(dir, ".part-$safeName")
+                    val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                    try {
+                        connection.connectTimeout = 15_000
+                        connection.readTimeout = 30_000
+                        connection.instanceFollowRedirects = true
+                        // GitHub 对缺少 UA 的请求可能直接返回 403
+                        connection.setRequestProperty("User-Agent", "JoyManga-Android")
+                        connection.connect()
+                        require(connection.responseCode in 200..299) { "下载失败（HTTP ${connection.responseCode}）" }
+                        val total = connection.contentLengthLong
+                        connection.inputStream.use { input ->
+                            FileOutputStream(part).use { output ->
+                                val buffer = ByteArray(128 * 1024)
+                                var copied = 0L
+                                var lastReport = 0L
+                                val step = (total / 100).coerceAtLeast(64 * 1024)
+                                while (true) {
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    output.write(buffer, 0, count)
+                                    copied += count
+                                    if (total > 0 && copied - lastReport >= step) {
+                                        lastReport = copied
+                                        emitUpdateEvent("progress", percent = (copied * 100 / total).toInt().coerceIn(0, 99))
+                                    }
+                                }
+                                output.fd.sync()
+                            }
+                        }
+                    } finally {
+                        connection.disconnect()
+                    }
+                    require(part.length() > 0) { "下载的安装包为空" }
+                    require(part.renameTo(target)) { "无法保存安装包" }
+                    emitUpdateEvent("done", percent = 100)
+                    runOnUiThread { installApk(target) }
+                } catch (error: Exception) {
+                    emitUpdateEvent("error", message = error.message ?: "下载更新失败")
+                } finally {
+                    updateDownloading = false
+                }
+            }
+        }
         @JavascriptInterface fun pickDocuments(id: String, mode: String) {
             if (!validId(id)) return
             if (mode !in listOf("cbz", "backup", "directory")) { result(id, error = "文件选择模式无效"); return }
             runOnUiThread { beginPicker(Picker(id, mode)) }
         }
         @JavascriptInterface fun discardImports(id: String) {
-            if (validId(id)) worker.execute { File(importRoot(), id).deleteRecursively() }
+            if (validId(id)) worker.execute {
+                File(importRoot(), id).deleteRecursively()
+                File(openRoot(), id).deleteRecursively()
+            }
         }
         @JavascriptInterface fun exportDocuments(id: String, path: String) {
             if (!validId(id)) return
@@ -411,6 +585,7 @@ class MainActivity : TauriActivity() {
         }
         @JavascriptInterface fun downloadStatus(active: Int, speed: String, current: Int, total: Int) {
             runOnUiThread {
+                val wasActive = activeDownloads > 0
                 activeDownloads = active.coerceAtLeast(0); downloadSpeed = speed.take(80)
                 downloadPagesCurrent = current.coerceAtLeast(0)
                 downloadPagesTotal = total.coerceAtLeast(0)
@@ -425,7 +600,9 @@ class MainActivity : TauriActivity() {
                     prefs.edit().putString("notifications_prompted_version", version).apply()
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
                 }
-                updateDownloadService()
+                scheduleDownloadServiceUpdate()
+                // 服务停止后前台通知随之消失，这里补一条完成通知，避免用户不知道已经下完。
+                if (wasActive && activeDownloads == 0) notifyDownloadsFinished()
             }
         }
         /** 阅读时保持屏幕常亮；关闭后恢复系统默认息屏策略。 */
@@ -440,6 +617,40 @@ class MainActivity : TauriActivity() {
             runOnUiThread { volumeKeyPaging = enabled }
         }
     }
+    /** 把下载好的 APK 交给系统安装器；未授予「安装未知应用」时先跳到对应设置页。 */
+    private fun installApk(apk: File) {
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            emitUpdateEvent("permission", message = "请在设置中允许 JoyManga 安装未知应用，然后重新点击更新")
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            } catch (error: Exception) {
+                android.util.Log.w("JoyManga", "无法打开安装未知应用设置页", error)
+            }
+            return
+        }
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+            emitUpdateEvent("installer", message = "请在系统安装器中确认安装")
+        } catch (error: Exception) {
+            emitUpdateEvent("error", message = "无法拉起系统安装器：${error.message ?: "未知错误"}")
+        }
+    }
+
+    /** 更新流程进度/结果回传前端；事件名与 `src/utils/androidStorage.ts` 的订阅保持一致。 */
+    private fun emitUpdateEvent(state: String, percent: Int = -1, message: String = "") {
+        val payload = JSONObject().put("state", state)
+        if (percent >= 0) payload.put("percent", percent)
+        if (message.isNotEmpty()) payload.put("message", message)
+        runOnUiThread {
+            appWebView?.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('jm-update-progress', {detail:$payload}))", null)
+        }
+    }
+
     /** 当前应用版本名（用于"每个版本最多提示一次通知权限"）。 */
     private fun appVersionName(): String = try {
         packageManager.getPackageInfo(packageName, 0).versionName ?: ""

@@ -8,7 +8,7 @@ import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
-import { withAndroidSelection, exportToAndroidDownloads } from '../utils/androidStorage.ts'
+import { withAndroidSelection, exportToAndroidDownloads, isUnderPublicDownloads } from '../utils/androidStorage.ts'
 import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
 import PathField from '../components/PathField.vue'
 import StorageLocationDialog from './StorageLocationDialog.vue'
@@ -160,6 +160,11 @@ async function backup() {
     await store.saveConfigNow()
     const result = await commands.backupAppData()
     if (result.status === 'error') throw new Error(result.error.err_message)
+    // 书库本身就在公共下载时，备份文件已经可见；再发布只会产生「xxx (1).json」副本
+    if (isUnderPublicDownloads(result.data)) {
+      message.success(`备份已保存到 ${result.data}`)
+      return
+    }
     const published = await exportToAndroidDownloads(result.data)
     if (!published.cancelled) message.success('备份已保存到系统下载')
   })
@@ -210,6 +215,11 @@ async function exportLogs() {
     const logs = store.logRecords.slice(-1000).map((record) => `[${record.level}] ${record.formatedLog}`)
     const result = await commands.exportLogs(logs)
     if (result.status === 'error') throw new Error(result.error.err_message)
+    // 书库为公共下载时诊断日志写进 JoyManga/logs，文件管理器已可见，无需再复制
+    if (isUnderPublicDownloads(result.data.filePath)) {
+      message.success('诊断日志已保存到书库的 logs 目录')
+      return
+    }
     await exportToAndroidDownloads(result.data.filePath)
   })
 }

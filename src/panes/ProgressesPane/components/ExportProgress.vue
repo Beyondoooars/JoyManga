@@ -4,7 +4,7 @@ import { ProgressData } from './ExportProgresses.vue'
 import { commands } from '../../../bindings.ts'
 import IconButton from '../../../components/IconButton.vue'
 import { isAndroid } from '../../../composables/useIsMobile.ts'
-import { exportToAndroidDownloads } from '../../../utils/androidStorage.ts'
+import { exportToAndroidDownloads, isUnderPublicDownloads } from '../../../utils/androidStorage.ts'
 import { useMessage } from 'naive-ui'
 import { ref } from 'vue'
 const message = useMessage()
@@ -12,8 +12,15 @@ const publishing = ref(false)
 async function publish() {
   if (!props.p.chapterExportDir || publishing.value) return
   publishing.value = true
-  try { const result = await exportToAndroidDownloads(props.p.chapterExportDir); if (!result.cancelled) message.success(`已保存 ${result.exported ?? 0} 个文件到公共目录`) }
-  catch (error) { message.error(String(error)) }
+  try {
+    // 导出目录已在公共下载里（书库就是公共目录）时无需再发布一份副本
+    if (isUnderPublicDownloads(props.p.chapterExportDir)) {
+      message.success('文件已在公共下载目录中')
+      return
+    }
+    const result = await exportToAndroidDownloads(props.p.chapterExportDir)
+    if (!result.cancelled) message.success(`已保存 ${result.exported ?? 0} 个文件到公共目录`)
+  } catch (error) { message.error(String(error)) }
   finally { publishing.value = false }
 }
 

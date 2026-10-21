@@ -580,7 +580,11 @@ mod tests {
         );
         catalog.remove(&library, comic.id);
         assert!(comic.comic_download_dir.as_ref().unwrap().is_file());
-        assert!(!catalog.allows_cbz(&library, comic.comic_download_dir.as_ref().unwrap()));
+        // 删除后该书不再出现在可见导入中，图片协议与删除逻辑都不会再放行它的文件
+        assert!(!catalog
+            .visible_imports(&library)
+            .iter()
+            .any(|record| record.id == comic.id));
         catalog.restore(&library, comic.id);
         let again = import_batch(
             vec![source.to_string_lossy().into_owned()],

@@ -23,6 +23,9 @@ const {
   downloadUpdate,
   openReleasePage,
   ignoreCurrentUpdate,
+  installing,
+  installProgress,
+  installMessage,
 } = useAppUpdate()
 
 useAndroidBack(() => {
@@ -103,16 +106,24 @@ useAndroidBack(() => {
 
       <!-- 底部操作按钮 -->
       <div class="px-5 py-4 border-t border-gray-100 flex flex-col gap-2 mt-1 bg-gray-50/50">
+        <!-- 应用内更新进度：下载完成后再由原生拉起系统安装器 -->
+        <div v-if="installing" class="flex flex-col gap-1">
+          <n-progress type="line" :percentage="installProgress" :processing="installProgress < 100" />
+          <span class="text-[11px] text-gray-500">{{ installMessage }}</span>
+        </div>
+        <div v-else-if="installMessage" class="text-[11px] text-gray-500">{{ installMessage }}</div>
         <div class="flex gap-2.5">
           <n-button
             type="primary"
             class="flex-1 font-semibold"
+            :loading="installing"
+            :disabled="installing"
             @click="downloadUpdate"
           >
             <template #icon>
               <PhDownloadSimple :size="16" />
             </template>
-            {{ isAndroid ? '下载并更新 APK' : '下载新版本' }}
+            {{ isAndroid ? (installing ? `下载中 ${installProgress}%` : '下载并更新 APK') : '下载新版本' }}
           </n-button>
 
           <n-button

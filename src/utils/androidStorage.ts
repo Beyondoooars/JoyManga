@@ -19,6 +19,7 @@ declare global {
       supportsPublicStorage(): boolean
       canWritePublicDownloads(): boolean
       requestAllFilesAccess(): void
+      downloadAndInstallApk(url: string, fileName: string): void
     }
   }
 }
@@ -58,9 +59,20 @@ export function exportToAndroidDownloads(path: string) {
   return request((id) => window.JmAndroid!.exportDocuments(id, path))
 }
 
-/** 公共下载目录（Android Download）的绝对路径；桥不可用时返回空串。 */
+/** 公共下载目录下的默认书库（Download/JoyManga）绝对路径；桥不可用时返回空串。 */
 export function downloadsPath() {
   return window.JmAndroid?.downloadsPath() ?? ''
+}
+
+/**
+ * 文件是否已经位于公共下载目录内。
+ *
+ * 书库就在公共下载时，备份/诊断日志本来就已经是用户可见文件；再走一次
+ * MediaStore 发布只会生成 `xxx (1).json` 这样的副本。
+ */
+export function isUnderPublicDownloads(path: string): boolean {
+  const root = downloadsPath()
+  return root !== '' && (path === root || path.startsWith(`${root}/`))
 }
 
 /** 是否已持有「所有文件访问」权限；桥不可用或调用异常时视为未授权。 */
@@ -131,6 +143,44 @@ export function watchNetworkMetered(handler: (metered: boolean) => void): () => 
   const listener = (event: Event) => handler(Boolean((event as CustomEvent<boolean>).detail))
   window.addEventListener('jm-network-metered', listener)
   return () => window.removeEventListener('jm-network-metered', listener)
+}
+
+/**
+ * 「用 JoyManga 打开 CBZ」：原生把外部文件复制到暂存区后推送此事件。
+ * 返回取消订阅函数；回调负责导入并在结束后调用 `discardImports(id)`。
+ */
+export function onOpenFile(handler: (detail: { id?: string; path: string }) => void): () => void {
+  const listener = (event: Event) => {
+    const detail = (event as CustomEvent<{ id?: string; path?: string }>).detail
+    if (detail?.path) handler({ id: detail.id, path: detail.path })
+  }
+  window.addEventListener('jm-open-file', listener)
+  return () => window.removeEventListener('jm-open-file', listener)
+}
+
+export interface UpdateProgress { state: 'progress' | 'done' | 'installer' | 'permission' | 'error'; percent?: number; message?: string }
+
+/**
+ * 应用内更新：原生下载 APK 后直接拉起系统安装器。
+ * 进度与结果经 `jm-update-progress` 回传，返回取消订阅函数。
+ */
+export function downloadAndInstallApk(url: string, fileName: string, handler: (progress: UpdateProgress) => void): () => void {
+  if (!isAndroid || !window.JmAndroid) {
+    handler({ state: 'error', message: '当前环境不支持应用内安装' })
+    return () => {}
+  }
+  const listener = (event: Event) => {
+    const detail = (event as CustomEvent<UpdateProgress>).detail
+    if (detail?.state) handler(detail)
+  }
+  window.addEventListener('jm-update-progress', listener)
+  try {
+    window.JmAndroid.downloadAndInstallApk(url, fileName)
+  } catch (error) {
+    window.removeEventListener('jm-update-progress', listener)
+    handler({ state: 'error', message: error instanceof Error ? error.message : String(error) })
+  }
+  return () => window.removeEventListener('jm-update-progress', listener)
 }
 
 /** 音量键翻页事件（Android 原生转发），返回取消订阅函数 */
