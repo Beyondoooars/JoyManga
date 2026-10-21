@@ -184,6 +184,9 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
             }
 
             for (name, root) in existing_roots {
+                // 导出日志写在书库下的 logs 目录里；清空下载时整目录跳过，
+                // 否则刚导出的诊断日志会被 remove_dir_all 一并删掉。
+                let logs_dir = root.join("logs");
                 for entry in std::fs::read_dir(&root).context(format!("读取{name}目录失败"))?
                 {
                     let entry = entry?;
@@ -192,7 +195,11 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
                     if is_user_data_file(&entry.file_name().to_string_lossy()) {
                         continue;
                     }
-                    if entry.file_type()?.is_dir() {
+                    let is_dir = entry.file_type()?.is_dir();
+                    if is_dir && path == logs_dir {
+                        continue;
+                    }
+                    if is_dir {
                         std::fs::remove_dir_all(&path)
                             .context(format!("删除{name}目录项`{}`失败", path.display()))?;
                     } else {

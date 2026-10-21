@@ -170,7 +170,8 @@ pub fn reload_file_logger(level: LogLevel) -> anyhow::Result<()> {
 
 /// 启动文件日志 watcher（只启动一次）。从 Off 切回其他等级时补启动。
 fn ensure_file_log_watcher(app: &AppHandle) {
-    if WATCHER_STARTED.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+    if WATCHER_STARTED
+        .get_or_init(|| std::sync::atomic::AtomicBool::new(false))
         .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
         return;

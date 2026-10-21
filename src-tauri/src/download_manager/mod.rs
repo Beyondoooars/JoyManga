@@ -422,8 +422,8 @@ mod regression_tests {
         assert!(result.unwrap_err().to_string().contains("保存图片"));
         assert!(!root.exists());
         save_img(&path, 0, source, ImageFormat::Png, Arc::default())
-        .await
-        .unwrap();
+            .await
+            .unwrap();
         assert!(is_valid_saved_image(&path));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -452,8 +452,14 @@ mod regression_tests {
             ..Comic::default()
         };
         comic.apply_download_dir(&settings).unwrap();
-        assert_eq!(comic.comic_download_dir.as_deref(), Some(Path::new("downloads")));
-        let chapter_dir = comic.chapter_infos[0].chapter_download_dir.as_ref().unwrap();
+        assert_eq!(
+            comic.comic_download_dir.as_deref(),
+            Some(Path::new("downloads"))
+        );
+        let chapter_dir = comic.chapter_infos[0]
+            .chapter_download_dir
+            .as_ref()
+            .unwrap();
         assert_eq!(chapter_dir.parent(), Some(Path::new("downloads")));
         assert_eq!(
             chapter_dir.file_name().and_then(|name| name.to_str()),

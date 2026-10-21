@@ -266,8 +266,8 @@ pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_residual_trash, commit_file, evict_to_trash,
-        recover_file_backup, sibling_path, write, write_checked,
+        cleanup_residual_trash, commit_file, evict_to_trash, recover_file_backup, sibling_path,
+        write, write_checked,
     };
     use anyhow::anyhow;
     use std::path::{Path, PathBuf};

@@ -569,10 +569,7 @@ pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
             }
         }
     }
-    let mut pages: Vec<PathBuf> = newest_by_stem
-        .into_values()
-        .map(|(path, _)| path)
-        .collect();
+    let mut pages: Vec<PathBuf> = newest_by_stem.into_values().map(|(path, _)| path).collect();
     pages.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
     Ok(pages)
 }

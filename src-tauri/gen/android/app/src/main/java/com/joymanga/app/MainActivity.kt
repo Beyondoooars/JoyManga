@@ -34,7 +34,11 @@ class MainActivity : TauriActivity() {
     private var activeDownloads = 0
     private val handler = Handler(Looper.getMainLooper())
     private var serviceUpdateScheduled = false
-    private var pendingViewUri: Uri? = null
+    // WebView 创建早于页面加载，事件在 Vue 注册监听器之前派发就会丢失。这里改成
+    // 前端注册监听器后主动通知（notifyOpenFileReady），之后再按顺序补发。用队列而不是
+    // 单槽位，连续「用 JoyManga 打开」多个 CBZ 时不会只剩最后一个。
+    private val pendingViewUris = ArrayDeque<Uri>()
+    @Volatile private var openFileHandlerReady = false
     private var downloadSpeed = ""
     private var downloadPagesCurrent = 0
     private var downloadPagesTotal = 0
@@ -72,27 +76,29 @@ class MainActivity : TauriActivity() {
     override fun onWebViewCreate(webView: WebView) {
         super.onWebViewCreate(webView)
         appWebView = webView
+        // 新 WebView 的页面还没挂载监听器，等前端再次通知后再补发
+        openFileHandlerReady = false
         webView.addJavascriptInterface(AndroidBridge(), "JmAndroid")
         registerNetworkCallback()
-        pendingViewUri?.let { uri ->
-            pendingViewUri = null
-            dispatchViewUri(uri)
-        }
     }
 
     /**
      * 「用 JoyManga 打开 CBZ」：把外部文件复制到导入暂存区，再通知前端导入。
-     * 前端可能还没挂载监听器，所以冷启动时先存起来，等 WebView 创建后再发。
+     * 前端监听器注册之前先入队，由 `notifyOpenFileReady` 按到达顺序补发。
      */
     private fun handleViewIntent(intent: Intent?) {
         if (intent?.action != Intent.ACTION_VIEW) return
         val uri = intent.data ?: return
         intent.action = null
-        pendingViewUri = uri
-        appWebView?.let {
-            pendingViewUri = null
-            dispatchViewUri(uri)
+        val dispatchNow = synchronized(pendingViewUris) {
+            if (openFileHandlerReady) {
+                true
+            } else {
+                pendingViewUris.addLast(uri)
+                false
+            }
         }
+        if (dispatchNow) dispatchViewUri(uri)
     }
 
     private fun dispatchViewUri(uri: Uri) {
@@ -491,6 +497,16 @@ class MainActivity : TauriActivity() {
                 true
             }
         } catch (_: Exception) { false }
+        /** 前端已注册 `jm-open-file` 监听器：把等待中的外部文件按顺序补发。 */
+        @JavascriptInterface fun notifyOpenFileReady() {
+            val pending = synchronized(pendingViewUris) {
+                openFileHandlerReady = true
+                val queued = pendingViewUris.toList()
+                pendingViewUris.clear()
+                queued
+            }
+            pending.forEach { dispatchViewUri(it) }
+        }
         @JavascriptInterface fun exitApp() { runOnUiThread { moveTaskToBack(true) } }
         /**
          * 应用内下载 APK 并拉起系统安装器。

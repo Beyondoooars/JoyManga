@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context};
-use base64::engine::general_purpose;
-use base64::Engine as _;
 use parking_lot::Mutex;
 use tauri::{AppHandle, Manager};
 
@@ -22,9 +20,12 @@ struct CachedArchive {
 static ACTIVE_ARCHIVE: OnceLock<Mutex<Option<CachedArchive>>> = OnceLock::new();
 
 /// 导入的 CBZ 路径集合（规范化后）。`jmimg://` 每一页都要校验路径，
-/// 若每次都重读书库记录，翻页会产生大量同步读盘；这里按文件 mtime 失效。
+/// 若每次都重读书库记录，翻页会产生大量同步读盘；这里按记录文件
+/// `(mtime, 长度)` 失效。根目录也必须参与比较：`visible_imports` 以书库
+/// 根目录为键，运行时切换书库位置后旧索引对新的根目录并不成立。
 struct ImportedCbzIndex {
-    fingerprint: Option<std::time::SystemTime>,
+    root: PathBuf,
+    fingerprint: Option<(std::time::SystemTime, u64)>,
     paths: Vec<PathBuf>,
 }
 
@@ -197,16 +198,6 @@ pub(crate) fn chapter_reader_data_from_comic(
     })
 }
 
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn get_local_image_data_url(app: AppHandle, file_path: String) -> CommandResult<String> {
-    let (bytes, mime) =
-        read_page_bytes(&app, &file_path).map_err(|err| CommandError::from("读取图片失败", err))?;
-    let b64 = general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
-}
-
 fn mime_for_extension(path: &Path) -> &'static str {
     match path
         .extension()
@@ -299,13 +290,14 @@ fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>,
 fn is_imported_cbz(app: &AppHandle, download_dir: &Path, cbz_path: &Path) -> bool {
     let catalog_path = crate::library_catalog::catalog_path(app);
     let fingerprint = std::fs::metadata(&catalog_path)
-        .and_then(|m| m.modified())
-        .ok();
+        .ok()
+        .and_then(|meta| meta.modified().ok().map(|modified| (modified, meta.len())));
+    let root = PathBuf::from(crate::library_catalog::root_key(download_dir));
     let index_lock = IMPORTED_CBZ_INDEX.get_or_init(|| Mutex::new(None));
     let mut guard = index_lock.lock();
     let stale = guard
         .as_ref()
-        .is_none_or(|index| index.fingerprint != fingerprint);
+        .is_none_or(|index| index.fingerprint != fingerprint || index.root != root);
     if stale {
         let imported = {
             let _guard = crate::library_catalog::CATALOG_LOCK.lock();
@@ -323,6 +315,7 @@ fn is_imported_cbz(app: &AppHandle, download_dir: &Path, cbz_path: &Path) -> boo
                 })
         };
         *guard = Some(ImportedCbzIndex {
+            root,
             fingerprint,
             paths: imported,
         });
@@ -344,7 +337,10 @@ fn image_path_from_url(url: &tauri::Url) -> anyhow::Result<String> {
     let mut bytes = encoded.bytes();
     while let Some(byte) = bytes.next() {
         if byte == b'%' {
-            let pair = [bytes.next().context("图片地址编码不完整")?, bytes.next().context("图片地址编码不完整")?];
+            let pair = [
+                bytes.next().context("图片地址编码不完整")?,
+                bytes.next().context("图片地址编码不完整")?,
+            ];
             let text = std::str::from_utf8(&pair).context("图片地址编码无效")?;
             decoded.push(u8::from_str_radix(text, 16).context("图片地址编码无效")?);
         } else {
@@ -363,7 +359,11 @@ pub fn serve_image(
         tauri::http::Response::builder()
             .status(status)
             .header(tauri::http::header::CONTENT_TYPE, mime)
-            .header(tauri::http::header::CACHE_CONTROL, "no-store")
+            // 与 ReaderDialog 的 `new Image()` 预取配合：允许 WebView 复用同一页的
+            // 解码结果，翻页时不必重新读盘/解压。`no-store` 会让预取请求白白作废。
+            // TTL 取短值：同一路径的图片可能因重新下载而被覆盖，不能让旧图长期驻留。
+            // 失败重试通过变更 URL（`?retry=`）绕过缓存。
+            .header(tauri::http::header::CACHE_CONTROL, "private, max-age=300")
             .body(body)
             .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
     };
