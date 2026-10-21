@@ -231,8 +231,16 @@ onMounted(() => {
   stopOpenFileListener = onOpenExternalComic({
     onImported: (report) => {
       void store.refreshDownloadedComics().catch((error) => console.error('导入后刷新书库失败', error))
-      message.success(`已导入 ${report.imported} 本`)
-      navigateToTab('downloaded')
+      // 导入是逐文件进行的：损坏/非法 CBZ 会进入 errors，成功数可能为 0。不能一律提示成功。
+      if (report.imported > 0) {
+        message.success(`已导入 ${report.imported} 本`)
+        navigateToTab('downloaded')
+      } else if (report.errors.length === 0) {
+        message.info(report.skipped > 0 ? `漫画已在书库中（${report.skipped} 本）` : '没有可导入的漫画')
+      }
+      if (report.errors.length > 0) {
+        message.error(`导入失败：${report.errors[0]}`)
+      }
     },
     onError: (text) => message.error(`打开文件失败：${text}`),
   })

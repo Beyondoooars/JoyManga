@@ -217,9 +217,13 @@ export function useAppUpdate() {
           if (progress.state === 'error') errorMessage.value = message
         }
         // done 之后原生才拉起安装器，失败信息会晚一步到，所以这时先继续监听，
-        // 下一次点击更新时再移除旧监听器。
-        if (progress.state === 'permission' || progress.state === 'error') {
+        // 下一次点击更新时再移除旧监听器。安装器已经拉起（installer）后不会再
+        // 有成功/失败事件——用户取消安装就停在这里，必须复位，否则按钮永远
+        // 停在「下载中」且无法再次点击。
+        if (progress.state === 'permission' || progress.state === 'error' || progress.state === 'installer') {
           installing.value = false
+        }
+        if (progress.state === 'permission' || progress.state === 'error') {
           stopInstallWatch?.()
           stopInstallWatch = undefined
         }

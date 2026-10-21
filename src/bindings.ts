@@ -366,14 +366,6 @@ async getChapterReaderData(comicId: number, chapterId: number) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
-async getLocalImageDataUrl(filePath: string) : Promise<Result<string, CommandError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_local_image_data_url", { filePath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Android 侧把当前网络是否计费推给后端。
  * 前端在启动时与网络变化时各调一次，后端据此判断"仅 Wi-Fi 下载"。

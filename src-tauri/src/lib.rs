@@ -1,7 +1,7 @@
 use anyhow::Context;
 use events::{
-    DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent,
-    ExportCbzEvent, LogEvent, UpdateDownloadedComicsEvent,
+    DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent, ExportCbzEvent, LogEvent,
+    UpdateDownloadedComicsEvent,
 };
 use parking_lot::RwLock;
 use tauri::{Manager, WebviewWindowBuilder, Wry};
@@ -97,7 +97,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             validate_download_dir,
             test_domain_latency,
             get_chapter_reader_data,
-            get_local_image_data_url,
             set_network_metered,
             import_local_comics,
             remove_library_comic,
@@ -142,9 +141,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 阅读器直接通过自定义协议取图，避免每页 base64 编码 + IPC 传输。
         // Android 上会被 wry 重写成 http://jmimg.localhost/<path>，CSP 需放行 https/http。
-        .register_uri_scheme_protocol(commands::reader_commands::IMAGE_SCHEME, |context, request| {
-            commands::reader_commands::serve_image(context.app_handle(), request)
-        })
+        .register_uri_scheme_protocol(
+            commands::reader_commands::IMAGE_SCHEME,
+            |context, request| {
+                commands::reader_commands::serve_image(context.app_handle(), request)
+            },
+        )
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);

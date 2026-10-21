@@ -25,10 +25,7 @@ pub struct ValidatedDownloadDir {
 /// 目录浏览的安全边界：必须在 `/storage` 之下（公共卷），
 /// 拒绝浏览 `/data`、`/proc` 等系统目录与相对路径。
 fn ensure_browsable(candidate: &Path) -> anyhow::Result<PathBuf> {
-    ensure!(
-        candidate.is_absolute(),
-        "路径必须是绝对路径（以 / 开头）"
-    );
+    ensure!(candidate.is_absolute(), "路径必须是绝对路径（以 / 开头）");
     let canonical = std::fs::canonicalize(candidate)
         .map_err(|err| anyhow!("目录`{}`不存在或无法访问: {err}", candidate.display()))?;
     ensure_under_storage(&canonical)?;
@@ -49,16 +46,17 @@ fn ensure_under_storage(canonical: &Path) -> anyhow::Result<()> {
 /// 顺序很重要：先 `create_dir_all` 再 `canonicalize` 会让「新建文件夹」永远失败
 /// （不存在的路径无法规范化），而只校验未规范化的字符串又会被符号链接绕过。
 fn prepare_browsable_dir(candidate: &Path) -> anyhow::Result<PathBuf> {
-    ensure!(
-        candidate.is_absolute(),
-        "路径必须是绝对路径（以 / 开头）"
-    );
+    ensure!(candidate.is_absolute(), "路径必须是绝对路径（以 / 开头）");
     let existing_ancestor = candidate
         .ancestors()
         .find(|ancestor| ancestor.exists())
         .context("路径没有可用的上级目录")?;
-    let canonical_ancestor = std::fs::canonicalize(existing_ancestor)
-        .map_err(|err| anyhow!("目录`{}`不存在或无法访问: {err}", existing_ancestor.display()))?;
+    let canonical_ancestor = std::fs::canonicalize(existing_ancestor).map_err(|err| {
+        anyhow!(
+            "目录`{}`不存在或无法访问: {err}",
+            existing_ancestor.display()
+        )
+    })?;
     ensure_under_storage(&canonical_ancestor)?;
     std::fs::create_dir_all(candidate)
         .map_err(|err| anyhow!("无法创建目录`{}`: {err}", candidate.display()))?;

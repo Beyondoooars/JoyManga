@@ -35,7 +35,6 @@ function mockImage(title, index, page = false) {
   return `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svg)))}`
 }
 comics.forEach((comic, index) => { comic.localCoverData = mockImage(comic.name, index) })
-let mockImageFailed = false
 let revision = 3
 const tasks = [
   { taskId: 'failed', revision: 1, state: 'Failed', comic: comics[0], chapterInfo: comics[0].chapterInfos[0], downloadedImgCount: 2, totalImgCount: 5, errorMessage: '总共有 5 张图片，但只下载了 2 张。第 3 张图片读取超时，请检查网络或线路后重试。' },
@@ -90,13 +89,6 @@ mockIPC(async (command, args) => {
     comicId: args.comicId, chapterId: args.chapterId, comicTitle: comics.find((comic) => comic.id === args.comicId)?.name ?? '模拟漫画',
     chapterTitle: '第一章', imagePaths: ['fixture-page-1', 'fixture-page-2', 'fixture-page-3', 'fixture-page-4', 'fixture-page-5'], totalImages: 5,
     prevChapter: null, nextChapter: null,
-  }
-  if (command === 'get_local_image_data_url') {
-    if (args.filePath === 'fixture-page-3' && !mockImageFailed) {
-      mockImageFailed = true
-      throw { err_title: '模拟图片读取失败', err_message: '此文件已损坏，请重新下载' }
-    }
-    return mockImage(`第 ${args.filePath.slice(-1)} 页`, 1, true)
   }
   if (command === 'plugin:dialog|open') return args.options?.directory ? 'D:/模拟原文件/图片漫画' : ['D:/模拟原文件/旅行.cbz']
   if (command === 'import_local_comics') {

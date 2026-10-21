@@ -39,7 +39,7 @@ impl Default for LibraryCatalog {
     }
 }
 
-fn root_key(root: &Path) -> String {
+pub(crate) fn root_key(root: &Path) -> String {
     let path = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     path.to_string_lossy().into_owned()
 }
@@ -162,7 +162,6 @@ impl LibraryCatalog {
         self.restore(root, id);
         Ok((id, true))
     }
-
 }
 
 pub(crate) fn registered_cbz_comic(record: &RegisteredCbz) -> anyhow::Result<crate::types::Comic> {

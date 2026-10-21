@@ -20,6 +20,7 @@ declare global {
       canWritePublicDownloads(): boolean
       requestAllFilesAccess(): void
       downloadAndInstallApk(url: string, fileName: string): void
+      notifyOpenFileReady(): void
     }
   }
 }
@@ -155,6 +156,9 @@ export function onOpenFile(handler: (detail: { id?: string; path: string }) => v
     if (detail?.path) handler({ id: detail.id, path: detail.path })
   }
   window.addEventListener('jm-open-file', listener)
+  // WebView 创建早于页面加载，原生在监听器注册前派发的事件会丢失。
+  // 注册完成后主动通知原生，把冷启动/早期到达的「用 JoyManga 打开」补发过来。
+  try { window.JmAndroid?.notifyOpenFileReady() } catch (error) { console.error('通知原生打开文件监听器就绪失败', error) }
   return () => window.removeEventListener('jm-open-file', listener)
 }
 

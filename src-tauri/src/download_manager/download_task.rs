@@ -400,9 +400,7 @@ impl DownloadTask {
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .map(str::to_ascii_lowercase)
-                .is_some_and(|ext| {
-                    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif")
-                })
+                .is_some_and(|ext| matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif"))
                 && path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
@@ -553,10 +551,7 @@ impl Comic {
     ///
     /// 目录布局已固定为「书库目录 / 本子名 [JM本子号-章节号].cbz」的平铺结构，
     /// 不再支持用户自定义目录模板。
-    pub(crate) fn apply_download_dir(
-        &mut self,
-        settings: &DownloadSettings,
-    ) -> anyhow::Result<()> {
+    pub(crate) fn apply_download_dir(&mut self, settings: &DownloadSettings) -> anyhow::Result<()> {
         if self.chapter_infos.is_empty() {
             return Err(anyhow!("没有章节信息，无法更新下载目录字段"));
         }

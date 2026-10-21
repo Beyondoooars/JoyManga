@@ -39,8 +39,7 @@ pub fn is_public_library_dir(candidate: &Path) -> bool {
     let Ok(relative) = candidate.strip_prefix("/storage") else {
         return false;
     };
-    relative.ends_with(Path::new("Download").join("JoyManga"))
-        && relative.components().count() >= 3
+    relative.ends_with(Path::new("Download").join("JoyManga")) && relative.components().count() >= 3
 }
 const LOGS_DIR_NAME: &str = "日志";
 
