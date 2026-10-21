@@ -16,12 +16,11 @@ import { getErrorMessage } from './utils/errors.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
 import { useIsMobile } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
-import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
+import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
 import { onOpenExternalComic } from './libraryApi.ts'
 
 const UserCenterDialog = defineAsyncComponent(() => import('./dialogs/UserCenterDialog.vue'))
 const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
-const AndroidGuideDialog = defineAsyncComponent(() => import('./dialogs/AndroidGuideDialog.vue'))
 const StorageOnboardingDialog = defineAsyncComponent(() => import('./dialogs/StorageOnboardingDialog.vue'))
 const ReaderDialog = defineAsyncComponent(() => import('./dialogs/ReaderDialog.vue'))
 const UpdateDialog = defineAsyncComponent(() => import('./dialogs/UpdateDialog.vue'))
@@ -164,20 +163,25 @@ async function initializeApp() {
         const result = await commands.initializeAndroidStorage(bridge.libraryPath() ?? '')
         if (result.status === 'error') throw new Error(result.error.err_message)
         store.applyConfig(result.data)
-      } else if (hasAllFilesAccess() && canWritePublicDownloads()) {
-        // 已授权且公共目录可写：直接落到公共下载，无需引导
-        const result = await commands.initializeAndroidStorage(downloadsPath())
-        if (result.status === 'error') {
-          // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
-          console.error(result.error)
-          storageOnboardingShowing.value = true
-        } else {
-          store.applyConfig(result.data)
-        }
       } else {
-        // 未授权（或公共目录暂不可写）：弹引导让用户选公共下载（需授权）或应用专用目录；
-        // 不阻塞应用使用，跳过的话下次启动仍会引导
-        storageOnboardingShowing.value = true
+        // 默认就落在公共下载 Download/JoyManga：未授权时先申请「所有文件访问」，
+        // 用户返回后再完成初始化，不再让用户手动挑目录。
+        if (!hasAllFilesAccess()) {
+          await requestAllFilesAccessAndWait()
+        }
+        if (hasAllFilesAccess() && canWritePublicDownloads()) {
+          const result = await commands.initializeAndroidStorage(downloadsPath())
+          if (result.status === 'error') {
+            // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
+            console.error(result.error)
+            storageOnboardingShowing.value = true
+          } else {
+            store.applyConfig(result.data)
+          }
+        } else {
+          // 用户拒绝授权或公共目录暂不可写：兜底引导，可改用应用专用目录
+          storageOnboardingShowing.value = true
+        }
       }
     }
     await store.initDownloadListener()
@@ -247,9 +251,6 @@ onMounted(() => {
   void store.initLogListener(notification)
   void store.initSpeedListener()
   void initializeApp()
-  if (isAndroid && !localStorage.getItem('joymanga_android_guide_shown')) {
-    store.androidGuideShowing = true
-  }
   // 延迟 2.5 秒静默检测更新，避开冷启动峰值
   setTimeout(() => {
     void checkForUpdates(true)
@@ -353,7 +354,6 @@ onUnmounted(() => {
     <!-- Modals and Dialogs -->
     <UserCenterDialog v-if="userCenterShowing" v-model:showing="userCenterShowing" />
     <SettingsDialog v-if="settingsDialogShowing" v-model:showing="settingsDialogShowing" />
-    <AndroidGuideDialog v-if="store.androidGuideShowing" v-model:showing="store.androidGuideShowing" />
     <StorageOnboardingDialog v-if="storageOnboardingShowing" v-model:show="storageOnboardingShowing" />
     <ReaderDialog v-if="store.activeReaderTarget" />
     <UpdateDialog />

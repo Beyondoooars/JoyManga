@@ -105,15 +105,33 @@ impl DownloadImgTask {
 
         tracing::trace!(url, comic_title, chapter_title, "开始下载图片");
 
-        let (img_data, format) = match self.app.get_jm_client().get_img_data_and_format(url).await {
-            Ok(data) => data,
-            Err(err) => {
-                let err_title = format!("下载图片`{url}`失败");
-                let string_chain = err.to_string_chain();
-                tracing::error!(err_title, message = string_chain);
-                self.download_task
-                    .record_image_error(format!("第 {} 张图片下载失败：{err:#}", self.index + 1));
-                return;
+        // CDN 偶发在响应体读到一半时断开（日志里的 peer closed connection）。
+        // 断流发生在读取阶段，图片客户端自身的中间件重试覆盖不到，这里补一次
+        // 整请求重试：单页失败会让整章停在“下载不完整”，重试成本远低于让用户手动重下。
+        let mut attempt = 0;
+        let (img_data, format) = loop {
+            match self.app.get_jm_client().get_img_data_and_format(url).await {
+                Ok(data) => break data,
+                Err(err) if attempt == 0 && !self.download_task.file_writes.is_cancelled() => {
+                    attempt += 1;
+                    tracing::warn!(
+                        url,
+                        comic_title,
+                        chapter_title,
+                        error = %err,
+                        "图片下载失败，重试一次"
+                    );
+                }
+                Err(err) => {
+                    let err_title = format!("下载图片`{url}`失败");
+                    let string_chain = err.to_string_chain();
+                    tracing::error!(err_title, message = string_chain);
+                    self.download_task.record_image_error(format!(
+                        "第 {} 张图片下载失败：{err:#}",
+                        self.index + 1
+                    ));
+                    return;
+                }
             }
         };
         let img_data_len = img_data.len() as u64;

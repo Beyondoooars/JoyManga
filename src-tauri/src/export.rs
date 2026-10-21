@@ -103,11 +103,13 @@ fn validate_merge_target(
         if std::fs::canonicalize(source)? == target {
             // 允许整本归档原位重写（更新后再合并）与单话书的最终命名重写；
             // 拒绝把多话合并写进某个独立章节文件。
+            let identity = crate::comic_scanner::read_chapter_identity(path)?;
             let override_ok = if chapters.len() == 1 {
-                crate::comic_scanner::read_chapter_identity(path)?
-                    == Some((comic.id, chapter.chapter_id))
+                // 单话书下载后已被整理成整本归档（无 chapter.json），再次整理是原位更新，
+                // 不能因为没有章节身份就拒绝；漫画身份由下方 元数据.json 校验兜底。
+                identity.is_none_or(|identity| identity == (comic.id, chapter.chapter_id))
             } else {
-                crate::comic_scanner::read_chapter_identity(path)?.is_none()
+                identity.is_none()
             };
             ensure!(override_ok, "合并文件不能覆盖原章节");
         }
@@ -254,6 +256,8 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
         let string_chain = err.to_string_chain();
         tracing::error!(err_title, message = string_chain);
     }
+    // 导出的目标文件可能正是阅读器打开的那个 CBZ；FUSE 下先释放读句柄再覆盖
+    crate::commands::reader_commands::release_archive_handle();
     // 并发处理
     let downloaded_chapter_infos = downloaded_chapter_infos.into_par_iter();
     downloaded_chapter_infos.try_for_each(|chapter_info| -> anyhow::Result<()> {
@@ -355,6 +359,8 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
             zip_file
                 .sync_all()
                 .context(format!("同步临时CBZ`{}`失败", temp_path.display()))?;
+            // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
+            drop(zip_file);
             if let Err(err) = atomic_fs::commit_file(&temp_path, &save_path) {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(err).context(format!("提交CBZ`{}`失败", save_path.display()));
@@ -424,6 +430,8 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
         zip_file
             .sync_all()
             .context(format!("同步临时CBZ`{}`失败", temp_path.display()))?;
+        // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
+        drop(zip_file);
         if let Err(err) = atomic_fs::commit_file(&temp_path, &save_path) {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err).context(format!("提交CBZ`{}`失败", save_path.display()));
@@ -711,6 +719,8 @@ pub(crate) fn write_merged_cbz_archive(
     zip_file
         .sync_all()
         .context(format!("同步临时合并CBZ`{}`失败", temp_path.display()))?;
+    // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
+    drop(zip_file);
 
     if let Err(err) = atomic_fs::commit_file_checked(&temp_path, save_path, |existing| {
         validate_merge_target(comic, &downloaded_chapter_infos, existing)
@@ -1076,6 +1086,61 @@ mod tests {
         };
         let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
         assert_eq!(metadata["chapterInfos"].as_array().unwrap().len(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_chapter_comic_can_rewrite_its_own_merged_archive_in_place() {
+        // 单话本子下载后会被自动整理成整本归档（无 chapter.json）。
+        // 再次「整理为整本」时目标就是同一路径，此时不能因为没有章节身份而拒绝。
+        let root = std::env::temp_dir().join(format!("jm-remerge-self-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("ch1.cbz");
+        let mut zip = ZipWriter::new(std::fs::File::create(&source).unwrap());
+        zip.start_file("chapter.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"comicId":10,"chapterId":101}"#).unwrap();
+        zip.start_file("0001.png", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"page").unwrap();
+        zip.finish().unwrap();
+        let ch1 = ChapterInfo {
+            chapter_id: 101,
+            chapter_title: "one".into(),
+            order: 1,
+            is_downloaded: Some(true),
+            chapter_download_dir: Some(source.clone()),
+        };
+        let comic = Comic {
+            id: 10,
+            name: "单话本".into(),
+            chapter_infos: vec![ch1.clone()],
+            ..Comic::default()
+        };
+        let merged = root.join("单话本.cbz");
+        write_merged_cbz_archive(&comic, &[&ch1], &merged, |_| {}).unwrap();
+
+        // 书库扫描后该话指向整本归档，原位再整理一次必须成功
+        let in_book = ChapterInfo {
+            chapter_download_dir: Some(merged.clone()),
+            ..ch1.clone()
+        };
+        write_merged_cbz_archive(&comic, &[&in_book], &merged, |_| {}).unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&merged).unwrap()).unwrap();
+        assert!(archive.by_name("0001.png").is_ok());
+
+        // 其他漫画的同名归档仍不能被覆盖
+        let foreign = root.join("foreign.cbz");
+        let mut zip = ZipWriter::new(std::fs::File::create(&foreign).unwrap());
+        zip.start_file("元数据.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"id":99}"#).unwrap();
+        zip.finish().unwrap();
+        let foreign_chapter = ChapterInfo {
+            chapter_download_dir: Some(foreign.clone()),
+            ..ch1.clone()
+        };
+        assert!(write_merged_cbz_archive(&comic, &[&foreign_chapter], &foreign, |_| {}).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

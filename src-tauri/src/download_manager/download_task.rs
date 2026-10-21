@@ -31,6 +31,10 @@ impl TaskFileWrites {
         *self.cancelled.lock() = true;
     }
 
+    pub(crate) fn is_cancelled(&self) -> bool {
+        *self.cancelled.lock()
+    }
+
     pub(crate) fn run<T>(&self, write: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
         let cancelled = self.cancelled.lock();
         anyhow::ensure!(!*cancelled, "下载任务已取消，跳过文件写入");

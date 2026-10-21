@@ -379,12 +379,12 @@ watch(advancedData, (open) => {
 
         <section class="settings-section">
           <h3><PhWrench :size="20" aria-hidden="true" />数据管理</h3>
-          <div class="data-actions"><n-button :disabled="!!dataBusy" :loading="dataBusy === 'cache'" @click="clearCache">清理缓存</n-button><n-button :disabled="!!dataBusy" :loading="dataBusy === 'backup'" @click="backup">导出备份</n-button><n-button :disabled="!!dataBusy" :loading="dataBusy === 'restore'" @click="restore">恢复备份</n-button></div>
-          <p class="settings-note">备份含设置和任务；不含漫画文件与账号密码。</p>
+          <div class="data-actions"><n-button :disabled="!!dataBusy" :loading="dataBusy === 'cache'" @click="clearCache">清理缓存</n-button><n-button :disabled="!!dataBusy" :loading="dataBusy === 'backup'" @click="backup">导出备份</n-button><n-button :disabled="!!dataBusy" :loading="dataBusy === 'restore'" @click="restore">恢复备份</n-button><n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs'" @click="exportLogs">导出诊断日志</n-button></div>
+          <p class="settings-note">备份含设置和任务；不含漫画文件与账号密码。诊断日志含运行记录与错误详情，出问题时导出后可在书库的 logs 目录找到。</p>
           <n-alert v-if="dataError" type="error" :show-icon="false">{{ dataError }}</n-alert>
           <button class="disclosure" type="button" :aria-expanded="advancedData" aria-controls="maintenance-settings" @click="advancedData = !advancedData"><span>更多维护</span><PhCaretDown :size="16" :class="{ expanded: advancedData }" aria-hidden="true" /></button>
           <div v-if="advancedData" id="maintenance-settings" class="advanced-content">
-            <div class="data-actions"><n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs'" @click="exportLogs">导出诊断日志</n-button><n-button :disabled="!!dataBusy" type="error" secondary @click="resetSettings">重置设置</n-button></div>
+            <div class="data-actions"><n-button :disabled="!!dataBusy" type="error" secondary @click="resetSettings">重置设置</n-button></div>
             <div class="log-settings">
               <div class="setting-row">
                 <label class="setting-label" for="log-level">日志收集等级</label>

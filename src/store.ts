@@ -283,7 +283,6 @@ export const useStore = defineStore('store', () => {
     }
     return { current: 0, total: 0 }
   })
-  const androidGuideShowing = ref<boolean>(false)
   let speedUnlisten: (() => void) | undefined
 
   const activeDownloadCount = computed(() => {
@@ -662,7 +661,6 @@ function trimProgressHistory() {
     downloadSpeed,
     activeDownloadPages,
     cancelCurrentDownload,
-    androidGuideShowing,
     activeDownloadCount,
     initSpeedListener,
   }
