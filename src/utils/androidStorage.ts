@@ -111,6 +111,41 @@ export function requestAllFilesAccess() {
   window.JmAndroid?.requestAllFilesAccess()
 }
 
+/**
+ * 申请「所有文件访问」并等待用户从系统页返回。
+ *
+ * Android 11+ 跳系统设置页，返回应用时 WebView 重新可见；API 29 以下弹运行时
+ * 权限对话框，结果经 `jm-permission-result` 回传。两条路径以先到者为准。
+ * 不设超时：用户停留在系统页期间应用保持当前状态，返回后才继续初始化。
+ */
+export function requestAllFilesAccessAndWait(): Promise<boolean> {
+  if (hasAllFilesAccess()) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    let settled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    const finish = (granted: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(retryTimer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      removePermissionListener()
+      resolve(granted)
+    }
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return
+      // 从设置页返回时系统的权限状态可能稍后才刷新，延后一拍再读
+      retryTimer = setTimeout(() => finish(hasAllFilesAccess()), 300)
+    }
+    const removePermissionListener = onPermissionResult((granted) => {
+      if (granted) finish(true)
+    })
+    document.addEventListener('visibilitychange', onVisibility)
+    requestAllFilesAccess()
+    // 兜底：系统页打不开或用户切走未返回时，不能让启动一直停在加载页
+    retryTimer = setTimeout(() => finish(hasAllFilesAccess()), 90_000)
+  })
+}
+
 /** 监听运行时权限结果（API 29 以下的存储授权没有可见性变化事件）。返回取消监听的函数。 */
 export function onPermissionResult(listener: (granted: boolean) => void): () => void {
   const handler = (event: Event) => {

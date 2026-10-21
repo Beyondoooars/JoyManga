@@ -102,6 +102,11 @@ fn is_cross_device_error(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(18)
 }
 
+/// ETXTBSY：目标/来源文件仍有本进程（或系统媒体库）持有的句柄。
+fn is_text_file_busy(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(26)
+}
+
 fn rename_or_copy_fallback(from: &Path, to: &Path) -> Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
@@ -114,7 +119,8 @@ fn rename_or_copy_fallback(from: &Path, to: &Path) -> Result<()> {
                     .write(true)
                     .open(&staged)?
                     .sync_all()?;
-                std::fs::rename(&staged, to).context("提交跨卷文件失败")?;
+                // 目标同样可能被占用：复用直接替换路径的重命名→覆盖写入回退
+                rename_or_copy_fallback(&staged, to).context("提交跨卷文件失败")?;
                 let _ = std::fs::remove_file(from);
                 Ok(())
             })();
@@ -123,11 +129,54 @@ fn rename_or_copy_fallback(from: &Path, to: &Path) -> Result<()> {
             }
             result
         }
+        Err(err) if is_text_file_busy(&err) => {
+            // 公共存储（FUSE）拒绝重命名仍被打开的文件。系统媒体扫描、文件管理器预览
+            // 都可能暂时持有正式文件；先把完整内容落到正式路径（覆盖写是允许的），
+            // 再删除临时文件。内容已经 sync 过，不会留下半截归档。
+            std::fs::copy(from, to).context(format!(
+                "目标文件`{}`被其他程序占用，改为覆盖写入也失败",
+                to.display()
+            ))?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(to)?
+                .sync_all()
+                .context(format!("同步`{}`失败", to.display()))?;
+            let _ = std::fs::remove_file(from);
+            tracing::warn!(
+                target = %to.display(),
+                "目标文件被占用，已改用覆盖写入提交"
+            );
+            Ok(())
+        }
         Err(err) => Err(err).context(format!(
             "将临时文件`{}`替换为`{}`失败",
             from.display(),
             to.display()
         )),
+    }
+}
+
+#[cfg(test)]
+mod busy_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn replacing_an_existing_file_commits_new_contents_without_leftovers() {
+        // 部分平台在目标被其他程序打开时会拒绝重命名；无论走哪条路径，
+        // 正式路径都必须拿到新内容且不残留临时文件。
+        let dir = std::env::temp_dir().join(format!("jm-busy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("book.cbz");
+        std::fs::write(&target, b"old").unwrap();
+        let temp = temp_path(&target).unwrap();
+        std::fs::write(&temp, b"new").unwrap();
+        drop(std::fs::File::open(&target).unwrap());
+        commit_file_checked(&temp, &target, |_| Ok(())).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert!(!temp.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

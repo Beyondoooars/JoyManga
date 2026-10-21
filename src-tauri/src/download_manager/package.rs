@@ -117,7 +117,12 @@ pub(crate) fn package_chapter_to_cbz(
 
     let zip_file = zip_writer.finish().context("关闭CBZ文件失败")?;
     zip_file.sync_all().context("同步CBZ到磁盘失败")?;
+    // Android 公共存储（FUSE）不允许重命名仍由本进程打开写入的文件（ETXTBSY），
+    // 提交前必须显式关闭；句柄留到函数结束会稳定触发 "Text file busy"。
+    drop(zip_file);
 
+    // 书正被阅读器打开时，它持有同一个 CBZ 的读句柄（FUSE 下同名替换也会被拒）
+    crate::commands::reader_commands::release_archive_handle();
     atomic_fs::commit_file_checked(&temp_cbz_path, chapter_cbz_path, |existing| {
         ensure_archive_identity(existing, comic, chapter_info)
     })

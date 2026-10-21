@@ -19,6 +19,16 @@ struct CachedArchive {
 /// 阅读器当前打开的 CBZ。阅读是一页一页的，单槽缓存足够，且避免长期占着文件句柄。
 static ACTIVE_ARCHIVE: OnceLock<Mutex<Option<CachedArchive>>> = OnceLock::new();
 
+/// 释放阅读器持有的归档句柄。
+///
+/// Android 公共存储（FUSE）不允许重命名本进程仍以写入方式打开的文件；
+/// 下载/合并/导出要替换某个 CBZ 之前调用一次，避免书正被阅读时覆盖必然失败。
+pub fn release_archive_handle() {
+    if let Some(lock) = ACTIVE_ARCHIVE.get() {
+        lock.lock().take();
+    }
+}
+
 /// 导入的 CBZ 路径集合（规范化后）。`jmimg://` 每一页都要校验路径，
 /// 若每次都重读书库记录，翻页会产生大量同步读盘；这里按记录文件
 /// `(mtime, 长度)` 失效。根目录也必须参与比较：`visible_imports` 以书库

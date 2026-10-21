@@ -189,6 +189,8 @@ fn run_finalize(app: &AppHandle, comic: &Comic, mode: CbzMode) -> anyhow::Result
     match mode {
         CbzMode::Merge => {
             let target = resolve_merged_target(&canonical_root, comic)?;
+            // 合并结果可能替换正在阅读的归档；FUSE 下必须先释放读句柄
+            crate::commands::reader_commands::release_archive_handle();
             let total = downloaded.len() as u32;
             let comic_id = comic.id;
             let progress_app = app.clone();
