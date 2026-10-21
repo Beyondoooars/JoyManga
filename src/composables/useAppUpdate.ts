@@ -1,8 +1,8 @@
 import { ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
-import { openUrl } from '@tauri-apps/plugin-opener'
 import { isAndroid } from './useIsMobile.ts'
 import { downloadAndInstallApk } from '../utils/androidStorage.ts'
+import { openExternalUrl, REPO_NAME, REPO_OWNER } from '../utils/externalLink.ts'
 
 export interface GithubReleaseAsset {
   name: string
@@ -20,8 +20,6 @@ export interface GithubReleaseData {
   assets: GithubReleaseAsset[]
 }
 
-const REPO_OWNER = 'Beyondoooars'
-const REPO_NAME = 'JoyManga'
 const IGNORED_VERSION_KEY = 'joymanga_ignored_update_version'
 // 冷启动静默检查每隔一天做一次即可；失败后半小时再试，避免离线时每次启动都请求 GitHub。
 const LAST_CHECK_KEY = 'joymanga_update_last_check'
@@ -180,15 +178,6 @@ export function useAppUpdate() {
     showUpdateDialog.value = false
   }
 
-  async function openExternal(url: string) {
-    try {
-      await openUrl(url)
-    } catch (e) {
-      console.warn('opener.openUrl failed, fallback to window.open', e)
-      window.open(url, '_blank')
-    }
-  }
-
   function downloadUpdate() {
     const targetUrl = downloadUrl.value || releaseUrl.value
     if (!targetUrl) return
@@ -228,12 +217,12 @@ export function useAppUpdate() {
       })
       return
     }
-    void openExternal(targetUrl)
+    void openExternalUrl(targetUrl)
   }
 
   function openReleasePage() {
     if (releaseUrl.value) {
-      void openExternal(releaseUrl.value)
+      void openExternalUrl(releaseUrl.value)
     }
   }
 
