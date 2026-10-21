@@ -17,6 +17,7 @@ import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack
 import { useIsMobile } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
 import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
+import { onOpenExternalComic } from './libraryApi.ts'
 
 const UserCenterDialog = defineAsyncComponent(() => import('./dialogs/UserCenterDialog.vue'))
 const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
@@ -140,7 +141,10 @@ watch(
   { deep: true },
 )
 
+/** 屏蔽 WebView 长按菜单，但输入框要保留系统粘贴菜单。 */
 function preventContextMenu(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  if (target?.closest('input, textarea, [contenteditable="true"]')) return
   event.preventDefault()
 }
 
@@ -208,6 +212,7 @@ async function initializeApp() {
 
 let stopNetworkWatch: (() => void) | undefined
 let stopCancelListener: (() => void) | undefined
+let stopOpenFileListener: (() => void) | undefined
 
 onMounted(() => {
   document.addEventListener('contextmenu', preventContextMenu)
@@ -222,6 +227,15 @@ onMounted(() => {
   }
   window.addEventListener('jm-download-cancel', onCancelCurrent)
   stopCancelListener = () => window.removeEventListener('jm-download-cancel', onCancelCurrent)
+  // 文件管理器/其他应用「用 JoyManga 打开」CBZ：导入后切换到本地书库
+  stopOpenFileListener = onOpenExternalComic({
+    onImported: (report) => {
+      void store.refreshDownloadedComics().catch((error) => console.error('导入后刷新书库失败', error))
+      message.success(`已导入 ${report.imported} 本`)
+      navigateToTab('downloaded')
+    },
+    onError: (text) => message.error(`打开文件失败：${text}`),
+  })
   void store.initLogListener(notification)
   void store.initSpeedListener()
   void initializeApp()
@@ -240,6 +254,8 @@ onUnmounted(() => {
   stopNetworkWatch = undefined
   stopCancelListener?.()
   stopCancelListener = undefined
+  stopOpenFileListener?.()
+  stopOpenFileListener = undefined
   if (configSaveTimer !== undefined) {
     clearTimeout(configSaveTimer)
   }

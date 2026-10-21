@@ -4,13 +4,12 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 应用内下载更新后直接拉起系统安装器；系统仍会要求用户确认安装 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -21,8 +20,7 @@
         android:theme="@style/Theme.joymanga"
         android:usesCleartextTraffic="${usesCleartextTraffic}"
         android:allowBackup="false"
-        android:hasFragileUserData="true"
-        android:requestLegacyExternalStorage="true">
+        android:hasFragileUserData="true">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
@@ -35,6 +33,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- 文件管理器 / 其他应用「用 JoyManga 打开」CBZ 漫画。
+                 只认 CBZ 专用 MIME 与 .cbz 路径，避免把普通 zip 也抢过来。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/x-cbz" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:host="*" />
+                <data android:scheme="content" android:host="*" />
+                <data android:pathPattern=".*\\.cbz" />
+                <data android:pathPattern=".*\\..*\\.cbz" />
             </intent-filter>
         </activity>
 

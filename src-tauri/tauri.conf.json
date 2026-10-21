@@ -21,8 +21,8 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' tauri: asset: customprotocol:; connect-src ipc: http://ipc.localhost https:; img-src 'self' asset: http://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'",
-      "devCsp": "default-src 'self' http: https: data: blob:; connect-src ipc: http://ipc.localhost http: https: ws:; img-src 'self' asset: http://asset.localhost data: blob: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
+      "csp": "default-src 'self' tauri: asset: customprotocol:; connect-src ipc: http://ipc.localhost https:; img-src 'self' jmimg: http://jmimg.localhost http://jmimg.localhost:*/ asset: http://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "devCsp": "default-src 'self' http: https: data: blob:; connect-src ipc: http://ipc.localhost http: https: ws:; img-src 'self' jmimg: http://jmimg.localhost http://jmimg.localhost:*/ asset: http://asset.localhost data: blob: http: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-eval'"
     }
   },
   "bundle": {

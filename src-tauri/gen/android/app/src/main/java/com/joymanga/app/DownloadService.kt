@@ -1,6 +1,7 @@
 package com.joymanga.app
 
 import android.app.*
+import android.content.Context
 import android.content.Intent
 import android.os.*
 import android.content.pm.ServiceInfo
@@ -23,11 +24,7 @@ class DownloadService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        if (Build.VERSION.SDK_INT >= 26) {
-            getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(CHANNEL, "漫画下载", NotificationManager.IMPORTANCE_LOW)
-            )
-        }
+        ensureChannel(this)
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK, "$packageName:downloads"
         ).apply { setReferenceCounted(false) }
@@ -48,27 +45,16 @@ class DownloadService : Service() {
         val total = extras.getIntExtra("total", 0)
         val current = extras.getIntExtra("current", 0)
         val speed = extras.getStringExtra("speed").orEmpty()
-        val notification = buildNotification(active, current, total, speed, done = false)
+        val notification = buildNotification(active, current, total, speed)
         if (Build.VERSION.SDK_INT >= 29) startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         else startForeground(ID, notification)
         return START_NOT_STICKY
     }
 
-    private fun buildNotification(active: Int, current: Int, total: Int, speed: String, done: Boolean): Notification {
+    private fun buildNotification(active: Int, current: Int, total: Int, speed: String): Notification {
         val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-
-        if (done) {
-            // 完成态：不带进度条，也不常驻
-            return builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle("下载完成")
-                .setContentText(speed.ifBlank { "点击查看下载与传输" })
-                .setContentIntent(pending)
-                .setAutoCancel(true)
-                .setOnlyAlertOnce(true)
-                .build()
-        }
 
         builder.setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("正在下载 $active 个章节")
@@ -112,12 +98,22 @@ class DownloadService : Service() {
         wakeLock = null
         super.onDestroy()
     }
-    override fun onTaskRemoved(rootIntent: Intent?) { stopSelf(); super.onTaskRemoved(rootIntent) }
+    // 从最近任务划掉界面时不要停服务：下载在 Rust 侧继续执行，停掉前台服务会让
+    // 进程更容易被系统回收。任务真正结束时前端把 active 置 0，服务自行停止。
     override fun onBind(intent: Intent?) = null
     companion object {
         const val CHANNEL = "joymanga_downloads"
         const val ID = 1201
+        const val DONE_ID = 1202
         const val ACTION_CANCEL = "com.joymanga.app.DOWNLOAD_CANCEL"
+
+        /** 完成通知不经过服务（服务已停止），需要单独确保渠道存在。 */
+        fun ensureChannel(context: Context) {
+            if (Build.VERSION.SDK_INT < 26) return
+            context.getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(CHANNEL, "漫画下载", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
     }
 }
 

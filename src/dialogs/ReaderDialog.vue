@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { commands, type ChapterReaderData, type ChapterNavInfo, type ReadingDirection } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { getErrorMessage } from '../utils/errors.ts'
-import { ImageByteCache, imageDataToBlob } from '../utils/imageCache.ts'
+import { imageUrlFor } from '../utils/imageCache.ts'
 import { bookmarkId, type ReadingProgress } from '../utils/readingState.ts'
 import { useMessage } from 'naive-ui'
 import {
@@ -58,29 +58,12 @@ useBackHandler(() => {
 const loading = ref(false)
 const error = ref<string | null>(null)
 const chapterData = ref<ChapterReaderData | null>(null)
-const imageCache = ref<Map<string, string>>(new Map())
-const byteCache = new ImageByteCache(isAndroid ? 64 * 1024 * 1024 : 128 * 1024 * 1024)
+// 浏览器的图片解码缓存负责内存占用，这里只需记录哪些页编码失败，用于显示重试入口。
+const imageErrors = ref<Map<string, string>>(new Map())
 // 阅读进度写入防抖（见 saveProgress / flushProgress）
 let progressSaveTimer: ReturnType<typeof setTimeout> | undefined
 let pendingProgress: ReadingProgress | undefined
-let activeImageReads = 0
-const imageReadWaiters: Array<() => void> = []
-async function acquireImageRead() {
-  if (activeImageReads < (isAndroid ? 2 : 3)) activeImageReads++
-  else await new Promise<void>((resolve) => imageReadWaiters.push(resolve))
-}
-function releaseImageRead() {
-  const next = imageReadWaiters.shift()
-  if (next) next()
-  else activeImageReads--
-}
-function pinnedPages() {
-  const paths = chapterData.value?.imagePaths ?? []
-  return new Set(paths.slice(Math.max(0, currentPage.value - 2), currentPage.value + (isAndroid ? 1 : 2)))
-}
 const bookmarksShowing = ref(false)
-const loadingImages = ref<Set<string>>(new Set())
-const imageErrors = ref<Map<string, string>>(new Map())
 let chapterGeneration = 0
 
 const fitMode = ref<FitMode>('width')
@@ -127,20 +110,6 @@ function flushProgress() {
   }
 }
 
-/**
- * 图片解码完成：按**解码后内存**更新 LRU 记账。
- *
- * 路径取自 `img` 元素自身绑定的 `src` 对应的页面，而不是 `currentImagePath`：
- * 快速翻页时上一张图的 load 事件可能在新页已经渲染后才到达，用当前页路径会把
- * 尺寸记到错误的页上，进而错误地逐出仍在使用的缓存。
- */
-function onImageLoaded(event: Event) {
-  const image = event.target as HTMLImageElement
-  const path = image.dataset.imagePath
-  if (!path) return
-  for (const evicted of byteCache.resize(path, image.naturalWidth * image.naturalHeight * 4, pinnedPages())) imageCache.value.delete(evicted)
-}
-
 function toggleCurrentBookmark() {
   const progress = progressSnapshot()
   if (progress) store.toggleReadingBookmark(progress)
@@ -148,58 +117,40 @@ function toggleCurrentBookmark() {
 
 watch(currentPage, saveProgress)
 
-async function fetchImage(filePath: string, retry = false) {
-  byteCache.touch(filePath)
-  if (imageCache.value.has(filePath) || loadingImages.value.has(filePath)
-    || (!retry && imageErrors.value.has(filePath))) {
-    return
-  }
-  const generation = chapterGeneration
-  imageErrors.value.delete(filePath)
-  loadingImages.value.add(filePath)
-  await acquireImageRead()
-  try {
-    if (generation !== chapterGeneration) return
-    const res = await commands.getLocalImageDataUrl(filePath)
-    if (generation !== chapterGeneration) return
-    if (res.status === 'ok') {
-      const blob = imageDataToBlob(res.data)
-      const url = URL.createObjectURL(blob)
-      const pinned = pinnedPages()
-      const evicted = byteCache.put(filePath, url, blob.size, pinned)
-      for (const key of evicted) imageCache.value.delete(key)
-      if (!evicted.includes(filePath)) imageCache.value.set(filePath, url)
-    } else {
-      imageErrors.value.set(filePath, `${res.error.err_title}：${res.error.err_message}`)
-    }
-  } catch (e) {
-    console.error(`Failed to load image ${filePath}`, e)
-    if (generation === chapterGeneration) imageErrors.value.set(filePath, getErrorMessage(e))
-  } finally {
-    releaseImageRead()
-    if (generation === chapterGeneration) loadingImages.value.delete(filePath)
-  }
+/**
+ * 页面图片地址：直接交给浏览器按 `jmimg://` 协议加载，由原生/后端返回原始字节。
+ *
+ * 之前是先 base64 传输再转 Blob URL，一张 2MB 的图在峰值时会同时占用
+ * 字符串、二进制和 Blob 三份内存；协议直取只保留浏览器解码后的位图。
+ */
+function imageSrc(filePath: string): string {
+  return imageUrlFor(filePath, imageRetryToken.value.get(filePath) ?? 0)
 }
+
+/** 读取失败后点「重新读取」时递增，让 `<img>` 换一个地址重新发起请求。 */
+const imageRetryToken = ref<Map<string, number>>(new Map())
 
 function markImageError(filePath: string) {
   if (!chapterData.value?.imagePaths.includes(filePath)) return
-  byteCache.remove(filePath)
-  imageCache.value.delete(filePath)
   imageErrors.value.set(filePath, '图片无法解码，文件可能已损坏')
 }
 
 function retryImage(filePath: string) {
-  void fetchImage(filePath, true)
+  imageErrors.value.delete(filePath)
+  imageRetryToken.value.set(filePath, (imageRetryToken.value.get(filePath) ?? 0) + 1)
 }
 
+/** 相邻页由浏览器在空闲时预取，翻页时通常已经在缓存里。 */
 function preloadCurrentRange() {
-  if (!chapterData.value) return
-  const paths = chapterData.value.imagePaths
+  const chapter = chapterData.value
+  if (!chapter) return
+  const paths = chapter.imagePaths
   const idx = currentPage.value - 1
   const start = Math.max(0, idx - 1)
   const end = Math.min(paths.length, idx + (isAndroid ? 2 : 3))
   for (let i = start; i < end; i++) {
-    fetchImage(paths[i])
+    const image = new Image()
+    image.src = imageSrc(paths[i])
   }
 }
 
@@ -209,10 +160,8 @@ async function loadChapter(comicId: number, chapterId: number, page = 1) {
   loading.value = true
   error.value = null
   currentPage.value = 1
-  imageCache.value.clear()
-  byteCache.clear()
-  loadingImages.value.clear()
   imageErrors.value.clear()
+  imageRetryToken.value.clear()
   chapterData.value = null
 
   try {
@@ -521,10 +470,8 @@ watch(
     } else {
       flushProgress()
       chapterGeneration++
-      imageCache.value.clear()
-      byteCache.clear()
-      loadingImages.value.clear()
       imageErrors.value.clear()
+      imageRetryToken.value.clear()
       chapterData.value = null
     }
   },
@@ -562,10 +509,8 @@ onUnmounted(() => {
     justSwipedResetTimer = undefined
   }
   window.removeEventListener('keydown', handleKeyDown)
-  imageCache.value.clear()
-  byteCache.clear()
-  loadingImages.value.clear()
   imageErrors.value.clear()
+  imageRetryToken.value.clear()
   chapterData.value = null
 })
 </script>
@@ -667,21 +612,19 @@ onUnmounted(() => {
                   ? { transform: `translate(${zoom.offsetX}px, ${zoom.offsetY}px) scale(${zoom.scale})` }
                   : undefined"
                 @dblclick.stop="onViewerDoubleClick">
-                <img
-                  v-if="currentImagePath && imageCache.has(currentImagePath)"
-                  :key="currentImagePath"
-                  :data-image-path="currentImagePath"
-                  :src="imageCache.get(currentImagePath)"
-                  :alt="`第 ${currentPage} 页`"
-                  class="reader-img"
-                  @load="onImageLoaded($event)"
-                  @error="currentImagePath && markImageError(currentImagePath)"
-                  :draggable="false" />
-                <div v-else-if="currentImagePath && imageErrors.has(currentImagePath)" class="image-skeleton image-error">
+                <div v-if="currentImagePath && imageErrors.has(currentImagePath)" class="image-skeleton image-error">
                   <span>第 {{ currentPage }} 页读取失败</span>
                   <small>{{ imageErrors.get(currentImagePath) }}</small>
                   <n-button size="small" @click.stop="retryImage(currentImagePath)">重新读取</n-button>
                 </div>
+                <img
+                  v-else-if="currentImagePath"
+                  :key="imageSrc(currentImagePath)"
+                  :src="imageSrc(currentImagePath)"
+                  :alt="`第 ${currentPage} 页`"
+                  class="reader-img"
+                  @error="markImageError(currentImagePath)"
+                  :draggable="false" />
                 <div v-else class="image-skeleton">
                   <span>第 {{ currentPage }} 页 正在加载...</span>
                 </div>

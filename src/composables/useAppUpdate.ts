@@ -1,6 +1,8 @@
 import { ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { isAndroid } from './useIsMobile.ts'
+import { downloadAndInstallApk } from '../utils/androidStorage.ts'
 
 export interface GithubReleaseAsset {
   name: string
@@ -21,6 +23,10 @@ export interface GithubReleaseData {
 const REPO_OWNER = 'Beyondoooars'
 const REPO_NAME = 'JoyManga'
 const IGNORED_VERSION_KEY = 'joymanga_ignored_update_version'
+// 冷启动静默检查每隔一天做一次即可；失败后半小时再试，避免离线时每次启动都请求 GitHub。
+const LAST_CHECK_KEY = 'joymanga_update_last_check'
+const SILENT_INTERVAL_MS = 24 * 60 * 60 * 1000
+const RETRY_INTERVAL_MS = 30 * 60 * 1000
 
 // 全局单例响应式状态，避免不同组件状态脱节
 const checking = ref(false)
@@ -36,6 +42,12 @@ const downloadUrl = ref('')
 const downloadFileName = ref('')
 const downloadFileSize = ref('')
 const errorMessage = ref('')
+
+// 应用内更新（Android）：原生下载 APK 的进度与提示
+const installing = ref(false)
+const installProgress = ref(0)
+const installMessage = ref('')
+let stopInstallWatch: (() => void) | undefined
 
 function compareVersions(v1: string, v2: string): number {
   const p1 = v1.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0)
@@ -65,9 +77,22 @@ function formatDate(isoStr?: string): string {
   }
 }
 
+/** 距上次静默检查是否已超过允许的间隔；手动检查不受限制。 */
+function silentCheckDue(): boolean {
+  const last = Number(localStorage.getItem(LAST_CHECK_KEY) ?? 0)
+  if (!Number.isFinite(last) || last <= 0) return true
+  return Date.now() - last >= SILENT_INTERVAL_MS
+}
+
+function markChecked(success: boolean) {
+  const next = success ? Date.now() : Date.now() - SILENT_INTERVAL_MS + RETRY_INTERVAL_MS
+  localStorage.setItem(LAST_CHECK_KEY, String(next))
+}
+
 export function useAppUpdate() {
   async function checkForUpdates(silent = false) {
     if (checking.value) return
+    if (silent && !silentCheckDue()) return
     checking.value = true
     errorMessage.value = ''
 
@@ -99,6 +124,7 @@ export function useAppUpdate() {
       }
 
       const data: GithubReleaseData = await res.json()
+      markChecked(true)
       const tag = (data.tag_name || '').replace(/^v/, '').trim()
       latestVersion.value = tag
       releaseTitle.value = data.name || `v${tag}`
@@ -140,6 +166,7 @@ export function useAppUpdate() {
     } catch (err: unknown) {
       const errStr = err instanceof Error ? err.message : String(err)
       errorMessage.value = errStr
+      markChecked(false)
       if (!silent) {
         // 手动检查时若出错，由调用方或界面显示提示
       }
@@ -166,9 +193,40 @@ export function useAppUpdate() {
 
   function downloadUpdate() {
     const targetUrl = downloadUrl.value || releaseUrl.value
-    if (targetUrl) {
-      void openExternal(targetUrl)
+    if (!targetUrl) return
+    // 只有拿到 .apk 直链时才走应用内安装；否则退回浏览器打开 Release 页
+    const isApk = downloadUrl.value !== '' && downloadFileName.value.toLowerCase().endsWith('.apk')
+    if (isAndroid && isApk && window.JmAndroid) {
+      if (installing.value) return
+      installing.value = true
+      installProgress.value = 0
+      installMessage.value = '正在下载安装包…'
+      stopInstallWatch?.()
+      stopInstallWatch = downloadAndInstallApk(targetUrl, downloadFileName.value, (progress) => {
+        if (progress.state === 'progress') {
+          installProgress.value = progress.percent ?? installProgress.value
+        } else if (progress.state === 'done') {
+          installProgress.value = 100
+          installMessage.value = '下载完成，正在打开安装器…'
+        } else if (progress.state === 'installer') {
+          installMessage.value = progress.message ?? '请在系统安装器中确认安装'
+        } else {
+          const message = progress.message ?? (progress.state === 'permission' ? '请允许安装未知应用后重试' : '更新失败')
+          installMessage.value = message
+          installProgress.value = 0
+          if (progress.state === 'error') errorMessage.value = message
+        }
+        // done 之后原生才拉起安装器，失败信息会晚一步到，所以这时先继续监听，
+        // 下一次点击更新时再移除旧监听器。
+        if (progress.state === 'permission' || progress.state === 'error') {
+          installing.value = false
+          stopInstallWatch?.()
+          stopInstallWatch = undefined
+        }
+      })
+      return
     }
+    void openExternal(targetUrl)
   }
 
   function openReleasePage() {
@@ -191,6 +249,9 @@ export function useAppUpdate() {
     downloadFileName,
     downloadFileSize,
     errorMessage,
+    installing,
+    installProgress,
+    installMessage,
     checkForUpdates,
     ignoreCurrentUpdate,
     downloadUpdate,

@@ -18,7 +18,20 @@ struct CachedArchive {
     archive: zip::ZipArchive<std::fs::File>,
 }
 
+/// 阅读器当前打开的 CBZ。阅读是一页一页的，单槽缓存足够，且避免长期占着文件句柄。
 static ACTIVE_ARCHIVE: OnceLock<Mutex<Option<CachedArchive>>> = OnceLock::new();
+
+/// 导入的 CBZ 路径集合（规范化后）。`jmimg://` 每一页都要校验路径，
+/// 若每次都重读书库记录，翻页会产生大量同步读盘；这里按文件 mtime 失效。
+struct ImportedCbzIndex {
+    fingerprint: Option<std::time::SystemTime>,
+    paths: Vec<PathBuf>,
+}
+
+static IMPORTED_CBZ_INDEX: OnceLock<Mutex<Option<ImportedCbzIndex>>> = OnceLock::new();
+
+/// 前端读取页面图片使用的自定义协议；Android 上地址为 `http://jmimg.localhost/<path>`。
+pub const IMAGE_SCHEME: &str = "jmimg";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
@@ -188,30 +201,44 @@ pub(crate) fn chapter_reader_data_from_comic(
 #[tauri::command(async)]
 #[specta::specta]
 pub fn get_local_image_data_url(app: AppHandle, file_path: String) -> CommandResult<String> {
+    let (bytes, mime) =
+        read_page_bytes(&app, &file_path).map_err(|err| CommandError::from("读取图片失败", err))?;
+    let b64 = general_purpose::STANDARD.encode(&bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+fn mime_for_extension(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("jpeg")
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/jpeg",
+    }
+}
+
+/// 读取阅读器的一页，返回原始字节与 MIME。
+///
+/// `file_path` 有两种形态：目录书库的图片绝对路径，或 CBZ 的
+/// `<归档路径>|<条目名>`。两条路径都会重新规范化并校验，防止前端传入越界路径。
+fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>, &'static str)> {
     let download_dir = app.get_config().read().download_dir.clone();
     let canonical_download_dir = std::fs::canonicalize(&download_dir)
-        .context(format!("无法解析下载根目录`{}`", download_dir.display()))
-        .map_err(|err| CommandError::from("读取图片失败", err))?;
+        .with_context(|| format!("无法解析下载根目录`{}`", download_dir.display()))?;
 
     if let Some((cbz_path_str, entry_name)) = file_path.split_once('|') {
-        let cbz_path = PathBuf::from(cbz_path_str);
-        let canonical_cbz_path = std::fs::canonicalize(&cbz_path)
-            .context(format!("无法解析CBZ路径`{}`", cbz_path.display()))
-            .map_err(|err| CommandError::from("读取图片失败", err))?;
+        let canonical_cbz_path = std::fs::canonicalize(cbz_path_str)
+            .with_context(|| format!("无法解析CBZ路径`{cbz_path_str}`"))?;
 
-        let imported_file = {
-            let _guard = crate::library_catalog::CATALOG_LOCK.lock();
-            crate::library_catalog::LibraryCatalog::load(&crate::library_catalog::catalog_path(
-                &app,
-            ))
-            .map_err(|err| CommandError::from("读取书库记录失败", err))?
-            .allows_cbz(&download_dir, &canonical_cbz_path)
-        };
-        if !canonical_cbz_path.starts_with(&canonical_download_dir) && !imported_file {
-            return Err(CommandError::from(
-                "读取图片失败",
-                anyhow!("CBZ文件不在下载根目录内"),
-            ));
+        if !canonical_cbz_path.starts_with(&canonical_download_dir)
+            && !is_imported_cbz(app, &download_dir, &canonical_cbz_path)
+        {
+            return Err(anyhow!("CBZ文件不在下载根目录内"));
         }
 
         let modified = std::fs::metadata(&canonical_cbz_path)
@@ -224,11 +251,9 @@ pub fn get_local_image_data_url(app: AppHandle, file_path: String) -> CommandRes
             .is_some_and(|cached| cached.path == canonical_cbz_path && cached.modified == modified);
         if !is_match {
             let file = std::fs::File::open(&canonical_cbz_path)
-                .context(format!("打开CBZ文件`{}`失败", canonical_cbz_path.display()))
-                .map_err(|err| CommandError::from("读取图片失败", err))?;
+                .with_context(|| format!("打开CBZ文件`{}`失败", canonical_cbz_path.display()))?;
             let archive = zip::ZipArchive::new(file)
-                .context(format!("解析CBZ文件`{}`失败", canonical_cbz_path.display()))
-                .map_err(|err| CommandError::from("读取图片失败", err))?;
+                .with_context(|| format!("解析CBZ文件`{}`失败", canonical_cbz_path.display()))?;
             *guard = Some(CachedArchive {
                 path: canonical_cbz_path.clone(),
                 modified,
@@ -239,8 +264,7 @@ pub fn get_local_image_data_url(app: AppHandle, file_path: String) -> CommandRes
         let mut entry = cached
             .archive
             .by_name(entry_name)
-            .context(format!("CBZ内未找到图片条目`{entry_name}`"))
-            .map_err(|err| CommandError::from("读取图片失败", err))?;
+            .with_context(|| format!("CBZ内未找到图片条目`{entry_name}`"))?;
 
         let declared_size = entry.size();
         let bytes = crate::image_data::read_limited(
@@ -251,57 +275,119 @@ pub fn get_local_image_data_url(app: AppHandle, file_path: String) -> CommandRes
         .and_then(|bytes| {
             crate::image_data::validate_image(&bytes)?;
             Ok(bytes)
-        })
-        .map_err(|err| CommandError::from("读取图片失败", err))?;
+        })?;
         drop(entry);
         drop(guard);
 
-        let ext = Path::new(entry_name)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("jpeg")
-            .to_lowercase();
-        let mime = match ext.as_str() {
-            "png" => "image/png",
-            "webp" => "image/webp",
-            "gif" => "image/gif",
-            _ => "image/jpeg",
-        };
-
-        let b64 = general_purpose::STANDARD.encode(&bytes);
-        return Ok(format!("data:{mime};base64,{b64}"));
+        let mime = mime_for_extension(Path::new(entry_name));
+        return Ok((bytes, mime));
     }
 
-    let path = PathBuf::from(&file_path);
-    let canonical_path = std::fs::canonicalize(&path)
-        .context(format!("无法解析图片路径`{}`", path.display()))
-        .map_err(|err| CommandError::from("读取图片失败", err))?;
-
+    let canonical_path = std::fs::canonicalize(file_path)
+        .with_context(|| format!("无法解析图片路径`{file_path}`"))?;
     if !canonical_path.starts_with(&canonical_download_dir) {
-        return Err(CommandError::from(
-            "读取图片失败",
-            anyhow!("图片路径不在下载根目录内"),
-        ));
+        return Err(anyhow!("图片路径不在下载根目录内"));
     }
-
     let bytes = crate::image_data::read_image(&canonical_path)
-        .context(format!("读取文件`{}`失败", canonical_path.display()))
-        .map_err(|err| CommandError::from("读取图片失败", err))?;
+        .with_context(|| format!("读取文件`{}`失败", canonical_path.display()))?;
+    Ok((bytes, mime_for_extension(&canonical_path)))
+}
 
-    let ext = canonical_path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("jpeg")
-        .to_lowercase();
-    let mime = match ext.as_str() {
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/jpeg",
+/// 判断 CBZ 是否来自「导入」：书库记录里登记过的外部归档。
+///
+/// 阅读时每页都会调用，所以结果按记录文件的修改时间缓存，避免逐页同步读盘。
+fn is_imported_cbz(app: &AppHandle, download_dir: &Path, cbz_path: &Path) -> bool {
+    let catalog_path = crate::library_catalog::catalog_path(app);
+    let fingerprint = std::fs::metadata(&catalog_path)
+        .and_then(|m| m.modified())
+        .ok();
+    let index_lock = IMPORTED_CBZ_INDEX.get_or_init(|| Mutex::new(None));
+    let mut guard = index_lock.lock();
+    let stale = guard
+        .as_ref()
+        .is_none_or(|index| index.fingerprint != fingerprint);
+    if stale {
+        let imported = {
+            let _guard = crate::library_catalog::CATALOG_LOCK.lock();
+            crate::library_catalog::LibraryCatalog::load(&catalog_path)
+                .map(|catalog| {
+                    catalog
+                        .visible_imports(download_dir)
+                        .into_iter()
+                        .map(|record| record.path)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|error| {
+                    tracing::warn!(error = %error, "读取书库记录失败，导入归档校验将回退");
+                    Vec::new()
+                })
+        };
+        *guard = Some(ImportedCbzIndex {
+            fingerprint,
+            paths: imported,
+        });
+    }
+    guard
+        .as_ref()
+        .is_some_and(|index| index.paths.iter().any(|path| path == cbz_path))
+}
+
+/// 解码图片协议地址里的页面标识。
+///
+/// 前端发出的是 `http://jmimg.localhost/<百分号编码的页面标识>`，wry 会把主机名
+/// 改写成自定义 scheme，于是这里收到 `jmimg://localhost/<页面标识>`。
+/// 页面标识沿用了原命令的格式：目录页面是绝对路径，CBZ 页面是 `归档路径|条目名`。
+fn image_path_from_url(url: &tauri::Url) -> anyhow::Result<String> {
+    anyhow::ensure!(url.scheme() == IMAGE_SCHEME, "图片地址协议不匹配");
+    let encoded = url.path().trim_start_matches('/');
+    let mut decoded = Vec::with_capacity(encoded.len());
+    let mut bytes = encoded.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let pair = [bytes.next().context("图片地址编码不完整")?, bytes.next().context("图片地址编码不完整")?];
+            let text = std::str::from_utf8(&pair).context("图片地址编码无效")?;
+            decoded.push(u8::from_str_radix(text, 16).context("图片地址编码无效")?);
+        } else {
+            decoded.push(byte);
+        }
+    }
+    String::from_utf8(decoded).context("图片地址不是有效的 UTF-8")
+}
+
+/// `jmimg://` 协议处理器：直接返回图片字节，省掉 base64 编码与 IPC 往返。
+pub fn serve_image(
+    app: &AppHandle,
+    request: tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let respond = |status: u16, mime: &str, body: Vec<u8>| {
+        tauri::http::Response::builder()
+            .status(status)
+            .header(tauri::http::header::CONTENT_TYPE, mime)
+            .header(tauri::http::header::CACHE_CONTROL, "no-store")
+            .body(body)
+            .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
     };
-
-    let b64 = general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
+    let url = match tauri::Url::parse(&request.uri().to_string()) {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!(error = %error, "解析图片协议地址失败");
+            return respond(400, "text/plain", b"bad request".to_vec());
+        }
+    };
+    let file_path = match image_path_from_url(&url) {
+        Ok(file_path) => file_path,
+        Err(error) => {
+            tracing::warn!(error = %error, "解析图片协议路径失败");
+            return respond(400, "text/plain", b"bad request".to_vec());
+        }
+    };
+    match read_page_bytes(app, &file_path) {
+        Ok((bytes, mime)) => respond(200, mime, bytes),
+        Err(error) => {
+            tracing::warn!(error = %error, "读取阅读器图片失败");
+            respond(404, "text/plain", error.to_string().into_bytes())
+        }
+    }
 }
 
 #[cfg(test)]
