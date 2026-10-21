@@ -6,7 +6,7 @@ import { commands, type DirectoryEntry } from '../bindings.ts'
 import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 
-/** Android 公共存储根目录，浏览器从这里开始 */
+/** Android 公共存储根目录，浏览器从这里开始；与后端 BROWSABLE_ROOT（/storage）对应 */
 const STORAGE_ROOT = '/storage/emulated/0'
 
 const show = defineModel<boolean>('show', { required: true })
@@ -31,7 +31,22 @@ useBackHandler(() => {
 }, 60)
 
 watch(show, (visible) => {
-  if (visible) void navigate(STORAGE_ROOT)
+  if (visible) {
+    // 每次打开都回到根目录并清空上次残留的输入/新建状态
+    currentPath.value = STORAGE_ROOT
+    entries.value = []
+    manualPath.value = ''
+    folderInputShowing.value = false
+    folderName.value = ''
+    loading.value = false
+    void navigate(STORAGE_ROOT)
+  } else {
+    // 关闭即作废进行中的请求：组件常驻挂载，不能只靠 onBeforeUnmount
+    generation++
+    loading.value = false
+    selecting.value = false
+    folderCreating.value = false
+  }
 })
 
 onBeforeUnmount(() => { disposed = true; generation++ })
@@ -45,17 +60,18 @@ function parentPath(path: string): string {
 /** 拉取目录列表并进入；失败（不存在/无权限）时停留在原目录 */
 async function navigate(path: string): Promise<boolean> {
   const target = path.trim()
-  if (!target || loading.value) return false
+  if (!target || loading.value || !show.value) return false
   const current = ++generation
   loading.value = true
   try {
     const result = await commands.listDirectoryEntries(target)
-    if (disposed || current !== generation) return false
+    if (disposed || current !== generation || !show.value) return false
     if (result.status === 'error') {
       message.error(formatCommandError(result.error))
       return false
     }
-    entries.value = [...result.data].sort((a, b) => a.name.localeCompare(b.name))
+    // 后端已按自然序（natural_cmp）排好，这里保持原顺序；再排一次反而会把 10 排到 2 前面
+    entries.value = result.data
     currentPath.value = target
     manualPath.value = ''
     return true
@@ -73,7 +89,8 @@ async function chooseCurrent() {
   selecting.value = true
   try {
     const result = await commands.validateDownloadDir(currentPath.value)
-    if (disposed) return
+    // 弹窗已关闭就不再弹确认框，否则用户会确认一个已经放弃的选择
+    if (disposed || !show.value) return
     if (result.status === 'error') {
       message.error(formatCommandError(result.error))
       return
@@ -81,7 +98,7 @@ async function chooseCurrent() {
     emit('select', result.data.canonicalPath)
     show.value = false
   } catch (error) {
-    message.error(getErrorMessage(error))
+    if (show.value) message.error(getErrorMessage(error))
   } finally {
     selecting.value = false
   }
@@ -104,7 +121,7 @@ async function createFolder() {
   try {
     const target = `${currentPath.value.replace(/\/+$/, '')}/${name}`
     const result = await commands.validateDownloadDir(target)
-    if (disposed) return
+    if (disposed || !show.value) return
     if (result.status === 'error') {
       message.error(formatCommandError(result.error))
       return
@@ -114,7 +131,7 @@ async function createFolder() {
     message.success('文件夹已创建')
     await navigate(result.data.canonicalPath)
   } catch (error) {
-    message.error(getErrorMessage(error))
+    if (show.value) message.error(getErrorMessage(error))
   } finally {
     folderCreating.value = false
   }

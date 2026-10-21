@@ -16,7 +16,7 @@ import { getErrorMessage } from './utils/errors.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
 import { useIsMobile } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
-import { downloadsPath, hasAllFilesAccess, watchNetworkMetered } from './utils/androidStorage.ts'
+import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
 
 const UserCenterDialog = defineAsyncComponent(() => import('./dialogs/UserCenterDialog.vue'))
 const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
@@ -154,13 +154,24 @@ async function initializeApp() {
     await store.initStateListeners()
     store.applyConfig(await commands.getConfig())
     if (isAndroid && store.config && !store.config.androidStorageInitialized && window.JmAndroid) {
-      if (hasAllFilesAccess()) {
-        // 已持有「所有文件访问」：直接落到公共下载，无需再引导
-        const result = await commands.initializeAndroidStorage(downloadsPath())
+      const bridge = window.JmAndroid
+      if (!supportsPublicStorage()) {
+        // Android 10 既没有「所有文件访问」也无法申请写外部存储：直接落到应用专用目录
+        const result = await commands.initializeAndroidStorage(bridge.libraryPath() ?? '')
         if (result.status === 'error') throw new Error(result.error.err_message)
         store.applyConfig(result.data)
+      } else if (hasAllFilesAccess() && canWritePublicDownloads()) {
+        // 已授权且公共目录可写：直接落到公共下载，无需引导
+        const result = await commands.initializeAndroidStorage(downloadsPath())
+        if (result.status === 'error') {
+          // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
+          console.error(result.error)
+          storageOnboardingShowing.value = true
+        } else {
+          store.applyConfig(result.data)
+        }
       } else {
-        // 未授权：弹引导弹窗让用户选公共下载（需授权）或应用专用目录；
+        // 未授权（或公共目录暂不可写）：弹引导让用户选公共下载（需授权）或应用专用目录；
         // 不阻塞应用使用，跳过的话下次启动仍会引导
         storageOnboardingShowing.value = true
       }

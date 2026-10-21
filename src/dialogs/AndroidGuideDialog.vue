@@ -36,12 +36,12 @@ useAndroidBack(() => {
           </div>
           <div class="space-y-1 text-gray-600">
             <div>
-              • 漫画默认存入应用专用书库（无需存储权限）；需长期保留时导出到系统下载：
+              • 首次启动可选择把漫画存到公共下载目录（推荐，卸载不删除）或应用专用目录；公共书库位置：
               <div class="font-mono text-pink-600 bg-pink-50 rounded px-2 py-0.5 mt-1 select-all break-all inline-block">
                 Download/JoyManga
               </div>
             </div>
-            <div>• <strong class="text-gray-800">卸载前先导出</strong>：专用书库随卸载清理；导出的文件保留。</div>
+            <div>• <strong class="text-gray-800">卸载前先导出</strong>：应用专用书库会随卸载清理，公共书库与导出的文件保留。</div>
             <div>• <strong class="text-gray-800">外部阅读器</strong>：导出的文件可用其他 CBZ 阅读器打开；也能导入 CBZ 与漫画文件夹。</div>
           </div>
         </div>
@@ -80,7 +80,7 @@ useAndroidBack(() => {
             <span>数据备份与彻底清理</span>
           </div>
           <div class="space-y-1 text-gray-600">
-            <div>• 彻底释放空间：【设置 ➔ 数据维护与卸载管理】→ 清空所有下载。</div>
+            <div>• 彻底释放空间：在「设置 ➔ 数据管理」中清理缓存，或直接删除书库目录中的漫画文件夹。</div>
             <div>• 换机或卸载前请分别导出漫画与数据备份；备份不含漫画文件和账号密码。</div>
           </div>
         </div>

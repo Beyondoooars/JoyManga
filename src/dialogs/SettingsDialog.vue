@@ -29,7 +29,11 @@ function updateProxyPort(value: number | null) {
 const advancedData = ref(false)
 const manualNetwork = ref(false)
 const showStoragePicker = ref(false)
+// 与后端 LogLevel 枚举保持一致：恢复备份或手工编辑配置可能带入 TRACE/DEBUG，
+// 选项缺失时 naive-ui 只能回退显示原始字符串。
 const logLevelOptions: Array<{ label: string; value: LogLevel }> = [
+  { label: '最详细（TRACE）', value: 'TRACE' },
+  { label: '调试（DEBUG）', value: 'DEBUG' },
   { label: '详细（INFO）', value: 'INFO' },
   { label: '仅警告（WARN）', value: 'WARN' },
   { label: '仅错误（ERROR）', value: 'ERROR' },
@@ -61,6 +65,11 @@ const {
 
 useBackHandler(() => {
   if (!showing.value) return false
+  // 目录选择器与确认框开着时，返回键先关它们，不能把设置页整个关掉
+  if (showStoragePicker.value) {
+    showStoragePicker.value = false
+    return true
+  }
   showing.value = false
   return true
 }, 50)
@@ -212,10 +221,20 @@ function chooseDownloadDir(path: string) {
     content: `新下载将写入 ${path}；已下载内容保留在原处，不会被移动。`,
     positiveText: '确认更改',
     negativeText: '取消',
-    onPositiveClick: () => {
-      if (!store.config) return
-      store.config.downloadDir = path
-      message.success('书库位置已更新')
+    onPositiveClick: async () => {
+      const config = store.config
+      if (!config) return
+      const previous = config.downloadDir
+      config.downloadDir = path
+      try {
+        // 立即落盘：位置变更关系到之后所有下载的落点，不能等 400ms 防抖，
+        // 否则保存失败时用户已经看到成功提示、前后端配置却已分叉。
+        await store.saveConfigNow()
+        message.success('书库位置已更新')
+      } catch (error) {
+        config.downloadDir = previous
+        message.error(`书库位置未能保存：${getErrorMessage(error)}`)
+      }
     },
   })
 }
@@ -235,6 +254,8 @@ async function refreshLogsDirSize() {
 
 async function clearLogsAction() {
   await dataAction('logs-clear', async () => {
+    // runConfigMaintenance 会取消待执行的防抖保存；先显式落盘，避免用户的设置改动被静默丢弃
+    await store.saveConfigNow()
     const result = await store.runConfigMaintenance(() => commands.clearLogs())
     if (result.status === 'error') throw new Error(formatCommandError(result.error))
     message.success('日志已清理')
@@ -274,7 +295,7 @@ watch(advancedData, (open) => {
             <n-select aria-label="下载完成后 CBZ 整理方式" v-model:value="cbzMode" :options="cbzModeOptions" />
           </div>
           <p class="settings-note">下载后自动整理；单次下载时可在本子详情页临时选择。更改后仅影响新下载，已下载内容保留在原处。</p>
-          <p v-if="isAndroid" class="settings-note">应用专用书库随卸载清理；长期保留请导出到系统下载。</p>
+          <p v-if="isAndroid" class="settings-note">公共下载书库（Download/JoyManga）卸载后保留；应用专用书库会随卸载清理，需要长期保留时请改到公共目录或导出到系统下载。</p>
           <StorageLocationDialog v-model:show="showStoragePicker" @select="chooseDownloadDir" />
         </section>
 
@@ -353,7 +374,7 @@ watch(advancedData, (open) => {
             <div class="log-settings">
               <div class="setting-row">
                 <label class="setting-label" for="log-level">日志收集等级</label>
-                <n-select aria-label="日志收集等级" v-model:value="logLevel" :options="logLevelOptions" />
+                <n-select input-id="log-level" aria-label="日志收集等级" v-model:value="logLevel" :options="logLevelOptions" />
               </div>
               <div class="setting-row log-usage-row">
                 <span class="log-usage" aria-live="polite">{{ logsSizeLoading ? '正在统计日志占用…' : logsSizeText }}</span>

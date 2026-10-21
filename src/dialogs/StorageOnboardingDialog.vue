@@ -5,13 +5,15 @@ import { useMessage } from 'naive-ui'
 import { commands } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
-import { downloadsPath, hasAllFilesAccess, requestAllFilesAccess } from '../utils/androidStorage.ts'
+import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, onPermissionResult, requestAllFilesAccess, supportsPublicStorage } from '../utils/androidStorage.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 
 const show = defineModel<boolean>('show', { required: true })
 const store = useStore()
 const message = useMessage()
 const initializing = ref(false)
+// Android 10 没有可用的公共存储授权，直接隐藏该选项，避免用户点进死路
+const publicStorageAvailable = supportsPublicStorage()
 
 useBackHandler(() => {
   if (!show.value) return false
@@ -19,12 +21,12 @@ useBackHandler(() => {
   return true
 }, 60)
 
-/** 点击「授权」后注册：从系统设置回到应用时复查权限，通过则直接完成公共下载初始化 */
-let visibilityListener: (() => void) | undefined
+/** 点击「授权」后注册：从系统设置回到应用（或收到运行时权限结果）时复查权限，通过则完成公共下载初始化 */
+let stopWatchingAuthorization: (() => void) | undefined
 
-function stopWatchingAuthorization() {
-  visibilityListener?.()
-  visibilityListener = undefined
+function clearAuthorizationWatcher() {
+  stopWatchingAuthorization?.()
+  stopWatchingAuthorization = undefined
 }
 
 async function initializeWith(path: string, successText: string): Promise<boolean> {
@@ -38,7 +40,7 @@ async function initializeWith(path: string, successText: string): Promise<boolea
     }
     store.applyConfig(result.data)
     message.success(successText)
-    stopWatchingAuthorization()
+    clearAuthorizationWatcher()
     show.value = false
     return true
   } catch (error) {
@@ -51,12 +53,29 @@ async function initializeWith(path: string, successText: string): Promise<boolea
 
 function authorizePublicDownloads() {
   if (initializing.value) return
-  stopWatchingAuthorization()
-  visibilityListener = () => {
-    if (document.visibilityState !== 'visible' || !hasAllFilesAccess()) return
+  clearAuthorizationWatcher()
+  const tryInitialize = () => {
+    if (!show.value || !hasAllFilesAccess()) return
+    // 权限已授予但公共目录不可写：留在引导里提示用户改用应用专用目录
+    if (!canWritePublicDownloads()) {
+      message.warning('公共下载目录当前不可写，请改用应用专用目录')
+      return
+    }
     void initializeWith(downloadsPath(), '漫画将保存到公共下载')
   }
-  document.addEventListener('visibilitychange', visibilityListener)
+  // 系统设置页返回：WebView 可见性变化；API 29 以下的运行时权限：原生回传 jm-permission-result。
+  // 两条路径都必须显式移除监听，否则每次回到前台都会重复初始化并改写配置。
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'visible') tryInitialize()
+  }
+  const removePermissionListener = onPermissionResult((granted) => {
+    if (granted) tryInitialize()
+  })
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  stopWatchingAuthorization = () => {
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    removePermissionListener()
+  }
   requestAllFilesAccess()
   message.info('请在系统设置中授予「所有文件访问」，返回应用后自动完成')
 }
@@ -65,7 +84,7 @@ function useAppStorage() {
   void initializeWith(window.JmAndroid?.libraryPath() ?? '', '漫画将保存到应用专用目录')
 }
 
-onBeforeUnmount(stopWatchingAuthorization)
+onBeforeUnmount(clearAuthorizationWatcher)
 </script>
 
 <template>
@@ -76,7 +95,7 @@ onBeforeUnmount(stopWatchingAuthorization)
         <button class="onboarding-close" type="button" aria-label="关闭存储位置引导" @click="show = false"><PhX :size="20" aria-hidden="true" /></button>
       </header>
       <div class="onboarding-body">
-        <div class="onboarding-option">
+        <div v-if="publicStorageAvailable" class="onboarding-option">
           <h3><PhShieldCheck :size="18" aria-hidden="true" />公共下载（推荐）</h3>
           <p>漫画存到 <strong>Download/JoyManga</strong>：文件管理器直接可见，卸载应用不会删除漫画文件，方便备份。需要授予「所有文件访问」权限。</p>
         </div>
@@ -86,8 +105,8 @@ onBeforeUnmount(stopWatchingAuthorization)
         </div>
       </div>
       <footer class="onboarding-footer">
-        <n-button type="primary" color="#b73963" text-color="#ffffff" :loading="initializing" @click="authorizePublicDownloads">授权并使用公共下载</n-button>
-        <n-button secondary :loading="initializing" @click="useAppStorage">使用应用专用目录</n-button>
+        <n-button v-if="publicStorageAvailable" type="primary" color="#b73963" text-color="#ffffff" :loading="initializing" @click="authorizePublicDownloads">授权并使用公共下载</n-button>
+        <n-button :type="publicStorageAvailable ? 'default' : 'primary'" :color="publicStorageAvailable ? undefined : '#b73963'" :text-color="publicStorageAvailable ? undefined : '#ffffff'" :secondary="publicStorageAvailable" :loading="initializing" @click="useAppStorage">使用应用专用目录</n-button>
         <button class="onboarding-skip" type="button" :disabled="initializing" @click="show = false">暂时跳过</button>
       </footer>
     </section>

@@ -53,6 +53,12 @@ impl Write for LogEventWriter {
 static RELOAD_FN: OnceLock<Box<dyn Fn(LogLevel) -> anyhow::Result<()> + Send + Sync>> =
     OnceLock::new();
 static GUARD: OnceLock<parking_lot::Mutex<Option<WorkerGuard>>> = OnceLock::new();
+/// 串行化文件日志层的重载（设置保存与 watcher 事件可能并发）。
+static RELOAD_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+/// 文件日志 watcher 是否已启动（Off 启动、之后切回其他等级时需要补启动）。
+static WATCHER_STARTED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+/// 启动时保存的 AppHandle，供运行期补启动 watcher 使用。
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 /// 当前文件日志收集等级：供 watcher 重建文件层与定时清理任务读取，
 /// 随设置页切换更新，而不是停留在启动时的等级。
 static CURRENT_LEVEL: OnceLock<parking_lot::RwLock<LogLevel>> = OnceLock::new();
@@ -73,6 +79,7 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     let target_filter = Targets::new().with_target(lib_target, Level::TRACE);
     let level = app.get_config().read().log_level;
     CURRENT_LEVEL.get_or_init(|| parking_lot::RwLock::new(level));
+    let _ = APP_HANDLE.set(app.clone());
     // 输出到文件
     let (file_layer, guard) = create_file_layer(app, level)?;
     let (reloadable_file_layer, reload_handle) = tracing_subscriber::reload::Layer::new(file_layer);
@@ -106,18 +113,25 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     RELOAD_FN.get_or_init(move || {
         let app = app.clone();
         Box::new(move |level: LogLevel| {
+            // 串行化「安装新层 + 替换 guard」：并发重载（设置保存与 watcher 事件）
+            // 若交错执行，会把当前层的 guard 换成另一层的，丢弃后写入线程被关闭，
+            // 文件日志会静默停止。
+            let _reload_guard = RELOAD_LOCK.lock();
             let (file_layer, guard) = create_file_layer(&app, level)?;
             reload_handle.reload(file_layer).context("reload失败")?;
             *GUARD.get().context("GUARD未初始化")?.lock() = guard;
             Ok(())
         })
     });
-    // watcher 与定时清理常驻，但每轮动作前都按当前等级判断是否跳过：
-    // 等级为 Off 时它们不产生任何 I/O，避免「Off 时也要停掉后台任务」的生命周期问题。
-    tauri::async_runtime::spawn(file_log_watcher(app.clone()));
+    // watcher 只在需要写文件日志时启动：Off 时连 inotify 监听都不建立。
+    // 定时清理常驻，但每轮动作前按当前等级跳过，Off 时不产生任何 I/O。
+    if level != LogLevel::Off {
+        ensure_file_log_watcher(app);
+    }
     tauri::async_runtime::spawn(auto_cleanup_logs_task(app.clone()));
+    // 启动时清理一次过期日志，避免 Off 期间堆积的崩溃报告长期占位。
+    // 这是启动阶段唯一的清理入口（create_file_layer 已不再顺带清理）。
     if let Ok(dir) = logs_dir(app) {
-        // 启动时清理一次过期日志，避免 Off 期间堆积的崩溃报告长期占位。
         cleanup_managed_logs(
             &dir,
             DEFAULT_LOG_RETENTION,
@@ -131,14 +145,37 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
 
 /// 切换文件日志收集等级：设置页保存后立即生效，无需重启。
 pub fn apply_log_level(level: LogLevel) {
-    if let Some(cell) = CURRENT_LEVEL.get() {
-        *cell.write() = level;
+    // 先重载再更新状态：重载失败时 CURRENT_LEVEL 仍指向实际生效的等级，
+    // watcher/清理任务不会按一个并不存在的等级工作。
+    match reload_file_logger(level) {
+        Ok(()) => {
+            if let Some(cell) = CURRENT_LEVEL.get() {
+                *cell.write() = level;
+            }
+            if level != LogLevel::Off {
+                if let Some(app) = APP_HANDLE.get() {
+                    ensure_file_log_watcher(app);
+                }
+            }
+        }
+        Err(err) => {
+            tracing::error!(error = %err, level = ?level, "切换文件日志等级失败");
+        }
     }
-    let _ = reload_file_logger(level);
 }
 
 pub fn reload_file_logger(level: LogLevel) -> anyhow::Result<()> {
     RELOAD_FN.get().context("RELOAD_FN未初始化")?(level)
+}
+
+/// 启动文件日志 watcher（只启动一次）。从 Off 切回其他等级时补启动。
+fn ensure_file_log_watcher(app: &AppHandle) {
+    if WATCHER_STARTED.get_or_init(|| std::sync::atomic::AtomicBool::new(false))
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    tauri::async_runtime::spawn(file_log_watcher(app.clone()));
 }
 
 /// 文件日志收集等级 → tracing `LevelFilter`；`Off` 对应无文件输出。
@@ -160,23 +197,23 @@ fn create_file_layer<S>(
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    // 关闭收集时返回占位用的sink layer，不创建也不输出日志文件
+    // 关闭收集时返回占位用的sink layer，不创建也不输出日志文件。
+    // 必须带上 OFF 过滤：全局 target 过滤放行 TRACE，否则每条 trace/debug 仍会
+    // 完整格式化（含时区转换）后再丢进 io::sink，关闭日志并不能省下 CPU。
     if level == LogLevel::Off {
         let sink_layer = layer()
             .with_writer(std::io::sink)
             .with_timer(LocalTime::rfc_3339())
             .with_ansi(false)
             .with_file(true)
-            .with_line_number(true);
+            .with_line_number(true)
+            .with_filter(LevelFilter::OFF);
         return Ok((Box::new(sink_layer), None));
     }
+    // 注意：这里不做日志清理。清理只发生在启动（init）、定时任务与用户手动清理时；
+    // 若放在这里，watcher 每次收到文件删除事件都会触发一次全量扫描并顺带删掉
+    // crash 报告等旧日志，用户在文件管理器删一个日志就会误伤其他诊断文件。
     let logs_dir = logs_dir(app).context("获取日志目录失败")?;
-    cleanup_managed_logs(
-        &logs_dir,
-        DEFAULT_LOG_RETENTION,
-        MAX_LOGS_TOTAL_SIZE,
-        TARGET_LOGS_TOTAL_SIZE,
-    );
     let file_appender = RollingFileAppender::builder()
         .filename_prefix(LOG_FILE_PREFIX)
         .filename_suffix("log")

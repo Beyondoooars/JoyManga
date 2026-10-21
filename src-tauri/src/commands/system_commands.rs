@@ -168,8 +168,6 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
 
     let storage = app.state::<ConfigStorage>();
     let defaults = Config::default(storage.base_dir());
-    let public_default =
-        PathBuf::from(crate::config::ANDROID_PUBLIC_LIBRARY_DIR.to_ascii_lowercase());
     app.get_download_manager()
         .with_idle_downloads(|| {
             let roots = [
@@ -178,13 +176,9 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
             ];
             let mut existing_roots = Vec::new();
             for (name, configured, expected) in roots {
-                if let Some(canonical) = validate_clear_root(
-                    name,
-                    configured,
-                    expected,
-                    storage.base_dir(),
-                    &public_default,
-                )? {
+                if let Some(canonical) =
+                    validate_clear_root(name, configured, expected, storage.base_dir())?
+                {
                     existing_roots.push((name, canonical));
                 }
             }
@@ -194,6 +188,10 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
                 {
                     let entry = entry?;
                     let path = entry.path();
+                    // 备份 JSON 与诊断日志也放在书库目录里，清空下载时不能把它们一并删掉
+                    if is_user_data_file(&entry.file_name().to_string_lossy()) {
+                        continue;
+                    }
                     if entry.file_type()?.is_dir() {
                         std::fs::remove_dir_all(&path)
                             .context(format!("删除{name}目录项`{}`失败", path.display()))?;
@@ -221,10 +219,11 @@ fn validate_clear_root(
     configured: &Path,
     expected: &Path,
     app_data_root: &Path,
-    public_default: &Path,
 ) -> anyhow::Result<Option<PathBuf>> {
     let is_default = configured == expected;
-    let is_public_default = configured.to_string_lossy().to_lowercase() == *public_default;
+    // 与 initialize_android_storage 共用同一判定（任意 /storage/<卷>/Download/JoyManga），
+    // 避免「初始化接受、清空拒绝」或反过来误删目录。
+    let is_public_default = crate::config::is_public_library_dir(configured);
     ensure!(
         is_default || is_public_default,
         "{name}目录是自定义路径；为保护目录中的其他文件，请只在应用默认书库目录使用批量清空"
@@ -237,11 +236,11 @@ fn validate_clear_root(
         "{name}目录是链接，拒绝批量清空"
     );
     let canonical = std::fs::canonicalize(configured).context(format!("规范化{name}目录失败"))?;
-    // 即使配置指向默认目录，也要确认落在预期位置内，避免异常配置清空到别处。
+    // 规范化后必须仍然指向同一语义的位置：否则祖先符号链接可能把清空引到别处。
     if is_public_default {
         ensure!(
-            canonical.starts_with("/storage/"),
-            "{name}目录不在公共存储内，拒绝清空"
+            crate::config::is_public_library_dir(&canonical),
+            "{name}目录解析后不是公共默认书库，拒绝清空"
         );
     } else {
         let canonical_root = std::fs::canonicalize(app_data_root)?;
@@ -258,6 +257,13 @@ fn validate_clear_root(
         );
     }
     Ok(Some(canonical))
+}
+
+/// 清空下载时要保留的用户数据：备份文件与导出的诊断日志与漫画无关。
+fn is_user_data_file(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    (lower.starts_with("joymanga_backup_") && lower.ends_with(".json"))
+        || (lower.starts_with(crate::logger::DIAGNOSTIC_LOG_PREFIX) && lower.ends_with(".txt"))
 }
 
 fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
@@ -443,11 +449,10 @@ mod tests {
         std::fs::create_dir_all(&custom).unwrap();
         let unrelated = custom.join("重要资料.txt");
         std::fs::write(&unrelated, b"keep").unwrap();
-        let public = PathBuf::from(crate::config::ANDROID_PUBLIC_LIBRARY_DIR.to_lowercase());
-        assert!(validate_clear_root("下载", &custom, &expected, &root, &public).is_err());
-        assert!(validate_clear_root("下载", &root, &expected, &root, &public).is_err());
+        assert!(validate_clear_root("下载", &custom, &expected, &root).is_err());
+        assert!(validate_clear_root("下载", &root, &expected, &root).is_err());
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
-        assert!(validate_clear_root("下载", &expected, &expected, &root, &public)
+        assert!(validate_clear_root("下载", &expected, &expected, &root)
             .unwrap()
             .is_some());
         std::fs::remove_dir_all(root).unwrap();
@@ -458,16 +463,47 @@ mod tests {
         let root = std::env::temp_dir().join(format!("jm-clear-pub-{}", uuid::Uuid::new_v4()));
         let expected = root.join("漫画下载");
         std::fs::create_dir_all(&expected).unwrap();
-        let public = PathBuf::from(crate::config::ANDROID_PUBLIC_LIBRARY_DIR.to_lowercase());
-        // 形似公共默认目录但不在 /storage 下：拒绝
+        // 形似公共默认目录但不在 /storage 下：拒绝（判定基于路径组件，不受大小写/尾随分隔符影响）
         let fake_public = root.join("download/joymanga");
         std::fs::create_dir_all(&fake_public).unwrap();
         let fake_public = std::fs::canonicalize(&fake_public).unwrap();
         assert!(
-            validate_clear_root("下载", &fake_public, &expected, &root, &public).is_err(),
+            validate_clear_root("下载", &fake_public, &expected, &root).is_err(),
             "不在 /storage 下的伪公共目录必须被拒绝"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_library_predicate_requires_the_exact_layout() {
+        let public = Path::new(crate::config::ANDROID_PUBLIC_LIBRARY_DIR);
+        assert!(crate::config::is_public_library_dir(public));
+        assert!(crate::config::is_public_library_dir(Path::new(
+            "/storage/1A2B-3C4D/Download/JoyManga"
+        )));
+        // 尾随分隔符不应影响判定
+        assert!(crate::config::is_public_library_dir(Path::new(
+            "/storage/emulated/0/Download/JoyManga/"
+        )));
+        // 字符串后缀匹配会误判的路径
+        assert!(!crate::config::is_public_library_dir(Path::new(
+            "/storage/emulated/0/NotDownload/JoyManga"
+        )));
+        assert!(!crate::config::is_public_library_dir(Path::new(
+            "/data/media/0/Download/JoyManga"
+        )));
+        assert!(!crate::config::is_public_library_dir(Path::new(
+            "/storage/emulated/0/Download"
+        )));
+    }
+
+    #[test]
+    fn clear_all_preserves_backups_and_diagnostic_logs() {
+        assert!(is_user_data_file("joymanga_backup_1700000000.json"));
+        assert!(is_user_data_file("joymanga-log-1700000000.txt"));
+        assert!(!is_user_data_file("0001.jpg"));
+        assert!(!is_user_data_file("some_comic [JM123].cbz"));
+        assert!(!is_user_data_file("元数据.json"));
     }
 
     #[test]
