@@ -16,6 +16,8 @@ declare global {
       setVolumeKeyPaging(enabled: boolean): void
       downloadsPath(): string
       hasAllFilesAccess(): boolean
+      supportsPublicStorage(): boolean
+      canWritePublicDownloads(): boolean
       requestAllFilesAccess(): void
     }
   }
@@ -61,14 +63,49 @@ export function downloadsPath() {
   return window.JmAndroid?.downloadsPath() ?? ''
 }
 
-/** 是否已持有「所有文件访问」权限；桥不可用时视为未授权。 */
+/** 是否已持有「所有文件访问」权限；桥不可用或调用异常时视为未授权。 */
 export function hasAllFilesAccess() {
-  return window.JmAndroid?.hasAllFilesAccess() ?? false
+  try {
+    return window.JmAndroid?.hasAllFilesAccess() ?? false
+  } catch (error) {
+    console.error('读取公共存储权限失败', error)
+    return false
+  }
+}
+
+/** 当前系统是否支持公共下载书库（Android 10 上不可用，应直接使用应用专用目录）。 */
+export function supportsPublicStorage() {
+  try {
+    return window.JmAndroid?.supportsPublicStorage() ?? false
+  } catch (error) {
+    console.error('读取公共存储支持状态失败', error)
+    return false
+  }
+}
+
+/** 公共下载目录当前是否可写；写探测失败时前端退回应用专用目录。 */
+export function canWritePublicDownloads() {
+  try {
+    return window.JmAndroid?.canWritePublicDownloads() ?? false
+  } catch (error) {
+    console.error('检测公共下载目录可写性失败', error)
+    return false
+  }
 }
 
 /** 跳转到系统设置申请「所有文件访问」权限（结果由用户在系统页决定）。 */
 export function requestAllFilesAccess() {
   window.JmAndroid?.requestAllFilesAccess()
+}
+
+/** 监听运行时权限结果（API 29 以下的存储授权没有可见性变化事件）。返回取消监听的函数。 */
+export function onPermissionResult(listener: (granted: boolean) => void): () => void {
+  const handler = (event: Event) => {
+    const detail = (event as CustomEvent<{ request?: string; granted?: boolean }>).detail
+    if (detail?.request === 'storage') listener(detail.granted === true)
+  }
+  window.addEventListener('jm-permission-result', handler)
+  return () => window.removeEventListener('jm-permission-result', handler)
 }
 
 /**

@@ -535,6 +535,9 @@ pub fn cbz_filename(
 
 /// 收集章节目录中的有效页面：按自然序排序，并按文件主名去重
 /// （同一页可能残留不同扩展名的旧文件）。
+///
+/// 同一页有多个扩展名时保留**最近写入**的那个：断点续传的 `find_existing_page`
+/// 也按同样规则挑选可解码的文件，两边保持一致，避免阅读/导出拿到旧的坏页。
 pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut image_paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("读取章节目录`{}`失败", dir.display()))?
@@ -543,14 +546,35 @@ pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         .filter(|path| path.is_img() && path.is_file())
         .collect();
 
-    image_paths.sort_by(|a, b| {
-        let name_a = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let name_b = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        natural_cmp(name_a, name_b)
-    });
-    let mut page_numbers = std::collections::HashSet::new();
-    image_paths.retain(|path| page_numbers.insert(path.file_stem().unwrap_or_default().to_owned()));
-    Ok(image_paths)
+    let name_of = |path: &Path| -> String {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    image_paths.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
+
+    // 先按自然序排好，再逐页挑最近修改的文件；最终结果仍按自然序输出。
+    let mut newest_by_stem: HashMap<std::ffi::OsString, (PathBuf, std::time::SystemTime)> =
+        HashMap::new();
+    for path in image_paths {
+        let modified = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let stem = path.file_stem().unwrap_or_default().to_owned();
+        match newest_by_stem.get(&stem) {
+            Some((_, existing)) if *existing >= modified => {}
+            _ => {
+                newest_by_stem.insert(stem, (path, modified));
+            }
+        }
+    }
+    let mut pages: Vec<PathBuf> = newest_by_stem
+        .into_values()
+        .map(|(path, _)| path)
+        .collect();
+    pages.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
+    Ok(pages)
 }
 
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -631,6 +655,26 @@ mod tests {
                 "page10.jpg"
             ]
         );
+    }
+
+    #[test]
+    fn collect_page_images_prefers_newest_file_for_duplicate_stems() {
+        let sandbox = TestDir::new();
+        let dir = sandbox.path().join("chapter");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧实现按自然序保留 jpg；断点续传补下的 webp 才是可用页
+        std::fs::write(dir.join("0001.jpg"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("0001.webp"), b"new").unwrap();
+        std::fs::write(dir.join("0002.jpg"), b"page2").unwrap();
+        std::fs::write(dir.join("0010.jpg"), b"page10").unwrap();
+
+        let pages = super::collect_page_images(&dir).unwrap();
+        let names: Vec<_> = pages
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["0001.webp", "0002.jpg", "0010.jpg"]);
     }
 
     #[test]

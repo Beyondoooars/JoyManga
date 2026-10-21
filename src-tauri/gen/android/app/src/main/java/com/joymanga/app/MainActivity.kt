@@ -148,6 +148,17 @@ class MainActivity : TauriActivity() {
         catch (error: Exception) { pendingPicker = null; result(picker.id, error = error.message ?: "无法打开系统文件选择器") }
     }
 
+    /** 运行时权限结果回传：API 29 以下的存储授权没有可见性变化事件，前端靠这个事件完成引导。 */
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 102) return
+        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        runOnUiThread {
+            appWebView?.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('jm-permission-result', {detail:{request:'storage',granted:$granted}}))", null)
+        }
+    }
+
     @Deprecated("Compatible document picker result")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -265,14 +276,24 @@ class MainActivity : TauriActivity() {
 
     private fun exportFiles(path: File): List<File> {
         val canonical = path.canonicalFile
-        val allowed = listOfNotNull(filesDir, getExternalFilesDir(null)).map { it.canonicalFile }
-        require(allowed.any { canonical.path == it.path || canonical.path.startsWith(it.path + File.separator) }) { "请先将文件导出到应用专用目录" }
+        // 书库可能是应用专用目录、公共 Download/JoyManga，或用户通过目录选择器挑的
+        // 其他公共目录；三者都允许导出（无存储权限时公共路径的读取会自然失败）。
+        // 只发布 cbz/json/txt，避免把目录里的其他文件一起复制出去。
+        val allowed = listOfNotNull(filesDir, getExternalFilesDir(null), Environment.getExternalStorageDirectory()).map { it.canonicalFile }
+        require(allowed.any { canonical.path == it.path || canonical.path.startsWith(it.path + File.separator) }) { "请先将文件导出到应用专用目录或公共存储" }
         val files = if (canonical.isFile) listOf(canonical) else canonical.walkTopDown().filter { it.isFile }.take(1001).toList()
         require(files.size <= 1000) { "单次最多导出 1000 个文件" }
-        return files.filter { file -> listOf("cbz", "json").contains(file.extension.lowercase()) }
+        return files.filter { file -> listOf("cbz", "json", "txt").contains(file.extension.lowercase()) }
     }
 
-    private fun mime(file: File) = when (file.extension.lowercase()) { "json" -> "application/json"; else -> "application/zip" }
+    private fun publicLibraryRoot() =
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JoyManga")
+
+    private fun mime(file: File) = when (file.extension.lowercase()) {
+        "json" -> "application/json"
+        "txt" -> "text/plain"
+        else -> "application/zip"
+    }
 
     private fun publishDownloads(path: File): Int {
         val files = exportFiles(path)
@@ -335,21 +356,43 @@ class MainActivity : TauriActivity() {
     inner class AndroidBridge {
         @JavascriptInterface fun libraryPath(): String = libraryRoot().absolutePath
         /** 公共下载目录下的默认书库：文件管理器直接可见，卸载应用不随之删除。 */
-        @JavascriptInterface fun downloadsPath(): String =
-            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JoyManga").absolutePath
-        /** 是否已具备公共存储写权限：API 29+ 看「所有文件访问」，更老版本看 WRITE_EXTERNAL_STORAGE 运行时权限。 */
+        @JavascriptInterface fun downloadsPath(): String = publicLibraryRoot().absolutePath
+        /** 是否已具备公共存储写权限：API 30+ 看「所有文件访问」，API 29 无可用方案，更老版本看运行时权限。 */
         @JavascriptInterface fun hasAllFilesAccess(): Boolean =
-            if (Build.VERSION.SDK_INT >= 29) Environment.isExternalStorageManager()
-            else checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        /** 跳系统页授予「所有文件访问」；API 29 以下弹运行时权限对话框（结果由系统处理，无需回传）。 */
+            when {
+                // isExternalStorageManager 是 API 30 新增，API 29 调用会抛 NoSuchMethodError
+                Build.VERSION.SDK_INT >= 30 -> Environment.isExternalStorageManager()
+                Build.VERSION.SDK_INT < 29 -> checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                // Android 10 既没有 MANAGE_EXTERNAL_STORAGE，WRITE_EXTERNAL_STORAGE 又被 maxSdkVersion=28 屏蔽
+                else -> false
+            }
+        /** 当前系统是否支持把书库放到公共下载目录（Android 10 上不可用）。 */
+        @JavascriptInterface fun supportsPublicStorage(): Boolean =
+            Build.VERSION.SDK_INT >= 30 || Build.VERSION.SDK_INT < 29
+        /** 跳系统页授予「所有文件访问」；API 29 以下弹运行时权限对话框（结果经 jm-permission-result 回传）。 */
         @JavascriptInterface fun requestAllFilesAccess() {
-            if (Build.VERSION.SDK_INT >= 29) {
-                try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
-                catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Exception) {} }
-            } else {
-                runOnUiThread { requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 102) }
+            runOnUiThread {
+                when {
+                    Build.VERSION.SDK_INT >= 30 -> {
+                        try { startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))) }
+                        catch (_: Exception) { try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Exception) {} }
+                    }
+                    Build.VERSION.SDK_INT < 29 -> requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 102)
+                    // API 29：没有任何可授予的公共存储权限，前端已隐藏该选项
+                }
             }
         }
+        /** 公共下载目录是否可写（写探测失败时前端退回应用专用目录，避免初始化失败锁死）。 */
+        @JavascriptInterface fun canWritePublicDownloads(): Boolean = try {
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "JoyManga")
+            if (!dir.exists() && !dir.mkdirs()) false
+            else {
+                val probe = File(dir, ".write_test_${UUID.randomUUID()}")
+                probe.writeText("test")
+                probe.delete()
+                true
+            }
+        } catch (_: Exception) { false }
         @JavascriptInterface fun exitApp() { runOnUiThread { moveTaskToBack(true) } }
         @JavascriptInterface fun pickDocuments(id: String, mode: String) {
             if (!validId(id)) return

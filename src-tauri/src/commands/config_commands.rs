@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(target_os = "android")]
+use std::path::{Component, Path};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
@@ -10,6 +12,24 @@ use crate::download_queue::{DownloadQueue, DownloadSettings, StoredDownload};
 use crate::errors::{CommandError, CommandResult};
 use crate::extensions::AppHandleExt;
 use crate::utils;
+
+/// 纯词法折叠 `..`/`.`（不解析符号链接），用于尚未创建的路径。
+#[cfg(target_os = "android")]
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component);
+                }
+            }
+            Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -69,17 +89,26 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
 pub fn initialize_android_storage(app: AppHandle, library_dir: String) -> CommandResult<Config> {
     #[cfg(target_os = "android")]
     {
-        let candidate = PathBuf::from(library_dir);
-        let internal = app.state::<ConfigStorage>().base_dir().join("library");
+        // 先做词法规范化再判定：`/storage/…/Download/../Documents/Download/JoyManga`
+        // 这类路径不能因为字符串后缀通过校验。目录可能尚不存在，不能用 canonicalize
+        // （它会解析到挂载命名空间路径，导致存储下来的书库路径与桥接层不一致）。
+        let raw = PathBuf::from(&library_dir);
+        if !raw.is_absolute() {
+            return Err(CommandError::from(
+                "初始化书库失败",
+                anyhow!("应用书库路径无效"),
+            ));
+        }
+        let candidate = normalize_path(&raw);
+        let internal = normalize_path(&app.state::<ConfigStorage>().base_dir().join("library"));
         let suffix = PathBuf::from("Android")
             .join("data")
             .join(&app.config().identifier)
             .join("files")
             .join("library");
-        if !candidate.is_absolute()
-            || (candidate != internal
-                && !candidate.ends_with(suffix)
-                && !crate::config::is_public_library_dir(&candidate))
+        if candidate != internal
+            && !candidate.ends_with(&suffix)
+            && !crate::config::is_public_library_dir(&candidate)
         {
             return Err(CommandError::from(
                 "初始化书库失败",
