@@ -48,6 +48,38 @@ export function currentPageFromVisiblePages(
 }
 
 /**
+ * 滚动模式下按视口状态决定当前页。
+ *
+ * 常规取「最靠上的可见页」；滚到章节末尾时改取最后一页——最后几页常常不足一屏、
+ * 贴不到顶部，按最靠上判断会让读到底的进度停在倒数第二页，章节永远显示读不完。
+ */
+export function currentPageFromViewport(
+  visible: Array<{ page: number; top: number }>,
+  atEnd: boolean,
+): number | null {
+  if (atEnd && visible.length > 0) {
+    return visible.reduce((last, item) => (item.page > last.page ? item : last)).page
+  }
+  return currentPageFromVisiblePages(visible)
+}
+
+/**
+ * 轻点判定：位移与时长都在阈值内才算一次 tap。
+ *
+ * 滚动模式下 `click` 在手指轻微移动后照样会派发（想滚动却只挪了几像素），
+ * 直接用它切换 HUD 会频繁误触；按触点的真实位移过滤掉这类「假点击」。
+ */
+export function isTapGesture(
+  start: { x: number; y: number; time: number },
+  end: { x: number; y: number; time: number },
+  slopPx = 10,
+  maxMs = 700,
+): boolean {
+  if (end.time - start.time > maxMs) return false
+  return Math.hypot(end.x - start.x, end.y - start.y) <= slopPx
+}
+
+/**
  * 键盘映射。左右方向键与点击区一致（左退右进），不随阅读方向翻转；
  * 空格/PageDown/PageUp 表示"往后读/往前读"（与桌面阅读器的通行习惯一致）。
  */

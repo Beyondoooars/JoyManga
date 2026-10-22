@@ -1,8 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  currentPageFromViewport,
   currentPageFromVisiblePages,
   isRtl,
+  isTapGesture,
   pageActionForHorizontalGesture,
   pageActionForTapZone,
   pageActionForKey,
@@ -42,6 +44,29 @@ test('keyboard mirrors tap zones, space/paging keys stay direction-independent',
   // 无关按键返回 null，避免误吞其他快捷键
   assert.equal(pageActionForKey('Escape'), null)
   assert.equal(pageActionForKey('f'), null)
+})
+
+test('scroll mode treats the last page as current once the end is reached', () => {
+  // 末尾几页不足一屏：按最靠上会停在倒数第二页，读完了也显示没读完
+  const visible = [
+    { page: 4, top: -300 },
+    { page: 5, top: 200 },
+  ]
+  assert.equal(currentPageFromViewport(visible, false), 4)
+  assert.equal(currentPageFromViewport(visible, true), 5)
+  // 没有可见页时仍返回 null，不要凭空造一个页码
+  assert.equal(currentPageFromViewport([], true), null)
+})
+
+test('tap detection ignores drags and long presses', () => {
+  const start = { x: 100, y: 200, time: 0 }
+  // 原地轻点：算一次 tap
+  assert.equal(isTapGesture(start, { x: 103, y: 204, time: 120 }), true)
+  // 位移超过容差（想滚动却只挪了一点）：不是 tap
+  assert.equal(isTapGesture(start, { x: 140, y: 200, time: 200 }), false)
+  assert.equal(isTapGesture(start, { x: 100, y: 240, time: 200 }), false)
+  // 按住不放：不是 tap
+  assert.equal(isTapGesture(start, { x: 100, y: 200, time: 1500 }), false)
 })
 
 test('scroll mode picks the topmost visible page as current', () => {
