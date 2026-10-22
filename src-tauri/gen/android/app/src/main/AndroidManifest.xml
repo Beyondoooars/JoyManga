@@ -14,6 +14,11 @@
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
 
+    <!-- hasFragileUserData=false：卸载时不弹「是否保留应用数据」。设为 true 会让用户
+         选择保留配置、日志与封面缓存，与「卸载即清理本机数据」的预期相反。
+         设为 false 后，系统在卸载时直接删除 /data/data/<pkg> 与
+         Android/data/<pkg>，不需要任何应用代码参与；公共下载目录
+         Download/JoyManga 里的漫画不在此列，会保留下来。 -->
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -21,7 +26,7 @@
         android:theme="@style/Theme.joymanga"
         android:usesCleartextTraffic="${usesCleartextTraffic}"
         android:allowBackup="false"
-        android:hasFragileUserData="true">
+        android:hasFragileUserData="false">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"

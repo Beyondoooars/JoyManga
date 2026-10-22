@@ -686,45 +686,77 @@ class MainActivity : TauriActivity() {
             return
         }
         try {
-            val installer = packageManager.packageInstaller
-            val params = android.content.pm.PackageInstaller.SessionParams(
-                android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL,
-            ).apply {
-                // 目标包名写进会话参数，安装器据此识别这是「更新同包」而非新装，
-                // 也是桌面能正确复用原图标条目的前提。
-                setAppPackageName(packageName)
+            commitInstallSession(apk)
+            emitUpdateEvent("installer", message = "请在系统弹窗中确认安装")
+            scheduleUpdateApkCleanup(apk)
+        } catch (error: Exception) {
+            // 各 ROM 对 PackageInstaller 的限制不一致（部分定制系统禁用第三方 session、
+            // 或要求额外权限）。会话这条路失败时回退到 ACTION_VIEW，保证任何机型都装得上。
+            android.util.Log.w("JoyManga", "PackageInstaller 会话提交失败，回退到系统安装器", error)
+            try {
+                fallbackInstallViaIntent(apk)
+                emitUpdateEvent("installer", message = "请在系统安装器中确认安装")
+                scheduleUpdateApkCleanup(apk)
+            } catch (fallbackError: Exception) {
+                emitUpdateEvent("error", message = "无法启动安装：${fallbackError.message ?: "未知错误"}")
             }
-            val sessionId = installer.createSession(params)
-            installer.openSession(sessionId).use { session ->
-                apk.inputStream().use { input ->
-                    session.openWrite("base.apk", 0, apk.length()).use { output ->
-                        input.copyTo(output)
-                        // 必须 fsync：只写不刷会把截断的 APK 交给安装器，安装直接失败
-                        session.fsync(output)
-                    }
-                }
-                // 结果通过 PendingIntent 回传。用显式 Intent 指向本进程的广播接收器，
-                // 不注册清单项，避免导出组件被其他应用伪造安装结果。
-                val resultIntent = Intent(UPDATE_INSTALL_ACTION).setPackage(packageName)
-                val flags = if (Build.VERSION.SDK_INT >= 31) {
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-                } else {
-                    PendingIntent.FLAG_UPDATE_CURRENT
-                }
-                val pending = PendingIntent.getBroadcast(this, sessionId, resultIntent, flags)
-                session.commit(pending.intentSender)
-            }
-            updateInstallReceiverRegistered = true
+        }
+    }
+
+    /**
+     * 用 PackageInstaller 会话提交安装。
+     *
+     * 成功返回时会话已提交，结果稍后由 [updateInstallReceiver] 回传；
+     * 抛出异常表示这台设备不支持该路径，调用方应回退。
+     */
+    private fun commitInstallSession(apk: File) {
+        val installer = packageManager.packageInstaller
+        val params = android.content.pm.PackageInstaller.SessionParams(
+            android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL,
+        ).apply {
+            // 目标包名写进会话参数，安装器据此识别这是「更新同包」而非新装，
+            // 也是桌面能正确复用原图标条目的前提。
+            setAppPackageName(packageName)
+        }
+        val sessionId = installer.createSession(params)
+        // 结果通过 PendingIntent 回传。用显式 Intent 指向本进程的广播接收器，
+        // 不注册清单项，避免导出组件被其他应用伪造安装结果。
+        // 接收器必须在 commit 之前注册：会话结果可能立刻回传，晚注册会漏掉
+        // STATUS_PENDING_USER_ACTION，用户就永远看不到确认弹窗。
+        val resultIntent = Intent(UPDATE_INSTALL_ACTION).setPackage(packageName)
+        val flags = if (Build.VERSION.SDK_INT >= 31) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT
+        }
+        val pending = PendingIntent.getBroadcast(this, sessionId, resultIntent, flags)
+        if (!updateInstallReceiverRegistered) {
             registerReceiver(
                 updateInstallReceiver,
                 IntentFilter(UPDATE_INSTALL_ACTION),
                 if (Build.VERSION.SDK_INT >= 33) Context.RECEIVER_NOT_EXPORTED else 0,
             )
-            emitUpdateEvent("installer", message = "请在系统弹窗中确认安装")
-            scheduleUpdateApkCleanup(apk)
-        } catch (error: Exception) {
-            emitUpdateEvent("error", message = "无法启动安装：${error.message ?: "未知错误"}")
+            updateInstallReceiverRegistered = true
         }
+        installer.openSession(sessionId).use { session ->
+            apk.inputStream().use { input ->
+                session.openWrite("base.apk", 0, apk.length()).use { output ->
+                    input.copyTo(output)
+                    // 必须 fsync：只写不刷会把截断的 APK 交给安装器，安装直接失败
+                    session.fsync(output)
+                }
+            }
+            session.commit(pending.intentSender)
+        }
+    }
+
+    /** 回退路径：把 APK 经 FileProvider 授权后交给系统安装器 Activity。 */
+    private fun fallbackInstallViaIntent(apk: File) {
+        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
+        startActivity(Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
     }
 
     /** PackageInstaller 的会话结果回调；注册在 installApk 里，销毁时注销。 */
