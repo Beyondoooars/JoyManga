@@ -28,9 +28,8 @@ class MainActivity : TauriActivity() {
     private var appWebView: WebView? = null
     private var pendingPicker: Picker? = null
     private val worker = Executors.newSingleThreadExecutor()
-    // 更新包下载单独占一个线程：大文件下载耗时可能很久，不能挡住导入/导出的暂存清理。
+    // 安装包的清理/删除单独占一个线程：大文件删除偶尔要等文件系统，不能挡住导入导出的暂存清理。
     private val updateWorker = Executors.newSingleThreadExecutor()
-    @Volatile private var updateDownloading = false
     private var visible = false
     private var activeDownloads = 0
     private val handler = Handler(Looper.getMainLooper())
@@ -87,6 +86,9 @@ class MainActivity : TauriActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleViewIntent(intent)
+        // 点「安装包已下载完成」通知回来时 Activity 可能已经在前台（没有 onStart），
+        // 这里补一次；待安装包取走后就不会再重复拉起安装器。
+        installPendingUpdate()
     }
 
     override fun onWebViewCreate(webView: WebView) {
@@ -121,7 +123,7 @@ class MainActivity : TauriActivity() {
         val requestId = UUID.randomUUID().toString()
         worker.execute {
             try {
-                val name = safeName(documentName(uri))
+                val name = safeFileName(documentName(uri))
                 require(name.endsWith(".cbz", ignoreCase = true)) { "只支持打开 CBZ 文件" }
                 // 外部打开的漫画可能很大，cacheDir 在存储紧张时会被系统清理，
                 // 放到 filesDir 下的专门目录，导入完成后由前端调 discardImports 删除。
@@ -175,12 +177,17 @@ class MainActivity : TauriActivity() {
         super.onStart()
         visible = true
         AppState.activity = this
+        AppState.foreground = true
         updateDownloadService()
         pushMetered(getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered)
+        installPendingUpdate()
     }
     override fun onStop() {
         visible = false
-        if (AppState.activity === this) AppState.activity = null
+        AppState.foreground = false
+        // 服务要能继续把「取消当前」转发给前端，所以不在这里清 activity；
+        // 是否允许拉起界面改由 AppState.foreground 判断（后台不能 startActivity）。
+        // 界面真正销毁时在 onDestroy 里清空。
         // 不要在这里清 KEEP_SCREEN_ON：窗口标志只在窗口可见时生效，不可见时本来就不会
         // 阻止息屏；清掉后前端不会再设置（watcher 只在配置/阅读状态变化时触发），
         // 用户切出去一次再回来，本次阅读就一直会息屏。
@@ -199,6 +206,8 @@ class MainActivity : TauriActivity() {
         }
         worker.shutdownNow()
         updateWorker.shutdownNow()
+        if (AppState.activity === this) AppState.activity = null
+        AppState.foreground = false
         super.onDestroy()
     }
 
@@ -291,12 +300,12 @@ class MainActivity : TauriActivity() {
                 val paths = if (picker.mode == "directory") {
                     val source = uris.first()
                     val root = DocumentsContract.buildDocumentUriUsingTree(source, DocumentsContract.getTreeDocumentId(source))
-                    val target = File(staging, safeName(documentName(root))).apply { mkdirs() }
+                    val target = File(staging, safeFileName(documentName(root))).apply { mkdirs() }
                     val counter = intArrayOf(0)
                     copyTree(source, root, target, 0, counter)
                     listOf(target.absolutePath)
                 } else uris.map { uri ->
-                    val name = safeName(documentName(uri))
+                    val name = safeFileName(documentName(uri))
                     val expected = if (picker.mode == "backup") ".json" else ".cbz"
                     require(name.endsWith(expected, ignoreCase = true)) { "请选择 $expected 文件" }
                     val target = uniqueFile(staging, name)
@@ -315,25 +324,6 @@ class MainActivity : TauriActivity() {
         if (it.moveToFirst()) it.getString(0) ?: "file" else "file"
     } ?: "file"
 
-    private fun safeName(name: String): String {
-        val clean = name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "file" }
-        if (clean == "." || clean == "..") return "file"
-        val extension = clean.substringAfterLast('.', "").lowercase()
-        val suffix = if (extension in listOf("cbz", "json", "jpg", "jpeg", "png", "webp")) ".$extension" else ""
-        val stem = if (suffix.isEmpty()) clean else clean.dropLast(extension.length + 1)
-        val result = StringBuilder()
-        var bytes = 0
-        var index = 0
-        val limit = 180 - suffix.toByteArray(Charsets.UTF_8).size
-        while (index < stem.length) {
-            val point = stem.codePointAt(index)
-            val piece = String(Character.toChars(point))
-            val count = piece.toByteArray(Charsets.UTF_8).size
-            if (bytes + count > limit) break
-            result.append(piece); bytes += count; index += Character.charCount(point)
-        }
-        return result.toString().ifBlank { "file" } + suffix
-    }
     private fun uniqueFile(parent: File, name: String): File {
         var file = File(parent, name)
         if (file.exists()) file = File(parent, UUID.randomUUID().toString().take(8) + "-" + name)
@@ -369,7 +359,7 @@ class MainActivity : TauriActivity() {
             while (cursor.moveToNext()) {
                 require(++counter[0] <= 10000) { "目录中文件过多" }
                 val uri = DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(0))
-                val name = safeName(cursor.getString(1) ?: "file")
+                val name = safeFileName(cursor.getString(1) ?: "file")
                 val type = cursor.getString(2)
                 if (type == DocumentsContract.Document.MIME_TYPE_DIR) {
                     val directory = uniqueFile(target, name).apply { mkdirs() }
@@ -448,17 +438,29 @@ class MainActivity : TauriActivity() {
             .putExtra("current", downloadPagesCurrent)
             .putExtra("total", downloadPagesTotal)
         try {
-            if (visible) {
+            // 按 Android 的定义，持有前台服务的应用算「前台」，可以继续给它发 start；
+            // 只有「没有可见界面、也没有前台服务在跑」时才不能 startForegroundService。
+            if (visible || AppState.downloadServiceRunning) {
                 if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
             } else {
-                // 已运行服务可接收更新；不能从后台创建新的前台服务。
-                getSystemService(NotificationManager::class.java).notify(DownloadService.ID,
-                    (if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, DownloadService.CHANNEL) else Notification.Builder(this))
-                        .setSmallIcon(android.R.drawable.stat_sys_download).setContentTitle("正在下载 $activeDownloads 个章节")
-                        .setContentText(downloadSpeed).setOngoing(true).setOnlyAlertOnce(true)
-                        .setContentIntent(android.app.PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)).build())
+                notifyRunningInBackground()
             }
-        } catch (error: Exception) { android.util.Log.w("JoyManga", "下载前台服务启动失败", error) }
+        } catch (error: Exception) {
+            android.util.Log.w("JoyManga", "下载前台服务启动失败", error)
+            // 前台服务被系统拒绝时至少要有一条通知，否则下载在后台静默进行，用户毫无感知
+            try { notifyRunningInBackground() } catch (_: Exception) {}
+        }
+    }
+
+    /** 不能起前台服务时的退路：只更新通知。已运行的服务会接收更新，不会新建服务。 */
+    private fun notifyRunningInBackground() {
+        // 服务可能从未成功创建过，渠道得在这里自己补上；否则 API 26+ 上通知会被静默丢弃
+        DownloadService.ensureChannel(this)
+        getSystemService(NotificationManager::class.java).notify(DownloadService.ID,
+            (if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, DownloadService.CHANNEL) else Notification.Builder(this))
+                .setSmallIcon(android.R.drawable.stat_sys_download).setContentTitle("正在下载 $activeDownloads 个章节")
+                .setContentText(downloadSpeed).setOngoing(true).setOnlyAlertOnce(true)
+                .setContentIntent(android.app.PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE)).build())
     }
 
     /**
@@ -557,59 +559,37 @@ class MainActivity : TauriActivity() {
                 }
                 return
             }
-            if (updateDownloading) { emitUpdateEvent("error", message = "安装包正在下载中"); return }
-            updateDownloading = true
-            updateWorker.execute {
-                try {
-                    val safeName = safeName(fileName).ifBlank { "update.apk" }.let {
-                        if (it.endsWith(".apk", ignoreCase = true)) it else "$it.apk"
-                    }
-                    val dir = File(cacheDir, "updates").apply { mkdirs() }
-                    // 只清理旧安装包：系统安装器可能还在读取上一次下载的文件
-                    dir.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000 }?.forEach { it.delete() }
-                    val target = File(dir, safeName)
-                    val part = File(dir, ".part-$safeName")
-                    val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-                    try {
-                        connection.connectTimeout = 15_000
-                        connection.readTimeout = 30_000
-                        connection.instanceFollowRedirects = true
-                        // GitHub 对缺少 UA 的请求可能直接返回 403
-                        connection.setRequestProperty("User-Agent", "JoyManga-Android")
-                        connection.connect()
-                        require(connection.responseCode in 200..299) { "下载失败（HTTP ${connection.responseCode}）" }
-                        val total = connection.contentLengthLong
-                        connection.inputStream.use { input ->
-                            FileOutputStream(part).use { output ->
-                                val buffer = ByteArray(128 * 1024)
-                                var copied = 0L
-                                var lastReport = 0L
-                                val step = (total / 100).coerceAtLeast(64 * 1024)
-                                while (true) {
-                                    val count = input.read(buffer)
-                                    if (count < 0) break
-                                    output.write(buffer, 0, count)
-                                    copied += count
-                                    if (total > 0 && copied - lastReport >= step) {
-                                        lastReport = copied
-                                        emitUpdateEvent("progress", percent = (copied * 100 / total).toInt().coerceIn(0, 99))
-                                    }
-                                }
-                                output.fd.sync()
-                            }
-                        }
-                    } finally {
-                        connection.disconnect()
-                    }
-                    require(part.length() > 0) { "下载的安装包为空" }
-                    require(part.renameTo(target)) { "无法保存安装包" }
-                    emitUpdateEvent("done", percent = 100)
-                    runOnUiThread { installApk(target) }
-                } catch (error: Exception) {
-                    emitUpdateEvent("error", message = error.message ?: "下载更新失败")
-                } finally {
-                    updateDownloading = false
-                }
+            // 下载放在前台服务里：应用切到后台后，Activity 里的普通线程没有前台服务
+            // 保护，进程随时会被回收；Activity 销毁时还会被 shutdownNow() 直接打断。
+            // 服务内部对重复点击做了去重，这里不再需要 updateDownloading 标志。
+            val intent = Intent(this@MainActivity, UpdateDownloadService::class.java)
+                .putExtra(UpdateDownloadService.EXTRA_URL, url)
+                .putExtra(UpdateDownloadService.EXTRA_FILE, fileName)
+            try {
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            } catch (error: Exception) {
+                android.util.Log.w("JoyManga", "更新下载服务启动失败", error)
+                emitUpdateEvent("error", message = "无法开始下载更新：${error.message ?: "未知错误"}")
+            }
+        }
+        /**
+         * 界面重新可见时取一次更新下载的实时状态。
+         *
+         * 下载在服务里进行，期间 WebView 可能被暂停或重建，错过 `jm-update-progress`
+         * 事件；前端每次回到前台都主动拉一次，界面就不会停在「未开始」或旧进度上。
+         */
+        @JavascriptInterface fun updateDownloadState() {
+            if (UpdateDownloadService.isRunning()) {
+                emitUpdateEvent("progress", percent = UpdateDownloadService.progress())
+                return
+            }
+            // 后台期间下载已经结束：把结局补发给界面。否则回来后会一直停在
+            // 「下载中 x%」或「安装包正在下载」上，按钮再也点不动。
+            val outcome = UpdateDownloadService.takeOutcome()
+            if (outcome != null) {
+                emitUpdateEvent(outcome.first, percent = if (outcome.first == "installer") 100 else -1, message = outcome.second)
+            } else {
+                emitUpdateEvent("idle")
             }
         }
         @JavascriptInterface fun pickDocuments(id: String, mode: String) {
@@ -648,6 +628,10 @@ class MainActivity : TauriActivity() {
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
                 }
                 scheduleDownloadServiceUpdate()
+                // 开始下载的这一刻就要把前台服务拉起来：合并窗口只有 750ms，但用户完全可能
+                // 点完下载立刻切到后台，而 Android 不允许后台应用新建前台服务——那之后整个
+                // 下载都只是普通后台进程，被系统回收就断了。
+                if (activeDownloads > 0 && !wasActive) updateDownloadService()
                 // 服务停止后前台通知随之消失，这里补一条完成通知，避免用户不知道已经下完。
                 if (wasActive && activeDownloads == 0) notifyDownloadsFinished()
             }
@@ -684,6 +668,32 @@ class MainActivity : TauriActivity() {
             runOnUiThread { volumeKeyPaging = enabled }
         }
     }
+    /**
+     * 供 [UpdateDownloadService] 调用：应用在前台时下载完成，直接拉起安装器。
+     *
+     * 服务已经确认过安装未知应用的权限，这里不必重复通知前端「permission」，
+     * 但权限可能在下载期间被用户关掉，所以仍保留 [installApk] 里的检查。
+     */
+    internal fun installDownloadedUpdate(apk: File) {
+        runOnUiThread { installApk(apk) }
+    }
+
+    /**
+     * 后台下载完成、用户点通知或重新打开应用时，把待安装的安装包交给系统安装器。
+     *
+     * 只在界面可见时调用：Android 10+ 后台应用 `startActivity` 会被系统忽略。
+     */
+    private fun installPendingUpdate() {
+        // 待安装记录可能来自上一次进程（下载完成后应用被系统回收）：只在界面可见、
+        // 且下载服务当前没有任务时才弹出，避免刚冷启动就弹安装器。
+        // onNewIntent 也可能先于 onStart 到达，此时后台起 Activity 会被系统拒绝，
+        // 交给紧接着的 onStart 处理。
+        if (!visible || UpdateDownloadService.isRunning()) return
+        val apk = UpdateDownloadService.takePendingInstall(this) ?: return
+        UpdateDownloadService.clearReadyNotification(this)
+        installDownloadedUpdate(apk)
+    }
+
     /**
      * 把下载好的 APK 交给系统安装。
      *
@@ -840,15 +850,8 @@ class MainActivity : TauriActivity() {
     }
 
     /** 更新流程进度/结果回传前端；事件名与 `src/utils/androidStorage.ts` 的订阅保持一致。 */
-    private fun emitUpdateEvent(state: String, percent: Int = -1, message: String = "") {
-        val payload = JSONObject().put("state", state)
-        if (percent >= 0) payload.put("percent", percent)
-        if (message.isNotEmpty()) payload.put("message", message)
-        runOnUiThread {
-            appWebView?.evaluateJavascript(
-                "window.dispatchEvent(new CustomEvent('jm-update-progress', {detail:$payload}))", null)
-        }
-    }
+    private fun emitUpdateEvent(state: String, percent: Int = -1, message: String = "") =
+        AppState.emitUpdate(state, percent, message)
 
     /** 当前应用版本名（用于"每个版本最多提示一次通知权限"）。 */
     private fun appVersionName(): String = try {

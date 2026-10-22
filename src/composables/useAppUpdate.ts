@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { isAndroid } from './useIsMobile.ts'
-import { downloadAndInstallApk } from '../utils/androidStorage.ts'
+import { downloadAndInstallApk, syncUpdateDownloadState, type UpdateProgress } from '../utils/androidStorage.ts'
 import { openExternalUrl, REPO_NAME, REPO_OWNER } from '../utils/externalLink.ts'
 
 export interface GithubReleaseAsset {
@@ -43,6 +43,73 @@ const installing = ref(false)
 const installProgress = ref(0)
 const installMessage = ref('')
 let stopInstallWatch: (() => void) | undefined
+
+/** 只订阅进度事件，不重新触发下载（用于回到前台后补回丢失的进度） */
+function watchInstallProgress() {
+  const onProgress = (event: Event) => {
+    const detail = (event as CustomEvent<UpdateProgress>).detail
+    if (detail?.state) handleInstallProgress(detail)
+  }
+  window.addEventListener('jm-update-progress', onProgress)
+  stopInstallWatch?.()
+  stopInstallWatch = () => window.removeEventListener('jm-update-progress', onProgress)
+}
+
+/**
+ * 下载在原生前台服务里进行，WebView 被暂停或重建期间的事件会丢。
+ * 每次页面重新可见时清掉过期监听、重新订阅并补一次实时状态。
+ */
+function resumeInstallWatch() {
+  watchInstallProgress()
+  syncUpdateDownloadState()
+}
+
+function startInstallWatch(url: string, fileName: string) {
+  stopInstallWatch = downloadAndInstallApk(url, fileName, handleInstallProgress)
+}
+
+function handleInstallProgress(progress: UpdateProgress) {
+  if (progress.state === 'progress') {
+    installing.value = true
+    installMessage.value = '正在下载安装包…'
+    installProgress.value = progress.percent ?? installProgress.value
+  } else if (progress.state === 'done') {
+    installProgress.value = 100
+    installMessage.value = '下载完成，正在打开安装器…'
+  } else if (progress.state === 'installer') {
+    installMessage.value = progress.message ?? '请在系统安装器中确认安装'
+  } else if (progress.state === 'idle') {
+    // 后台期间下载已经结束（中断/失败，或进程被杀）：复位按钮，允许重新点击。
+    // 本来就没在下载时什么也不做，别把「请在系统安装器中确认安装」这类提示清掉。
+    if (!installing.value) return
+    installing.value = false
+    installMessage.value = ''
+    installProgress.value = 0
+    return
+  } else {
+    const message = progress.message ?? (progress.state === 'permission' ? '请允许安装未知应用后重试' : '更新失败')
+    installMessage.value = message
+    installProgress.value = 0
+    if (progress.state === 'error') errorMessage.value = message
+  }
+  // done 之后原生才提交安装会话，失败信息会晚一步到，所以这时先继续监听，
+  // 下一次点击更新时再移除旧监听器。安装会话已提交（installer）后必须复位，
+  // 否则按钮永远停在「下载中」且无法再次点击；但监听器要留着——
+  // PackageInstaller 会在用户取消或安装失败时再回一条 error。
+  if (progress.state === 'permission' || progress.state === 'error' || progress.state === 'installer') {
+    installing.value = false
+  }
+  if (progress.state === 'permission' || progress.state === 'error') {
+    stopInstallWatch?.()
+    stopInstallWatch = undefined
+  }
+}
+
+if (isAndroid && typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') resumeInstallWatch()
+  })
+}
 
 function compareVersions(v1: string, v2: string): number {
   const p1 = v1.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0)
@@ -165,33 +232,7 @@ export function useAppUpdate() {
       installing.value = true
       installProgress.value = 0
       installMessage.value = '正在下载安装包…'
-      stopInstallWatch?.()
-      stopInstallWatch = downloadAndInstallApk(targetUrl, downloadFileName.value, (progress) => {
-        if (progress.state === 'progress') {
-          installProgress.value = progress.percent ?? installProgress.value
-        } else if (progress.state === 'done') {
-          installProgress.value = 100
-          installMessage.value = '下载完成，正在打开安装器…'
-        } else if (progress.state === 'installer') {
-          installMessage.value = progress.message ?? '请在系统安装器中确认安装'
-        } else {
-          const message = progress.message ?? (progress.state === 'permission' ? '请允许安装未知应用后重试' : '更新失败')
-          installMessage.value = message
-          installProgress.value = 0
-          if (progress.state === 'error') errorMessage.value = message
-        }
-        // done 之后原生才提交安装会话，失败信息会晚一步到，所以这时先继续监听，
-        // 下一次点击更新时再移除旧监听器。安装会话已提交（installer）后必须复位，
-        // 否则按钮永远停在「下载中」且无法再次点击；但监听器要留着——
-        // PackageInstaller 会在用户取消或安装失败时再回一条 error。
-        if (progress.state === 'permission' || progress.state === 'error' || progress.state === 'installer') {
-          installing.value = false
-        }
-        if (progress.state === 'permission' || progress.state === 'error') {
-          stopInstallWatch?.()
-          stopInstallWatch = undefined
-        }
-      })
+      startInstallWatch(targetUrl, downloadFileName.value)
       return
     }
     void openExternalUrl(targetUrl)

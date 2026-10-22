@@ -24,6 +24,7 @@ class DownloadService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        AppState.downloadServiceRunning = true
         ensureChannel(this)
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK, "$packageName:downloads"
@@ -84,15 +85,16 @@ class DownloadService : Service() {
         return builder.build()
     }
 
-    private fun sendToWeb(script: String) {
-        try {
-            val activity = AppState.activity ?: return
-            activity.runOnUiThread { activity.webView?.evaluateJavascript(script, null) }
-        } catch (_: Exception) {
-        }
-    }
+    /**
+     * 把「取消当前」转发给前端。
+     *
+     * 之前 Activity 在 onStop 时就被清掉，应用一切到后台，通知栏的「取消当前」
+     * 点了什么也不会发生；现在只在真正销毁（onDestroy）时清空，后台仍能转发。
+     */
+    private fun sendToWeb(script: String) = AppState.emit(script)
 
     override fun onDestroy() {
+        AppState.downloadServiceRunning = false
         handler.removeCallbacks(renew)
         if (wakeLock?.isHeld == true) wakeLock?.release()
         wakeLock = null
@@ -117,7 +119,37 @@ class DownloadService : Service() {
     }
 }
 
-/** 极简的活动/WebView 引用，供服务把用户操作转发回前端。 */
+/**
+ * 极简的活动/WebView 引用，供服务把用户操作转发回前端。
+ *
+ * `activity` 只在销毁时清空，切到后台（onStop）时保留：下载服务在后台仍要能把
+ * 「取消当前」转发给前端，否则通知上的按钮点了没有任何反应。能否拉起界面由
+ * [foreground] 判断——Android 10+ 禁止后台应用启动 Activity。
+ */
 object AppState {
     @Volatile var activity: MainActivity? = null
+    @Volatile var foreground = false
+    /** 漫画下载前台服务是否在运行；运行中时再次启动不受「后台不能起前台服务」限制 */
+    @Volatile var downloadServiceRunning = false
+
+    /** @return 事件是否已投递给 WebView；Activity 已销毁时返回 false */
+    fun emit(script: String): Boolean {
+        val activity = activity ?: return false
+        return try {
+            activity.runOnUiThread {
+                try { activity.webView?.evaluateJavascript(script, null) } catch (_: Exception) {}
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** 更新流程进度/结果回传前端；事件名与 `src/utils/androidStorage.ts` 的订阅保持一致。 */
+    fun emitUpdate(state: String, percent: Int = -1, message: String = "") {
+        val payload = org.json.JSONObject().put("state", state)
+        if (percent >= 0) payload.put("percent", percent)
+        if (message.isNotEmpty()) payload.put("message", message)
+        emit("window.dispatchEvent(new CustomEvent('jm-update-progress', {detail:$payload}))")
+    }
 }
