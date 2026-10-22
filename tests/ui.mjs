@@ -61,6 +61,10 @@ mockIPC(async (command, args) => {
   // 初始化会读取会话与域名预设，缺任一项整页都会停在「应用初始化失败」。
   if (command === 'get_session') return { sessionEpoch: 1, profile: null }
   if (command === 'get_api_domain_presets') return [{ mode: 'Official', label: '官方', domain: 'api.fixture.invalid' }]
+  if (command === 'get_image_domain_presets') return [{ mode: 'Official', label: '官方', domain: 'img.fixture.invalid' }]
+  // 这些命令在 bindings 里被包成 Result，IPC 返回值就是 data 本身
+  if (command === 'get_api_domain_status') return { label: '域名', state: 'Passed', elapsedMs: 12, message: '线路正常' }
+  if (command === 'get_logs_dir_size') return 0
   if (command === 'get_logs_dir_size') return 0
   if (command === 'get_downloaded_comics') return structuredClone(comics.filter((comic) => !removedComics.has(comic.id)))
   if (command === 'get_download_tasks') return structuredClone(tasks)
@@ -111,5 +115,7 @@ mockIPC(async (command, args) => {
   throw new Error(`测试页面未模拟此操作：${command}`)
 })
 const pinia = createPinia()
-useStore(pinia).currentTabName = 'downloaded'
+// 初始页可用 ?tab=settings 之类的查询参数指定，方便逐个页面截图核对
+const initialTab = new URLSearchParams(location.search).get('tab')
+useStore(pinia).currentTabName = ['search', 'downloaded', 'account', 'settings'].includes(initialTab ?? '') ? initialTab : 'downloaded'
 createApp(App).use(pinia).mount('#app')

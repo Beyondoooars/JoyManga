@@ -19,7 +19,6 @@ import { useAppUpdate } from './composables/useAppUpdate.ts'
 import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
 import { onOpenExternalComic } from './libraryApi.ts'
 
-const SettingsDialog = defineAsyncComponent(() => import('./dialogs/SettingsDialog.vue'))
 const StorageOnboardingDialog = defineAsyncComponent(() => import('./dialogs/StorageOnboardingDialog.vue'))
 const ReaderDialog = defineAsyncComponent(() => import('./dialogs/ReaderDialog.vue'))
 const UpdateDialog = defineAsyncComponent(() => import('./dialogs/UpdateDialog.vue'))
@@ -32,6 +31,7 @@ const pageComponents: Record<CurrentTabName, Component> = {
   downloaded: defineAsyncComponent(() => import('./panes/DownloadedPane/DownloadedPane.vue')),
   chapter: defineAsyncComponent(() => import('./panes/ChapterPane.vue')),
   account: defineAsyncComponent(() => import('./panes/AccountPane.vue')),
+  settings: defineAsyncComponent(() => import('./panes/SettingsPane.vue')),
 }
 
 const store = useStore()
@@ -39,8 +39,6 @@ const message = useMessage()
 const notification = useNotification()
 const { isAndroid } = useIsMobile()
 const { checkForUpdates } = useAppUpdate()
-
-const settingsDialogShowing = ref<boolean>(false)
 
 const initializing = ref(false)
 const initializationError = ref('')
@@ -69,6 +67,10 @@ function navigateToTab(tab: CurrentTabName) {
     store.openAccount()
     return
   }
+  if (tab === 'settings') {
+    store.openSettings()
+    return
+  }
   store.closeComicDetail()
   if (store.currentTabName === tab && tab === 'downloaded') {
     store.downloadedSubTab = 'library'
@@ -83,9 +85,9 @@ useBackHandler(() => {
     store.closeReader()
     return true
   }
-  if (settingsDialogShowing.value) {
-    settingsDialogShowing.value = false
-    return true
+  // 设置页自己注册了更高优先级的返回处理（先退二级面板再离开页面），这里只兜底
+  if (store.currentTabName === 'settings') {
+    return store.closeSettings()
   }
   if (store.chapterDetailShowing) {
     store.closeComicDetail()
@@ -294,9 +296,14 @@ onUnmounted(() => {
       <div class="header-right">
         <!-- Settings Action -->
         <div class="header-actions">
-          <button type="button" class="header-icon-btn" title="应用设置" @click="settingsDialogShowing = true">
+          <button
+            type="button"
+            class="header-icon-btn"
+            :class="{ active: store.currentTabName === 'settings' }"
+            title="设置"
+            @click="navigateToTab('settings')">
             <PhGearSix :size="18" />
-            <span class="sr-only">应用设置</span>
+            <span class="sr-only">设置</span>
           </button>
         </div>
       </div>
@@ -317,7 +324,8 @@ onUnmounted(() => {
             v-else
             :is="currentPaneComponent"
             :key="store.currentTabName"
-            @open-login="navigateToTab('account')" />
+            @open-login="navigateToTab('account')"
+            @back="store.closeSettings" />
         </KeepAlive>
       </section>
     </main>
@@ -356,7 +364,6 @@ onUnmounted(() => {
     </nav>
 
     <!-- Modals and Dialogs -->
-    <SettingsDialog v-if="settingsDialogShowing" v-model:showing="settingsDialogShowing" />
     <StorageOnboardingDialog v-if="storageOnboardingShowing" v-model:show="storageOnboardingShowing" />
     <ReaderDialog v-if="store.activeReaderTarget" />
     <UpdateDialog />
@@ -486,6 +493,13 @@ onUnmounted(() => {
   color: #fb7299;
   background: #f1f2f3;
   border-color: #e3e5e7;
+}
+
+/* 设置是整页而非弹窗：停留在设置页时齿轮保持高亮，用户能看出当前在哪 */
+.header-icon-btn.active {
+  color: #fb7299;
+  background: #fff0f5;
+  border-color: #fb7299;
 }
 
 /* 触屏：顶栏图标按钮补足 44dp 可点区域（视觉尺寸仍 32px） */
