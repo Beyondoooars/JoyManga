@@ -1,12 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { NModal, NButton } from 'naive-ui'
-import {
-  PhRocketLaunch,
-  PhDownloadSimple,
-  PhArrowSquareOut,
-  PhX,
-  PhPackage,
-} from '@phosphor-icons/vue'
+import { PhDownloadSimple, PhX } from '@phosphor-icons/vue'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
 import { isAndroid } from '../composables/useIsMobile.ts'
 import { useAndroidBack } from '../composables/useAndroidBack.ts'
@@ -15,18 +10,35 @@ const {
   showUpdateDialog,
   currentVersion,
   latestVersion,
-  releaseTitle,
   releaseNotes,
-  publishedAt,
-  downloadFileName,
-  downloadFileSize,
   downloadUpdate,
-  openReleasePage,
   ignoreCurrentUpdate,
   installing,
   installProgress,
   installMessage,
 } = useAppUpdate()
+
+// Release 正文由 CI 生成：开头是「### JoyManga vX」标题和一句打包说明，末尾是
+// GitHub 自动生成的对比链接，这些对用户都没有信息量，去掉；markdown 记号
+// （`##`、`*`、`**`、`by @xxx in #1`）在纯文本里也只是噪音。
+const notes = computed(() =>
+  releaseNotes.value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => !/^自动编译并校验签名的 Android 安装包已就绪。?$/.test(line))
+    .filter((line) => !/^(\*\*)?Full Changelog(\*\*)?:/.test(line))
+    .filter((line, index) => !(index === 0 && /^#{1,6}\s*JoyManga\s+v/i.test(line)))
+    .map((line) =>
+      line
+        .replace(/^#{1,6}\s*/, '')
+        .replace(/^\*\s+/, '· ')
+        .replace(/\s+by\s+@\S+(\s+in\s+\S+)?$/i, '')
+        .replace(/\*\*/g, ''),
+    )
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim(),
+)
 
 useAndroidBack(() => {
   if (showUpdateDialog.value) {
@@ -41,118 +53,57 @@ useAndroidBack(() => {
   <n-modal
     v-model:show="showUpdateDialog"
     :mask-closable="false"
-    class="max-w-[92vw] sm:max-w-[480px] w-full"
+    class="max-w-[92vw] sm:max-w-[440px] w-full"
   >
-    <div class="bg-white rounded-2xl shadow-2xl border border-gray-100 overflow-hidden flex flex-col max-h-[85vh]">
-      <!-- 头部装饰条与标题 -->
-      <div class="bg-gradient-to-r from-pink-500 to-rose-500 px-5 py-4 text-white flex items-center justify-between">
-        <div class="flex items-center gap-2.5">
-          <div class="p-2 bg-white/20 backdrop-blur rounded-xl flex items-center justify-center">
-            <PhRocketLaunch :size="22" weight="fill" />
-          </div>
-          <div>
-            <h3 class="m-0 text-base font-bold leading-tight">发现新版本</h3>
-            <p class="m-0 text-[11px] text-white/80 mt-0.5">
-              {{ releaseTitle || `v${latestVersion}` }} {{ publishedAt ? `· ${publishedAt}` : '' }}
-            </p>
-          </div>
-        </div>
+    <div class="bg-white rounded-2xl shadow-2xl border border-gray-100 overflow-hidden flex flex-col max-h-[80vh]">
+      <!-- 标题栏：新版本号直接给出，不再单独做版本对照卡片 -->
+      <div class="flex items-center gap-2 px-4 py-3 border-b border-gray-100">
+        <h3 class="m-0 text-sm font-bold text-gray-800 flex-shrink-0">发现新版本</h3>
+        <span class="text-xs font-semibold text-pink-600 bg-pink-50 rounded-md px-1.5 py-0.5 flex-shrink-0">
+          v{{ latestVersion }}
+        </span>
+        <span v-if="currentVersion" class="text-[11px] text-gray-400 truncate">当前 v{{ currentVersion }}</span>
         <button
           type="button"
-          class="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors"
+          class="ml-auto text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors bg-transparent border-none cursor-pointer"
+          aria-label="关闭"
           @click="showUpdateDialog = false"
         >
-          <PhX :size="18" />
+          <PhX :size="16" />
         </button>
       </div>
 
-      <!-- 版本对照信息 -->
-      <div class="px-5 pt-4 pb-2">
-        <div class="flex items-center justify-between bg-gray-50 border border-gray-100 rounded-xl px-4 py-2.5 text-xs">
-          <div class="flex flex-col">
-            <span class="text-gray-400 text-[11px]">当前版本</span>
-            <span class="font-medium text-gray-700">v{{ currentVersion }}</span>
-          </div>
-          <div class="text-gray-300 font-bold">➜</div>
-          <div class="flex flex-col text-right">
-            <span class="text-gray-400 text-[11px]">最新版本</span>
-            <span class="font-bold text-pink-600 text-sm">v{{ latestVersion }}</span>
-          </div>
-        </div>
+      <!-- 更新日志：弹窗的主体内容 -->
+      <div class="flex-1 min-h-[96px] max-h-[300px] overflow-y-auto px-4 py-3 text-xs text-gray-600 whitespace-pre-wrap leading-relaxed">
+        {{ notes || '本次更新没有附带说明。' }}
       </div>
 
-      <!-- 更新日志说明卡片 -->
-      <div class="px-5 py-2 flex-1 min-h-[120px] max-h-[260px] flex flex-col overflow-hidden">
-        <div class="text-xs font-semibold text-gray-700 mb-1.5 flex items-center gap-1">
-          <span>更新内容</span>
+      <!-- 操作区：一个主按钮 + 跳过；关闭即稍后提醒，不再重复一个链接 -->
+      <div class="px-4 py-3 border-t border-gray-100 flex flex-col gap-2">
+        <div v-if="installing || installMessage" class="flex flex-col gap-1">
+          <n-progress v-if="installing" type="line" :percentage="installProgress" :processing="installProgress < 100" />
+          <span v-if="installMessage" class="text-[11px] text-gray-500">{{ installMessage }}</span>
         </div>
-        <div class="flex-1 bg-gray-50/80 border border-gray-100 rounded-xl p-3 overflow-y-auto text-xs text-gray-600 whitespace-pre-wrap leading-relaxed">
-          {{ releaseNotes }}
-        </div>
-      </div>
-
-      <!-- 推荐安装包信息 -->
-      <div v-if="downloadFileName" class="px-5 py-1">
-        <div class="flex items-center justify-between text-[11px] text-gray-500 bg-pink-50/60 border border-pink-100 rounded-lg px-3 py-1.5">
-          <div class="flex items-center gap-1.5 truncate">
-            <PhPackage :size="14" class="text-pink-600 flex-shrink-0" />
-            <span class="truncate font-mono">{{ downloadFileName }}</span>
-          </div>
-          <span v-if="downloadFileSize" class="font-medium text-pink-600 flex-shrink-0 ml-2">
-            {{ downloadFileSize }}
-          </span>
-        </div>
-      </div>
-
-      <!-- 底部操作按钮 -->
-      <div class="px-5 py-4 border-t border-gray-100 flex flex-col gap-2 mt-1 bg-gray-50/50">
-        <!-- 应用内更新进度：下载完成后再由原生拉起系统安装器 -->
-        <div v-if="installing" class="flex flex-col gap-1">
-          <n-progress type="line" :percentage="installProgress" :processing="installProgress < 100" />
-          <span class="text-[11px] text-gray-500">{{ installMessage }}</span>
-        </div>
-        <div v-else-if="installMessage" class="text-[11px] text-gray-500">{{ installMessage }}</div>
-        <div class="flex gap-2.5">
-          <n-button
-            type="primary"
-            class="flex-1 font-semibold"
-            :loading="installing"
-            :disabled="installing"
-            @click="downloadUpdate"
-          >
-            <template #icon>
-              <PhDownloadSimple :size="16" />
-            </template>
-            {{ isAndroid ? (installing ? `下载中 ${installProgress}%` : '下载并更新 APK') : '下载新版本' }}
-          </n-button>
-
-          <n-button
-            secondary
-            @click="openReleasePage"
-          >
-            <template #icon>
-              <PhArrowSquareOut :size="16" />
-            </template>
-            详情
-          </n-button>
-        </div>
-
-        <div class="flex items-center justify-between px-1 pt-1">
-          <button
-            type="button"
-            class="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-none p-0 cursor-pointer"
-            @click="ignoreCurrentUpdate"
-          >
-            跳过此版本
-          </button>
-          <button
-            type="button"
-            class="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-none p-0 cursor-pointer"
-            @click="showUpdateDialog = false"
-          >
-            稍后提醒
-          </button>
-        </div>
+        <n-button
+          type="primary"
+          block
+          class="font-semibold"
+          :loading="installing"
+          :disabled="installing"
+          @click="downloadUpdate"
+        >
+          <template #icon>
+            <PhDownloadSimple :size="16" />
+          </template>
+          {{ isAndroid ? (installing ? `下载中 ${installProgress}%` : '下载并更新 APK') : '下载新版本' }}
+        </n-button>
+        <button
+          type="button"
+          class="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-none p-0 cursor-pointer self-center"
+          @click="ignoreCurrentUpdate"
+        >
+          跳过此版本
+        </button>
       </div>
     </div>
   </n-modal>
