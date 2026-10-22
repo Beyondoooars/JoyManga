@@ -60,6 +60,8 @@
         </activity>
 
         <service android:name=".DownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <!-- 更新安装包下载：几十 MB 的包必须在前台服务里下，普通后台进程随时可能被回收 -->
+        <service android:name=".UpdateDownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
 
         <provider
           android:name="androidx.core.content.FileProvider"
