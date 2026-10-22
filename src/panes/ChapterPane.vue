@@ -610,14 +610,17 @@ function isDownloading(state: State) {
 </template>
 
 <style scoped>
+/* 与书库/发现页一致：根节点保持白底，灰底与卡片边界交给内部区块自己表示。
+   原先这里自绘 #f6f7f8 灰底 + 10px 内边距，去掉内容区边框后会形成「白框套灰块」，
+   和顶栏看起来仍是断开的。 */
 .chapter-pane-container {
   display: flex;
   flex-direction: column;
   height: 100%;
   gap: 12px;
   overflow: hidden;
-  background: #f6f7f8;
-  padding: 10px;
+  background: #ffffff;
+  padding: 12px 14px;
 }
 
 .empty-chapter {
@@ -627,6 +630,7 @@ function isDownloading(state: State) {
   justify-content: center;
   height: 100%;
   background: #ffffff;
+  border: 1px solid #e3e5e7;
   border-radius: var(--radius-panel);
 }
 

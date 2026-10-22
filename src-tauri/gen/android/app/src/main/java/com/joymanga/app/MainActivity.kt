@@ -34,9 +34,11 @@ class MainActivity : TauriActivity() {
     private var activeDownloads = 0
     private val handler = Handler(Looper.getMainLooper())
     private var serviceUpdateScheduled = false
-    // 拉起安装器后待清理的安装包：用户从安装器返回时删掉，避免桌面残留「安装中」条目
+    // 拉起安装器后待清理的安装包。不能用 onStart 当「安装已结束」的信号——MIUI/HyperOS
+    // 会在确认后转后台继续安装并立刻交还前台，那时删包会让安装失败。改为依据真实结果：
+    // 安装成功走 PACKAGE_REPLACED 广播，用户取消/失败则由 10 分钟兜底。
     private var pendingUpdateApkCleanup: File? = null
-    private val updateApkCleanupTimeout = Runnable { runUpdateApkCleanup() }
+    private val updateApkCleanupTimeout = Runnable { runUpdateApkCleanup("超时未收到安装结果") }
     // WebView 创建早于页面加载，事件在 Vue 注册监听器之前派发就会丢失。这里改成
     // 前端注册监听器后主动通知（notifyOpenFileReady），之后再按顺序补发。用队列而不是
     // 单槽位，连续「用 JoyManga 打开」多个 CBZ 时不会只剩最后一个。
@@ -65,6 +67,13 @@ class MainActivity : TauriActivity() {
             try { importRoot().listFiles()?.forEach { it.deleteRecursively() } } catch (_: Exception) {}
             try { openRoot().listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 24 * 60 * 60 * 1000 }?.forEach { it.deleteRecursively() } } catch (_: Exception) {}
             try { File(cacheDir, "android-imports").deleteRecursively() } catch (_: Exception) {}
+            // 安装成功时系统会杀掉本进程，onStart 的清理来不及执行，安装包会一直留着。
+            // 启动时兜底清掉 1 小时前的旧包：此时上一次安装早已结束，不会影响安装器读取。
+            try {
+                File(cacheDir, "updates").listFiles()
+                    ?.filter { it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000 }
+                    ?.forEach { it.delete() }
+            } catch (_: Exception) {}
         }
         // 冷启动时由「用 JoyManga 打开 CBZ」拉起：WebView 就绪后会自动导入
         handleViewIntent(intent)
@@ -161,8 +170,6 @@ class MainActivity : TauriActivity() {
     override fun onStart() {
         super.onStart()
         visible = true
-        // 从安装器返回：此时安装流程已结束，可以安全删除下载的安装包
-        runUpdateApkCleanup()
         AppState.activity = this
         updateDownloadService()
         pushMetered(getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered)
@@ -174,6 +181,16 @@ class MainActivity : TauriActivity() {
         // 阻止息屏；清掉后前端不会再设置（watcher 只在配置/阅读状态变化时触发），
         // 用户切出去一次再回来，本次阅读就一直会息屏。
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        // 延时任务持有 Runnable，进而持有本 Activity；不摘掉会让主线程队列钉住
+        // 整个 Activity 与 WebView 直到超时。工作线程同样在这里回收。
+        handler.removeCallbacks(updateApkCleanupTimeout)
+        pendingUpdateApkCleanup = null
+        worker.shutdownNow()
+        updateWorker.shutdownNow()
+        super.onDestroy()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -663,27 +680,27 @@ class MainActivity : TauriActivity() {
     }
 
     /**
-     * 用户从安装器返回后删除安装包。
+     * 拉起安装器后登记待清理的安装包。
      *
-     * 安装器（尤其 MIUI/HyperOS）会在桌面按 APK 生成「安装中」占位图标；APK 一直留在
-     * `cache/updates` 时，这个条目可能残留、或被媒体扫描反复识别。等安装流程结束
-     * （本应用重新回到前台）再删，既不影响安装器读取，也不会让安装包长期占着缓存。
+     * 安装器读取 APK 会持续到安装结束，不能在拉起后立刻删。删除时机有两个：
+     * 安装成功后系统发出 `PACKAGE_REPLACED`（此时本进程通常已被杀掉，由启动兜底清理接手）；
+     * 用户取消或安装失败时收不到广播，10 分钟后兜底删除。
      */
     private fun scheduleUpdateApkCleanup(apk: File) {
-        // 安装器读取 APK 会持续到安装结束，不能在拉起安装器后立刻删。
-        // 等用户从安装器返回（onStart）再删；一直不回来则 10 分钟后兜底删除，
-        // 避免安装包永久占缓存、或被桌面当成「安装中」条目反复识别。
+        // 上一次还没清理的安装包先删掉，避免被本次覆盖后再没人负责
+        runUpdateApkCleanup("上一次更新未完成")
         pendingUpdateApkCleanup = apk
+        handler.removeCallbacks(updateApkCleanupTimeout)
         handler.postDelayed(updateApkCleanupTimeout, 10 * 60 * 1000)
     }
 
-    private fun runUpdateApkCleanup() {
+    private fun runUpdateApkCleanup(reason: String) {
         val apk = pendingUpdateApkCleanup ?: return
         pendingUpdateApkCleanup = null
         handler.removeCallbacks(updateApkCleanupTimeout)
         updateWorker.execute {
             try {
-                if (apk.delete()) android.util.Log.i("JoyManga", "已清理更新安装包")
+                if (apk.delete()) android.util.Log.i("JoyManga", "已清理更新安装包（$reason）")
             } catch (error: Exception) {
                 android.util.Log.w("JoyManga", "清理更新安装包失败", error)
             }
