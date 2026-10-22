@@ -30,6 +30,8 @@ src/components.d.ts
 
 # Distribution binaries
 dist-apk/
+# CI 生成的发布说明（每次构建现算，不入库）
+release-notes.md
 __pycache__/
 *.pyc
 docs/handoffs/

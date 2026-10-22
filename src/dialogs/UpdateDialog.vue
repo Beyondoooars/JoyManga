@@ -18,9 +18,9 @@ const {
   installMessage,
 } = useAppUpdate()
 
-// Release 正文由 CI 生成：开头是「### JoyManga vX」标题和一句打包说明，末尾是
-// GitHub 自动生成的对比链接，这些对用户都没有信息量，去掉；markdown 记号
-// （`##`、`*`、`**`、`by @xxx in #1`）在纯文本里也只是噪音。
+// Release 正文由 scripts/release-notes.mjs 生成，是「### 新功能 / * 条目」的纯列表。
+// 这里把 markdown 记号（`###`、`*`、`**`）转成纯文本；同时兼容旧版本正文里的
+// 打包说明、对比链接与 `by @xxx in #1`，用户在旧版应用里看到的历史说明也不会露出记号。
 const notes = computed(() =>
   releaseNotes.value
     .split('\n')
