@@ -29,6 +29,34 @@ pub fn release_archive_handle() {
     }
 }
 
+/// 目标文件是否已被阅读器缓存了读句柄。
+///
+/// 只在 FUSE 语义下才有意义：句柄存在时重命名必失败，必须走覆盖写回退；
+/// 没有句柄时仍然优先原子改名。
+pub fn reader_holds_archive(path: &Path) -> bool {
+    let Some(lock) = ACTIVE_ARCHIVE.get() else {
+        return false;
+    };
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    lock.lock()
+        .as_ref()
+        .is_some_and(|cached| cached.path == canonical)
+}
+
+/// 提交（重命名/覆盖）目标文件前释放占用的读句柄；只放掉同一文件的句柄。
+pub fn release_handle_for(target: &Path) {
+    if reader_holds_archive(target) {
+        release_archive_handle();
+    }
+}
+
+/// 在启动时注册到 atomic_fs：提交方持有替换锁后调用，锁住「释放→改名」窗口。
+pub fn install_commit_hook() {
+    crate::atomic_fs::set_pre_commit_hook(release_handle_for);
+}
+
 /// 导入的 CBZ 路径集合（规范化后）。`jmimg://` 每一页都要校验路径，
 /// 若每次都重读书库记录，翻页会产生大量同步读盘；这里按记录文件
 /// `(mtime, 长度)` 失效。根目录也必须参与比较：`visible_imports` 以书库
@@ -231,6 +259,10 @@ fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>,
             .and_then(|m| m.modified())
             .ok();
         let active_lock = ACTIVE_ARCHIVE.get_or_init(|| Mutex::new(None));
+        // 与 atomic_fs::REPLACE_LOCK 同序：先替换锁再归档锁。提交方会在持有替换锁时
+        // 释放归档句柄，「释放 → 重命名」之间就不会插进一次重新打开，ETXTBSY 才真正消除。
+        // 读写会在此短暂互斥：常规提交是毫秒级改名，只有目标被占用时的整文件覆盖会稍慢。
+        let _replace_guard = crate::atomic_fs::commit_guard();
         let mut guard = active_lock.lock();
         let is_match = guard
             .as_ref()

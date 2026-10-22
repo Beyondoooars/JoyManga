@@ -115,8 +115,8 @@ export function requestAllFilesAccess() {
  * 申请「所有文件访问」并等待用户从系统页返回。
  *
  * Android 11+ 跳系统设置页，返回应用时 WebView 重新可见；API 29 以下弹运行时
- * 权限对话框，结果经 `jm-permission-result` 回传。两条路径以先到者为准。
- * 不设超时：用户停留在系统页期间应用保持当前状态，返回后才继续初始化。
+ * 权限对话框，结果经 `jm-permission-result` 回传。两条路径以先到者为准，
+ * 用户拒绝也立即结算——否则 API 29 以下没有可见性变化事件，启动会一直卡在加载页。
  */
 export function requestAllFilesAccessAndWait(): Promise<boolean> {
   if (hasAllFilesAccess()) return Promise.resolve(true)
@@ -127,22 +127,35 @@ export function requestAllFilesAccessAndWait(): Promise<boolean> {
       if (settled) return
       settled = true
       clearTimeout(retryTimer)
+      retryTimer = undefined
       document.removeEventListener('visibilitychange', onVisibility)
       removePermissionListener()
       resolve(granted)
     }
     const onVisibility = () => {
       if (document.visibilityState !== 'visible') return
-      // 从设置页返回时系统的权限状态可能稍后才刷新，延后一拍再读
+      // 从设置页返回时系统的权限状态可能稍后才刷新，延后一拍再读。
+      // 只保留最后一次待执行的检查：句柄被覆盖会让兜底定时器再也清不掉。
+      clearTimeout(retryTimer)
       retryTimer = setTimeout(() => finish(hasAllFilesAccess()), 300)
     }
     const removePermissionListener = onPermissionResult((granted) => {
-      if (granted) finish(true)
+      // 拒绝也要结算：API 29 以下没有可见性变化事件，只能靠这次回调
+      finish(granted)
     })
     document.addEventListener('visibilitychange', onVisibility)
     requestAllFilesAccess()
-    // 兜底：系统页打不开或用户切走未返回时，不能让启动一直停在加载页
-    retryTimer = setTimeout(() => finish(hasAllFilesAccess()), 90_000)
+    // 兜底：系统页打不开时应用始终可见，按当前状态结算，不能让启动停在加载页。
+    // 用户还停留在系统页（应用不可见）则继续等，返回后由可见性回调给出结果。
+    const fallback = () => {
+      if (settled) return
+      if (document.visibilityState !== 'visible') {
+        retryTimer = setTimeout(fallback, 90_000)
+        return
+      }
+      finish(hasAllFilesAccess())
+    }
+    retryTimer = setTimeout(fallback, 90_000)
   })
 }
 

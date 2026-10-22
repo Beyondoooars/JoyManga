@@ -121,8 +121,8 @@ pub(crate) fn package_chapter_to_cbz(
     // 提交前必须显式关闭；句柄留到函数结束会稳定触发 "Text file busy"。
     drop(zip_file);
 
-    // 书正被阅读器打开时，它持有同一个 CBZ 的读句柄（FUSE 下同名替换也会被拒）
-    crate::commands::reader_commands::release_archive_handle();
+    // 书正被阅读器打开时，它持有同一个 CBZ 的读句柄（FUSE 下同名替换也会被拒）。
+    // 句柄由 atomic_fs 的提交钩子在替换锁内释放，这里不再提前释放。
     atomic_fs::commit_file_checked(&temp_cbz_path, chapter_cbz_path, |existing| {
         ensure_archive_identity(existing, comic, chapter_info)
     })
