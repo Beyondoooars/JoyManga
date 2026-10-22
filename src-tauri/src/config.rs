@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
 
-use crate::types::{CbzMode, LogLevel, ProxyMode, ReadingDirection};
+use crate::types::{CbzMode, LogLevel, ProxyMode, ReadingDirection, ReadingMode};
 use crate::{atomic_fs, utils};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -232,6 +232,9 @@ pub struct Config {
     /// 阅读方向：决定点击区域、键盘、滑动与翻页按钮的语义。
     #[serde(default)]
     pub reading_direction: ReadingDirection,
+    /// 阅读排版：单页翻页或上下滚动。
+    #[serde(default)]
+    pub reading_mode: ReadingMode,
     /// 阅读时保持屏幕常亮。
     #[serde(default = "default_true")]
     pub keep_screen_on: bool,
@@ -422,6 +425,7 @@ impl Config {
             custom_image_domain: IMAGE_DOMAIN_3.to_string(),
             default_cbz_mode: CbzMode::default(),
             reading_direction: ReadingDirection::default(),
+            reading_mode: ReadingMode::default(),
             keep_screen_on: true,
             volume_key_paging: false,
             download_only_wifi: false,
