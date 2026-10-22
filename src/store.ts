@@ -183,7 +183,10 @@ export const useStore = defineStore('store', () => {
         if (pickedComic.value?.id === payload.data.comicId) {
           pickedComic.value.isDownloaded = true
         }
-        if (downloadedComicsLoaded.value || currentTabName.value === 'downloaded') {
+        // 整合会重写书库文件（合并成整本 CBZ 或改名），列表必须重新扫描；
+        // 不在书库页时只做陈旧标记，等用户进来再拉。
+        downloadedComicsStale.value = true
+        if (currentTabName.value === 'downloaded') {
           void refreshDownloadedComics().catch((error) => {
             console.error('整合完成后刷新本地库存失败', error)
           })
@@ -275,6 +278,9 @@ export const useStore = defineStore('store', () => {
   const getWeeklyResult = ref<GetWeeklyResult>()
   const downloadedComics = ref<Comic[]>([])
   const downloadedComicsLoaded = ref(false)
+  // 磁盘书库已变化（下载完成/删除/整合结束），列表需要重新扫描才能反映。
+  // 不在事件里直接扫描：下载可能连续完成多个章节，攒到用户真正打开书库页时再拉一次。
+  const downloadedComicsStale = ref(false)
   const downloadedSubTab = ref<'library' | 'transfers'>('library')
 
   function openTransfers() {
@@ -454,6 +460,7 @@ export const useStore = defineStore('store', () => {
 
     downloadedComics.value = comics
     downloadedComicsLoaded.value = true
+    downloadedComicsStale.value = false
     return true
   }
 
@@ -604,7 +611,10 @@ function syncCompletedDownload(progressData: ProgressData) {
     }
   }
 
-  if (downloadedComicsLoaded.value || currentTabName.value === 'downloaded') {
+  // 无论在哪个页面下载，书库内容都已改变：标记陈旧，用户下次进入书库页时重新扫描。
+  // 正在看书库时立刻刷新，避免停在旧列表上。
+  downloadedComicsStale.value = true
+  if (currentTabName.value === 'downloaded') {
     void refreshDownloadedComics().catch((error) => {
       console.error('下载完成后刷新本地库存失败', error)
     })
@@ -690,6 +700,7 @@ function trimProgressHistory() {
     getWeeklyResult,
     downloadedComics,
     downloadedComicsLoaded,
+    downloadedComicsStale,
     downloadedSubTab,
     openTransfers,
     imageDomain,

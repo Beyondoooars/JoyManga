@@ -249,6 +249,9 @@ impl DownloadedLibraryCache {
     }
 
     pub fn set(&self, map: HashMap<i64, PathBuf>) {
+        // 路径映射变了，基于旧映射建立的漫画快照同样失效；否则归档整合会拿到
+        // 章节没有下载路径的旧快照，整本合并直接失败。
+        *self.comics.write() = None;
         *self.map.write() = Some(map);
     }
 
@@ -303,7 +306,11 @@ pub fn walk_comic_metadata_files(download_dir: &Path) -> impl Iterator<Item = wa
     WalkDir::new(download_dir)
         .into_iter()
         .filter_entry(|entry| {
-            if entry.file_name().to_string_lossy().starts_with(".import-") {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // `.import-` 与 `.downloading-` 都是应用自己的一次性工作目录：
+            // 前者是导入暂存，后者是下载中途的散图，扫描时都不该下钻。
+            if name.starts_with(".import-") || name.starts_with(".downloading-") {
                 return false;
             }
             if entry.file_type().is_dir() {
@@ -762,6 +769,24 @@ mod tests {
         assert!(cache.comic(root, 1).is_none());
         cache.set_comics(root, &[comic]);
         cache.invalidate();
+        assert!(cache.comic(root, 1).is_none());
+    }
+
+    #[test]
+    fn replacing_the_path_map_invalidates_cached_comic_snapshots() {
+        let cache = super::DownloadedLibraryCache::new();
+        let root = Path::new("downloads");
+        let comic = super::Comic {
+            id: 1,
+            ..super::Comic::default()
+        };
+        cache.set_comics(root, std::slice::from_ref(&comic));
+        assert!(cache.comic(root, 1).is_some());
+
+        let mut map = std::collections::HashMap::new();
+        map.insert(1, root.join("chapter.cbz"));
+        cache.set(map);
+        // 重新扫描书库后，旧快照必须失效，否则归档整合会拿到没有下载路径的漫画。
         assert!(cache.comic(root, 1).is_none());
     }
 

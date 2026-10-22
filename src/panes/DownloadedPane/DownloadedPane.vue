@@ -1,6 +1,6 @@
 <script setup lang="tsx">
 import { Comic, commands } from '../../bindings.ts'
-import { computed, ref, watch, watchEffect } from 'vue'
+import { computed, onActivated, onMounted, ref, watch, watchEffect } from 'vue'
 import DownloadedComicCard from './components/DownloadedComicCard.vue'
 import { useStore } from '../../store.ts'
 import { NCheckbox } from 'naive-ui'
@@ -101,6 +101,19 @@ watch(() => store.authoritativeConfig?.downloadDir, (path, previous) => {
   store.downloadedComics = []
   void refreshLibrary()
 })
+
+// 书库页在 KeepAlive 下常驻，onMounted 只会执行一次；若用户在其他页下载完再切回来，
+// 列表会一直停在上次扫描的结果。每次进入书库页都重新扫描磁盘，保证与文件一致。
+function refreshIfStale() {
+  if (!store.downloadedComicsStale) return
+  void refreshLibrary()
+}
+
+onMounted(() => {
+  // 首次进入：store 可能还没有任何扫描结果（冷启动后直接在别的页下载），必须主动拉一次
+  if (!store.downloadedComicsLoaded || store.downloadedComicsStale) void refreshLibrary()
+})
+onActivated(refreshIfStale)
 
 // 当前页码
 const currentPage = ref<number>(1)
