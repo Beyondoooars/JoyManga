@@ -299,6 +299,25 @@ export const useStore = defineStore('store', () => {
     currentTabName.value = accountReturnTab.value === 'account' ? 'search' : accountReturnTab.value
     return true
   }
+
+  /** 打开设置页，并记住来处以便返回键回到原页面。 */
+  const settingsReturnTab = ref<CurrentTabName>('search')
+  function openSettings() {
+    if (currentTabName.value !== 'settings') {
+      // 从「我的」进设置时，来处记成「我的」的来处：返回键应先回到看设置前的页面，
+      // 而不是把用户送回「我的」再按一次才能离开。
+      settingsReturnTab.value = currentTabName.value === 'account' ? accountReturnTab.value : currentTabName.value
+    }
+    closeComicDetail()
+    currentTabName.value = 'settings'
+  }
+
+  /** 从设置返回来处；返回键与页面顶部返回按钮共用。 */
+  function closeSettings() {
+    if (currentTabName.value !== 'settings') return false
+    currentTabName.value = settingsReturnTab.value === 'settings' ? 'search' : settingsReturnTab.value
+    return true
+  }
   const imageDomain = computed(() =>
     resolveImageDomain(config.value?.imageDomainMode, config.value?.customImageDomain),
   )
@@ -642,7 +661,7 @@ function trimProgressHistory() {
   return {
     config,
     authoritativeConfig, apiDomainPresets, applyConfig, persistConfig, configIsDirty,
-    openAccount, closeAccount, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
+    openAccount, closeAccount, openSettings, closeSettings, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
     archivingComics, isArchiving,
