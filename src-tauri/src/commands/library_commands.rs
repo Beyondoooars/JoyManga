@@ -297,3 +297,79 @@ pub async fn test_domain_latency(app: AppHandle, domain: String) -> CommandResul
         }
     }
 }
+
+#[cfg(test)]
+mod end_to_end_scan_tests {
+    use super::scan_downloaded_comics;
+    use crate::types::{ChapterInfo, Comic};
+    use std::io::Write;
+    use std::path::Path;
+
+    /// 照下载打包的真实产物写一个单话 CBZ：
+    /// 文件名 `本子名 [JM{comic_id}-{chapter_id}].cbz`，包内带 `元数据.json` 与 `chapter.json`。
+    fn write_downloaded_chapter(path: &Path, comic: &Comic, chapter: &ChapterInfo) {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let mut metadata = comic.clone();
+        metadata.is_downloaded = None;
+        metadata.comic_download_dir = None;
+        metadata.local_cover_data = None;
+        for ch in &mut metadata.chapter_infos {
+            ch.is_downloaded = None;
+            ch.chapter_download_dir = None;
+        }
+        zip.start_file("元数据.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(serde_json::to_string(&metadata).unwrap().as_bytes())
+            .unwrap();
+        zip.start_file("chapter.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            serde_json::to_string(&serde_json::json!({
+                "comicId": comic.id, "chapterId": chapter.chapter_id
+            }))
+            .unwrap()
+            .as_bytes(),
+        )
+        .unwrap();
+        for page in [1, 2] {
+            zip.start_file(format!("000{page}.jpg"), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"not-a-real-jpeg").unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn freshly_downloaded_chapter_shows_up_in_library_scan() {
+        let root = std::env::temp_dir().join(format!("jm-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let chapter = ChapterInfo {
+            chapter_id: 456,
+            chapter_title: "第1话".into(),
+            order: 1,
+            is_downloaded: Some(true),
+            chapter_download_dir: None,
+        };
+        let comic = Comic {
+            id: 123,
+            name: "测试本子".into(),
+            chapter_infos: vec![chapter.clone()],
+            ..Comic::default()
+        };
+        let path = root.join(crate::utils::storage_cbz_filename(&comic.name, comic.id, 456));
+        write_downloaded_chapter(&path, &comic, &chapter);
+        assert!(path.is_file(), "打包产物应当存在于书库根目录");
+
+        let scanned = scan_downloaded_comics(&root);
+        assert_eq!(scanned.len(), 1, "刚下载的本子必须出现在书库扫描结果里");
+        assert_eq!(scanned[0].id, 123);
+        assert_eq!(scanned[0].is_downloaded, Some(true));
+        assert_eq!(
+            scanned[0].chapter_infos[0].chapter_download_dir.as_deref(),
+            Some(path.as_path())
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
