@@ -1,6 +1,6 @@
 [package]
 name = "joymanga"
-version = "0.2.6"
+version = "0.2.7"
 default-run = "joymanga"
 description = "JoyManga 漫画下载与本地阅读工具，支持任务恢复、CBZ 导入与批量导出"
 authors = ["Beyondoooars"]
