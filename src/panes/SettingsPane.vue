@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, toRaw, watch } from 'vue'
 import { PhArrowClockwise, PhArrowLeft, PhCaretRight } from '@phosphor-icons/vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
@@ -83,6 +83,16 @@ onBeforeUnmount(() => {
   disposed = true
   generation++
 })
+// 设置页被 KeepAlive 缓存：离开后 onBeforeUnmount 不会触发，在途请求的回调
+// 仍会写进这份状态。失活时同样作废代数，重新进入时再刷新一次。
+onDeactivated(() => {
+  generation++
+  checking.value = false
+})
+onActivated(() => {
+  if (disposed) return
+  void refreshDomainStatus()
+})
 onMounted(() => {
   void refreshDomainStatus()
   void getVersion().then((value) => {
@@ -94,7 +104,9 @@ void commands.getImageDomainPresets()
     if (!disposed) imagePresets.value = value
   })
   .catch((error) => {
-    networkError.value = getErrorMessage(error)
+    // 线路列表加载失败不影响其他设置项，只记日志；写进 networkError 会让用户
+    // 一进网络面板就看到一条与「检查连接」无关的报错。
+    console.error('加载图片线路预设失败', error)
   })
 
 async function refreshDomainStatus() {
@@ -164,6 +176,24 @@ const downloadOnlyWifi = computed({
   get: () => store.config?.downloadOnlyWifi ?? false,
   set: (value: boolean) => {
     if (store.config) store.config.downloadOnlyWifi = value
+  },
+})
+// 并发上限与后端 validate() 保持一致：越界会让整份配置保存失败。
+// 输入框清空时 naive-ui 给 null，同样兜底到默认值而不是写入 0。
+const chapterConcurrency = computed({
+  get: () => store.config?.chapterConcurrency ?? 1,
+  set: (value: number | null) => {
+    if (!store.config) return
+    const next = value === null || !Number.isFinite(value) ? 1 : Math.round(value)
+    store.config.chapterConcurrency = Math.min(10, Math.max(1, next))
+  },
+})
+const imgConcurrency = computed({
+  get: () => store.config?.imgConcurrency ?? 4,
+  set: (value: number | null) => {
+    if (!store.config) return
+    const next = value === null || !Number.isFinite(value) ? 4 : Math.round(value)
+    store.config.imgConcurrency = Math.min(50, Math.max(1, next))
   },
 })
 const networkKey = computed(() => {
@@ -429,6 +459,16 @@ const readingSummary = computed(() => (readingDirection.value === 'RightToLeft' 
           </div>
           <p class="note">下载后自动整理；单次下载时可在章节页临时选择。更改后只影响新下载。</p>
           <p v-if="isAndroid" class="note">公共下载书库（Download/JoyManga）卸载后保留；应用专用书库会随卸载清理。</p>
+          <div class="field">
+            <label class="field-label">章节并发数</label>
+            <n-slider v-model:value="chapterConcurrency" :min="1" :max="10" :step="1" :marks="{ 1: '1', 3: '3', 10: '10' }" />
+            <span class="field-hint">同时下载几话。网速不稳定时调低更稳，默认 1。</span>
+          </div>
+          <div class="field">
+            <label class="field-label">单话图片并发数</label>
+            <n-slider v-model:value="imgConcurrency" :min="1" :max="50" :step="1" :marks="{ 1: '1', 10: '10', 50: '50' }" />
+            <span class="field-hint">同一话内同时下载几张图。网络易超时时调低，默认 4。</span>
+          </div>
           <StorageLocationDialog v-model:show="showStoragePicker" @select="chooseDownloadDir" />
         </section>
       </template>
@@ -731,6 +771,12 @@ const readingSummary = computed(() => (readingDirection.value === 'RightToLeft' 
   color: #61666d;
   font-size: 13px;
   font-weight: 550;
+}
+
+.field-hint {
+  color: #9499a0;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .field-stack {
