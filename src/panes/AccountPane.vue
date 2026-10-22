@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onBeforeUnmount } from 'vue'
+import { ref, watch, onBeforeUnmount, onDeactivated } from 'vue'
 import { commands } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import FloatLabelInput from '../components/FloatLabelInput.vue'
@@ -16,11 +16,36 @@ const password = ref<string>(store.config?.password ?? '')
 const remember = ref<boolean>(username.value !== '' && password.value !== '')
 const loggingIn = ref(false)
 const loggingOut = ref(false)
+// 收藏区提示会话失效（或用户主动重新登录）时，即使仍有本地资料也改显示登录表单
+const showLoginForm = ref(false)
 let disposed = false
 onBeforeUnmount(() => {
   disposed = true
   if (loggingIn.value) void commands.cancelLogin().catch(console.error)
 })
+
+// 页面被 KeepAlive 缓存：切到别的标签后登录请求仍在跑，成功后会在后台改写配置并切走用户。
+// 失活即取消（与旧弹窗关闭时行为一致）；返回本页后再点一次即可。
+let cancelledByLeave = false
+onDeactivated(() => {
+  if (loggingIn.value) {
+    loggingIn.value = false
+    cancelledByLeave = true
+    void commands.cancelLogin().catch(console.error)
+  }
+})
+
+// 表单初值只在 setup 时取一次，缓存复用会保留过期内容（清除账密后仍可被重新写回、
+// 会话过期后旧密码仍显示）。配置或会话变化时按最新状态重建表单。
+watch(
+  () => [store.accountFormRevision, store.config?.username, store.config?.password] as const,
+  () => {
+    if (loggingIn.value) return
+    username.value = store.config?.username ?? ''
+    password.value = store.config?.password ?? ''
+    remember.value = username.value !== '' && password.value !== ''
+  },
+)
 
 async function onLogin() {
   if (store.config === undefined || loggingIn.value) {
@@ -38,15 +63,19 @@ async function onLogin() {
   }
 
   loggingIn.value = true
+  cancelledByLeave = false
   try {
     const result = await commands.login(cleanUsername, cleanPassword)
-    if (disposed || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch)) return
+    // 用户已离开本页（登录被取消）时不要静默落到后台完成并改写配置
+    if (disposed || cancelledByLeave || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch)) return
     if (result.status === 'error') {
       console.error(result.error)
       message.error(formatCommandError(result.error))
       return
     }
     const switched = store.applyLoginResult(result.data)
+    // 重新登录成功：收起登录表单、回到账号页
+    showLoginForm.value = false
     const route = store.apiDomainPresets.find((preset) => preset.mode === switched)
     message.success(switched ? `登录成功，已切换至${route?.label ?? switched}` : '登录成功')
     if (remember.value) {
@@ -120,7 +149,7 @@ async function clearUsernameAndPasswordInConfig() {
     </section>
 
     <!-- 已登录：账号信息 + 在线收藏 -->
-    <template v-if="store.userProfile !== undefined">
+    <template v-if="store.userProfile !== undefined && !showLoginForm">
       <div class="user-profile-bar">
         <n-avatar
           round
@@ -159,11 +188,11 @@ async function clearUsernameAndPasswordInConfig() {
         <span class="sub-hint">点击任意漫画直接展开章节详情</span>
       </div>
       <div class="favorites-content">
-        <FavoritePane />
+        <FavoritePane @open-login="showLoginForm = true" />
       </div>
     </template>
 
-    <!-- 未登录：页内登录表单 -->
+    <!-- 未登录（或会话失效需重新登录）：页内登录表单 -->
     <div v-else class="login-form-wrapper">
       <div class="login-card">
         <div class="login-headline">
@@ -171,6 +200,7 @@ async function clearUsernameAndPasswordInConfig() {
           <h2>登录 JoyManga 账号</h2>
           <p class="login-tip">登录后可同步收藏夹，并一键收藏。账号信息只保存在本机。</p>
         </div>
+        <p v-if="store.userProfile !== undefined" class="relogin-tip">当前会话已失效，重新登录后可继续使用在线收藏。</p>
         <div class="form-fields">
           <FloatLabelInput label="用户名" v-model:value="username" @keydown.enter="onLogin" />
           <FloatLabelInput label="密码" v-model:value="password" type="password" @keydown.enter="onLogin" />
@@ -195,6 +225,13 @@ async function clearUsernameAndPasswordInConfig() {
           立即登录
         </n-button>
         <n-button v-if="loggingIn" size="small" @click="cancelLogin">取消登录</n-button>
+        <n-button
+          v-if="store.userProfile !== undefined"
+          size="small"
+          quaternary
+          @click="showLoginForm = false">
+          返回账号页
+        </n-button>
       </div>
     </div>
   </div>
@@ -406,6 +443,17 @@ async function clearUsernameAndPasswordInConfig() {
   margin: 0;
   color: #61666d;
   font-size: 13px;
+  line-height: 1.6;
+}
+
+.relogin-tip {
+  margin: 0;
+  padding: 10px 12px;
+  color: #a8552a;
+  border: 1px solid #f3d9c4;
+  border-radius: 8px;
+  background: #fdf3ea;
+  font-size: 12px;
   line-height: 1.6;
 }
 

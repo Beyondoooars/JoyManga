@@ -11,6 +11,30 @@ fn replace_guard() -> MutexGuard<'static, ()> {
     REPLACE_LOCK.get_or_init(|| Mutex::new(())).lock()
 }
 
+/// 替换事务锁。阅读器读取归档时也要先拿这把锁，保证「提交方释放读句柄 → 重命名」
+/// 之间不会被一次重新打开插入（公共存储/FUSE 下会重新触发 ETXTBSY）。
+pub fn commit_guard() -> MutexGuard<'static, ()> {
+    replace_guard()
+}
+
+/// 提交前要做的全局清理（由 lib.rs 注册为「释放阅读器归档句柄」）。
+///
+/// 必须在持有替换锁之后调用：否则释放与重命名之间阅读器会重新打开旧文件，
+/// FUSE 依旧拒绝改名。用回调注册是为了避免 atomic_fs 反向依赖阅读器模块。
+type PreCommitHook = Box<dyn Fn(&Path) + Send + Sync>;
+
+static PRE_COMMIT_HOOK: OnceLock<PreCommitHook> = OnceLock::new();
+
+pub fn set_pre_commit_hook(hook: impl Fn(&Path) + Send + Sync + 'static) {
+    let _ = PRE_COMMIT_HOOK.set(Box::new(hook));
+}
+
+fn run_pre_commit_hook(target: &Path) {
+    if let Some(hook) = PRE_COMMIT_HOOK.get() {
+        hook(target);
+    }
+}
+
 fn sibling_path(path: &Path, marker: &str) -> Result<PathBuf> {
     let parent = path
         .parent()
@@ -102,9 +126,43 @@ fn is_cross_device_error(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(18)
 }
 
-/// ETXTBSY：目标/来源文件仍有本进程（或系统媒体库）持有的句柄。
-fn is_text_file_busy(err: &std::io::Error) -> bool {
-    err.raw_os_error() == Some(26)
+/// 目标/来源文件仍被其他程序占用，无法直接改名。
+///
+/// Linux/Android 上是 ETXTBSY(26)；Windows 上占用表现为共享冲突/拒绝访问
+/// （5、32、33），26 在那里是 ERROR_NOT_DOS_DISK，与占用无关。
+fn is_file_busy(err: &std::io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        matches!(err.raw_os_error(), Some(5 | 32 | 33))
+    }
+    #[cfg(not(windows))]
+    {
+        err.raw_os_error() == Some(26)
+    }
+}
+
+/// 覆盖写入并落盘。目标已存在时 `std::fs::copy` 会先截断，因此调用方必须先备份。
+fn copy_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    std::fs::OpenOptions::new().write(true).open(to)?.sync_all()
+}
+
+/// 把旧文件先复制一份恢复副本；失败则原文件保持不变，操作直接报错。
+///
+/// 覆盖写入会先截断目标，若中途失败（空间不足、进程被杀）旧归档就没了。
+/// 公共存储上覆盖写是唯一允许的提交方式，只能先备份再写。
+fn backup_for_overwrite(target: &Path) -> Result<PathBuf> {
+    let backup = sibling_path(target, "recover")?;
+    std::fs::copy(target, &backup).context(format!(
+        "备份原文件`{}`失败，为避免覆盖后无法恢复已中止",
+        target.display()
+    ))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&backup)?
+        .sync_all()
+        .context(format!("同步恢复副本`{}`失败", backup.display()))?;
+    Ok(backup)
 }
 
 fn rename_or_copy_fallback(from: &Path, to: &Path) -> Result<()> {
@@ -129,25 +187,57 @@ fn rename_or_copy_fallback(from: &Path, to: &Path) -> Result<()> {
             }
             result
         }
-        Err(err) if is_text_file_busy(&err) => {
+        Err(err) if is_file_busy(&err) => {
             // 公共存储（FUSE）拒绝重命名仍被打开的文件。系统媒体扫描、文件管理器预览
-            // 都可能暂时持有正式文件；先把完整内容落到正式路径（覆盖写是允许的），
-            // 再删除临时文件。内容已经 sync 过，不会留下半截归档。
-            std::fs::copy(from, to).context(format!(
-                "目标文件`{}`被其他程序占用，改为覆盖写入也失败",
-                to.display()
-            ))?;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(to)?
-                .sync_all()
-                .context(format!("同步`{}`失败", to.display()))?;
-            let _ = std::fs::remove_file(from);
-            tracing::warn!(
-                target = %to.display(),
-                "目标文件被占用，已改用覆盖写入提交"
-            );
-            Ok(())
+            // 都可能暂时持有正式文件；覆盖写是允许的。覆盖会先截断目标，所以目标已存在时
+            // 先留一份完整恢复副本：中途失败（空间不足/进程被杀）时把副本放回去。
+            let backup = if to.exists() {
+                Some(backup_for_overwrite(to)?)
+            } else {
+                None
+            };
+            let copy_result = copy_over(from, to);
+            match copy_result {
+                Ok(()) => {
+                    if let Some(backup) = &backup {
+                        // 副本已经用不上；删不掉也只是多一个隐藏文件，不影响正式数据
+                        if let Err(error) = std::fs::remove_file(backup) {
+                            tracing::warn!(
+                                backup = %backup.display(),
+                                error = %error,
+                                "删除恢复副本失败，该隐藏文件可手动删除"
+                            );
+                        }
+                    }
+                    let _ = std::fs::remove_file(from);
+                    tracing::warn!(
+                        target = %to.display(),
+                        "目标文件被占用，已改用覆盖写入提交"
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Some(backup) = &backup {
+                        match copy_over(backup, to) {
+                            Ok(()) => {
+                                let _ = std::fs::remove_file(backup);
+                            }
+                            Err(restore_error) => {
+                                tracing::error!(
+                                    target = %to.display(),
+                                    backup = %backup.display(),
+                                    error = %restore_error,
+                                    "覆盖写入失败且未能自动还原，已保留恢复副本"
+                                );
+                            }
+                        }
+                    }
+                    Err(error).context(format!(
+                        "目标文件`{}`被其他程序占用，改为覆盖写入也失败",
+                        to.display()
+                    ))
+                }
+            }
         }
         Err(err) => Err(err).context(format!(
             "将临时文件`{}`替换为`{}`失败",
@@ -196,6 +286,8 @@ where
     validate_existing(target_path)
         .context(format!("拒绝替换已有文件`{}`", target_path.display()))?;
 
+    // 锁已持有：此刻释放阅读器的读句柄，到重命名之间阅读器无法再打开旧文件
+    run_pre_commit_hook(target_path);
     // 同目录直接替换文件，避免先移走正式文件留下缺失窗口。
     rename_or_copy_fallback(temp_path, target_path)
 }
@@ -287,24 +379,27 @@ pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
         };
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with('.') && file_name_str.contains(".trash-") {
-            if let Some(uuid_str) = file_name_str.rsplit(".trash-").next() {
-                if uuid::Uuid::parse_str(uuid_str).is_ok() {
-                    let path = entry.path();
-                    let remove_res = if path.is_dir() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
-                    match remove_res {
-                        Ok(()) => {
-                            tracing::info!(path = %path.display(), "已清理残留的隔离临时目录/文件");
-                            cleaned_count += 1;
-                        }
-                        Err(err) => {
-                            tracing::warn!(path = %path.display(), error = %err, "清理残留隔离文件失败");
-                        }
-                    }
+        // 注意：`.recover-` 恢复副本不在此清理。它只在「覆盖写失败且自动还原也失败」时
+        // 残留，可能是用户数据的唯一副本；自动删除会让那次失败彻底不可挽回。
+        let is_trash = file_name_str.starts_with('.')
+            && file_name_str
+                .rsplit(".trash-")
+                .next()
+                .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok());
+        if is_trash {
+            let path = entry.path();
+            let remove_res = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match remove_res {
+                Ok(()) => {
+                    tracing::info!(path = %path.display(), "已清理残留的隔离临时目录/文件");
+                    cleaned_count += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), error = %err, "清理残留隔离文件失败");
                 }
             }
         }
@@ -431,9 +526,16 @@ mod tests {
         assert!(normal_comic.exists());
         assert!(non_trash_hidden.exists());
 
+        // 覆盖写失败留下的恢复副本不能自动删除：它可能是用户数据的唯一副本
+        let recover_copy = sandbox
+            .path()
+            .join(format!(".book.cbz.recover-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&recover_copy, b"recover").unwrap();
+
         let cleaned = cleanup_residual_trash(sandbox.path()).expect("cleanup should succeed");
         assert_eq!(cleaned, 1);
         assert!(!trash_dir.exists());
+        assert!(recover_copy.exists());
         assert!(normal_comic.exists());
         assert!(non_trash_hidden.exists());
     }

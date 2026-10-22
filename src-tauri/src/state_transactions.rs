@@ -106,6 +106,10 @@ pub(crate) fn remove_with_catalog(
     let result = (|| -> anyhow::Result<()> {
         for (original, staged) in &journal.moves {
             if original.exists() {
+                // 阅读器缓存着这个 CBZ 的读句柄时，公共存储（FUSE）会拒绝改名；
+                // 拿替换锁后释放，避免释放与改名之间被重新打开
+                let _guard = crate::atomic_fs::commit_guard();
+                crate::commands::reader_commands::release_handle_for(original);
                 std::fs::rename(original, staged).context("隔离删除目标失败")?;
             }
         }

@@ -104,14 +104,19 @@ fn validate_merge_target(
             // 允许整本归档原位重写（更新后再合并）与单话书的最终命名重写；
             // 拒绝把多话合并写进某个独立章节文件。
             let identity = crate::comic_scanner::read_chapter_identity(path)?;
-            let override_ok = if chapters.len() == 1 {
-                // 单话书下载后已被整理成整本归档（无 chapter.json），再次整理是原位更新，
-                // 不能因为没有章节身份就拒绝；漫画身份由下方 元数据.json 校验兜底。
-                identity.is_none_or(|identity| identity == (comic.id, chapter.chapter_id))
+            if let Some(identity) = identity {
+                ensure!(
+                    chapters.len() == 1 && identity == (comic.id, chapter.chapter_id),
+                    "合并文件不能覆盖原章节"
+                );
             } else {
-                identity.is_none()
-            };
-            ensure!(override_ok, "合并文件不能覆盖原章节");
+                // 无 chapter.json 的整本归档：内嵌的话清单必须全部属于本次重写范围。
+                // 站点下架后本地可能只剩部分话，此时重写会永久丢掉其他话的页面。
+                ensure!(
+                    merged_archive_is_not_wider_than(chapters, path)?,
+                    "目标归档还包含本次未整理的话，保留原文件"
+                );
+            }
         }
     }
     let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
@@ -127,6 +132,30 @@ fn validate_merge_target(
         "目标文件属于其他漫画，保留原文件"
     );
     Ok(())
+}
+
+/// 目标整本归档内嵌的话清单是否不比本次重写范围更宽。
+///
+/// 整本归档没有 chapter.json，无法用话身份判断归属；若归档里还留着本次未参与
+/// 重写的话（例如站点下架后本地只剩一话），原位重写会永久丢掉那些话的页面。
+fn merged_archive_is_not_wider_than(
+    chapters: &[&ChapterInfo],
+    path: &Path,
+) -> anyhow::Result<bool> {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+    let Ok(mut entry) = archive.by_name("元数据.json") else {
+        // 缺少元数据时交给后面的漫画身份校验给出明确错误
+        return Ok(true);
+    };
+    let size = entry.size();
+    let bytes =
+        crate::image_data::read_limited(&mut entry, size, crate::image_data::MAX_METADATA_BYTES)?;
+    let embedded: Comic = serde_json::from_slice(&bytes)?;
+    let keep: HashSet<i64> = chapters.iter().map(|chapter| chapter.chapter_id).collect();
+    Ok(embedded
+        .chapter_infos
+        .iter()
+        .all(|chapter| keep.contains(&chapter.chapter_id)))
 }
 
 fn copy_cbz_if_needed(source: &Path, target: &Path) -> anyhow::Result<()> {
@@ -256,8 +285,6 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
         let string_chain = err.to_string_chain();
         tracing::error!(err_title, message = string_chain);
     }
-    // 导出的目标文件可能正是阅读器打开的那个 CBZ；FUSE 下先释放读句柄再覆盖
-    crate::commands::reader_commands::release_archive_handle();
     // 并发处理
     let downloaded_chapter_infos = downloaded_chapter_infos.into_par_iter();
     downloaded_chapter_infos.try_for_each(|chapter_info| -> anyhow::Result<()> {
@@ -361,6 +388,7 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
                 .context(format!("同步临时CBZ`{}`失败", temp_path.display()))?;
             // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
             drop(zip_file);
+            // 阅读器读句柄由 atomic_fs 的提交钩子在替换锁内释放
             if let Err(err) = atomic_fs::commit_file(&temp_path, &save_path) {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(err).context(format!("提交CBZ`{}`失败", save_path.display()));
@@ -432,6 +460,7 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
             .context(format!("同步临时CBZ`{}`失败", temp_path.display()))?;
         // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
         drop(zip_file);
+        // 阅读器读句柄由 atomic_fs 的提交钩子在替换锁内释放
         if let Err(err) = atomic_fs::commit_file(&temp_path, &save_path) {
             let _ = std::fs::remove_file(&temp_path);
             return Err(err).context(format!("提交CBZ`{}`失败", save_path.display()));
@@ -722,6 +751,7 @@ pub(crate) fn write_merged_cbz_archive(
     // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
     drop(zip_file);
 
+    // 阅读器读句柄由 atomic_fs 的提交钩子在替换锁内释放（见 download_manager/package.rs）
     if let Err(err) = atomic_fs::commit_file_checked(&temp_path, save_path, |existing| {
         validate_merge_target(comic, &downloaded_chapter_infos, existing)
     }) {
@@ -1141,6 +1171,57 @@ mod tests {
             ..ch1.clone()
         };
         assert!(write_merged_cbz_archive(&comic, &[&foreign_chapter], &foreign, |_| {}).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_chapter_rewrite_refuses_archive_that_still_holds_other_chapters() {
+        // 站点下架章节后本地只剩一话，但整本归档里还留着其他话的页面：
+        // 原位重写会永久丢掉那些页面，必须拒绝。
+        let root = std::env::temp_dir().join(format!("jm-remerge-wide-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let merged = root.join("多话本.cbz");
+        let mut zip = ZipWriter::new(std::fs::File::create(&merged).unwrap());
+        zip.start_file("元数据.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            serde_json::to_string(&serde_json::json!({
+                "id": 20,
+                "name": "多话本",
+                "chapterInfos": [
+                    {"chapterId": 201, "chapterTitle": "一", "order": 1},
+                    {"chapterId": 202, "chapterTitle": "二", "order": 2}
+                ]
+            }))
+            .unwrap()
+            .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file("[01] 一/0001.png", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"page1").unwrap();
+        zip.start_file("[02] 二/0001.png", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"page2").unwrap();
+        zip.finish().unwrap();
+
+        let only_first = ChapterInfo {
+            chapter_id: 201,
+            chapter_title: "一".into(),
+            order: 1,
+            is_downloaded: Some(true),
+            chapter_download_dir: Some(merged.clone()),
+        };
+        let comic = Comic {
+            id: 20,
+            name: "多话本".into(),
+            chapter_infos: vec![only_first.clone()],
+            ..Comic::default()
+        };
+        assert!(write_merged_cbz_archive(&comic, &[&only_first], &merged, |_| {}).is_err());
+        // 归档原样保留，第二话页面还在
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&merged).unwrap()).unwrap();
+        assert!(archive.by_name("[02] 二/0001.png").is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

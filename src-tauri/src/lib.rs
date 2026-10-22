@@ -179,6 +179,8 @@ pub fn run() {
             // 封面缩略图缓存放在配置目录下，随应用数据一起管理
             cover_cache::set_dir(Some(config_storage.base_dir().join(".covers")));
             crate::state_transactions::recover(config_storage.config_path());
+            // 提交替换 CBZ 前释放阅读器读句柄（持有替换锁后执行，见 atomic_fs）
+            crate::commands::reader_commands::install_commit_hook();
             let intent_store_path = config_storage
                 .config_path()
                 .with_file_name("archive-intents.json");

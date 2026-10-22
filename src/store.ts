@@ -39,6 +39,8 @@ export const useStore = defineStore('store', () => {
   const authoritativeConfig = ref<Config>()
   const apiDomainPresets = ref<ApiDomainPreset[]>([])
   const sessionEpoch = ref(0)
+  /** 会话或本地记住的账密变化时递增，供账号页等界面重新同步表单 */
+  const accountFormRevision = ref(0)
   const favoriteStatuses = ref(new Map<number, boolean | undefined>())
   const favoritePending = ref(new Set<number>())
   const favoriteRevision = ref(0)
@@ -51,8 +53,13 @@ export const useStore = defineStore('store', () => {
   function applyConfig(server: Config, discardLocal = false) {
     if (authoritativeConfig.value && (server.revision ?? 0) < (authoritativeConfig.value.revision ?? 0)) return
     const old = authoritativeConfig.value
+    const previousCredentials = config.value === undefined ? undefined : `${config.value.username}\u0000${config.value.password}`
     config.value = discardLocal ? structuredClone(toRaw(server)) : mergeServerConfig(config.value, old, server)
     authoritativeConfig.value = structuredClone(toRaw(server))
+    // 记住的账密被服务端配置改写（重置/恢复/退出登录）时，账号页表单要重新同步
+    if (previousCredentials !== undefined && previousCredentials !== `${config.value.username}\u0000${config.value.password}`) {
+      accountFormRevision.value++
+    }
   }
 
   function configIsDirty() { return !!config.value && !!authoritativeConfig.value && hasConfigChanges(config.value, authoritativeConfig.value) }
@@ -79,6 +86,8 @@ export const useStore = defineStore('store', () => {
     }
     sessionEpoch.value = data.sessionEpoch
     userProfile.value = data.profile ?? undefined
+    // 会话切换（登录/退出/过期）后，账号页表单需按最新状态重建
+    accountFormRevision.value++
   }
 
   function applyLoginResult(data: LoginRespData) {
@@ -256,6 +265,8 @@ export const useStore = defineStore('store', () => {
   const userProfile = ref<GetUserProfileRespData>()
   const pickedComic = ref<Comic>()
   const currentTabName = ref<CurrentTabName>('search')
+  /** 打开「我的」前所在的标签页，返回键/关闭时回到这里 */
+  const accountReturnTab = ref<CurrentTabName>('search')
   const chapterDetailShowing = ref<boolean>(false)
   const progresses = ref<Map<number, ProgressData>>(new Map())
   const getFavoriteResult = ref<GetFavoriteResult>()
@@ -272,10 +283,21 @@ export const useStore = defineStore('store', () => {
     downloadedSubTab.value = 'transfers'
   }
 
-  /** 打开「我的」页（账号/登录/在线收藏）。 */
+  /** 打开「我的」页（账号/登录/在线收藏），并记住来处以便返回。 */
   function openAccount() {
-    chapterDetailShowing.value = false
+    if (currentTabName.value !== 'account') {
+      accountReturnTab.value = currentTabName.value
+    }
+    // 走 closeComicDetail 递增请求代数：否则在途的 openComic 返回后会把详情重新盖上来
+    closeComicDetail()
     currentTabName.value = 'account'
+  }
+
+  /** 从「我的」返回之前的页面（未登录时点收藏进入的那一页）。 */
+  function closeAccount() {
+    if (currentTabName.value !== 'account') return false
+    currentTabName.value = accountReturnTab.value === 'account' ? 'search' : accountReturnTab.value
+    return true
   }
   const imageDomain = computed(() =>
     resolveImageDomain(config.value?.imageDomainMode, config.value?.customImageDomain),
@@ -620,7 +642,7 @@ function trimProgressHistory() {
   return {
     config,
     authoritativeConfig, apiDomainPresets, applyConfig, persistConfig, configIsDirty,
-    openAccount, sessionEpoch, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
+    openAccount, closeAccount, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
     archivingComics, isArchiving,

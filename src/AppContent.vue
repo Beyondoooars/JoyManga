@@ -64,6 +64,11 @@ store.registerConfigSaveWaiter(async () => {
 })
 
 function navigateToTab(tab: CurrentTabName) {
+  if (tab === 'account') {
+    // 走 openAccount：记录来处以便返回，并按最新配置重置登录表单
+    store.openAccount()
+    return
+  }
   store.closeComicDetail()
   if (store.currentTabName === tab && tab === 'downloaded') {
     store.downloadedSubTab = 'library'
@@ -88,6 +93,10 @@ useBackHandler(() => {
   }
   if (store.currentTabName === 'downloaded' && store.downloadedSubTab === 'transfers') {
     store.downloadedSubTab = 'library'
+    return true
+  }
+  // 「我的」是从其他标签进去的：返回键先回到来处，而不是直接提示退出应用
+  if (store.closeAccount()) {
     return true
   }
   return handleRootBackExit((msg) => message.info(msg))

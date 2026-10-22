@@ -189,8 +189,8 @@ fn run_finalize(app: &AppHandle, comic: &Comic, mode: CbzMode) -> anyhow::Result
     match mode {
         CbzMode::Merge => {
             let target = resolve_merged_target(&canonical_root, comic)?;
-            // 合并结果可能替换正在阅读的归档；FUSE 下必须先释放读句柄
-            crate::commands::reader_commands::release_archive_handle();
+            // 读句柄的释放放在真正的提交之前（write_merged_cbz_archive 内）：
+            // 合并耗时较长，提前释放会被期间的翻页重新缓存。
             let total = downloaded.len() as u32;
             let comic_id = comic.id;
             let progress_app = app.clone();
@@ -297,7 +297,13 @@ fn cleanup_merged_sources(root: &Path, target: &Path, comic: &Comic, sources: &[
         }
         match crate::comic_scanner::read_chapter_identity(&canonical_source) {
             Ok(Some(identity)) if identity == (comic.id, chapter.chapter_id) => {
-                if let Err(error) = std::fs::remove_file(&canonical_source) {
+                // 来源章节可能正被阅读器打开：删除前释放读句柄
+                let remove_result = {
+                    let _guard = atomic_fs::commit_guard();
+                    crate::commands::reader_commands::release_handle_for(&canonical_source);
+                    std::fs::remove_file(&canonical_source)
+                };
+                if let Err(error) = remove_result {
                     tracing::warn!(
                         path = %canonical_source.display(),
                         error = %error,
@@ -357,7 +363,13 @@ fn rename_chapter_archive(
         let _ = std::fs::remove_file(&canonical_source);
         return Ok(());
     }
-    match std::fs::rename(&canonical_source, &desired) {
+    // 阅读器可能正打开着这个章节 CBZ：改名/删除来源前释放它的读句柄
+    let rename_result = {
+        let _guard = atomic_fs::commit_guard();
+        crate::commands::reader_commands::release_handle_for(&canonical_source);
+        std::fs::rename(&canonical_source, &desired)
+    };
+    match rename_result {
         Ok(()) => Ok(()),
         Err(_) => {
             // 跨卷等无法直接改名的情况：复制到目标后再删除来源
