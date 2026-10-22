@@ -32,13 +32,10 @@ const showUpdateDialog = ref(false)
 const hasUpdate = ref(false)
 const currentVersion = ref('')
 const latestVersion = ref('')
-const releaseTitle = ref('')
 const releaseNotes = ref('')
-const publishedAt = ref('')
 const releaseUrl = ref('')
 const downloadUrl = ref('')
 const downloadFileName = ref('')
-const downloadFileSize = ref('')
 const errorMessage = ref('')
 
 // 应用内更新（Android）：原生下载 APK 的进度与提示
@@ -57,22 +54,6 @@ function compareVersions(v1: string, v2: string): number {
     if (num1 < num2) return -1
   }
   return 0
-}
-
-function formatFileSize(bytes: number): string {
-  if (!bytes || bytes <= 0) return ''
-  const mb = bytes / (1024 * 1024)
-  return `${mb.toFixed(2)} MB`
-}
-
-function formatDate(isoStr?: string): string {
-  if (!isoStr) return ''
-  try {
-    const d = new Date(isoStr)
-    return d.toLocaleDateString()
-  } catch {
-    return ''
-  }
 }
 
 /** 距上次静默检查是否已超过允许的间隔；手动检查不受限制。 */
@@ -125,9 +106,7 @@ export function useAppUpdate() {
       markChecked(true)
       const tag = (data.tag_name || '').replace(/^v/, '').trim()
       latestVersion.value = tag
-      releaseTitle.value = data.name || `v${tag}`
       releaseNotes.value = data.body || '无更新说明'
-      publishedAt.value = formatDate(data.published_at)
       releaseUrl.value = data.html_url || `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases`
 
       // 3. 匹配 arm64-v8a 安装包（本应用仅面向 Android，ABI 固定为 arm64-v8a）
@@ -138,11 +117,9 @@ export function useAppUpdate() {
       if (target) {
         downloadUrl.value = target.browser_download_url
         downloadFileName.value = target.name
-        downloadFileSize.value = formatFileSize(target.size)
       } else {
         downloadUrl.value = releaseUrl.value
         downloadFileName.value = '请前往 Release 页面下载 APK'
-        downloadFileSize.value = ''
       }
 
       // 4. 比对版本号
@@ -220,25 +197,16 @@ export function useAppUpdate() {
     void openExternalUrl(targetUrl)
   }
 
-  function openReleasePage() {
-    if (releaseUrl.value) {
-      void openExternalUrl(releaseUrl.value)
-    }
-  }
-
   return {
     checking,
     showUpdateDialog,
     hasUpdate,
     currentVersion,
     latestVersion,
-    releaseTitle,
     releaseNotes,
-    publishedAt,
     releaseUrl,
     downloadUrl,
     downloadFileName,
-    downloadFileSize,
     errorMessage,
     installing,
     installProgress,
@@ -246,7 +214,6 @@ export function useAppUpdate() {
     checkForUpdates,
     ignoreCurrentUpdate,
     downloadUpdate,
-    openReleasePage,
     compareVersions,
   }
 }
