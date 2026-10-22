@@ -144,10 +144,6 @@ async function clearUsernameAndPasswordInConfig() {
 
 <template>
   <div class="account-page">
-    <section class="account-hero">
-      <h1>我的<PhUser :size="20" weight="duotone" /></h1>
-    </section>
-
     <!-- 已登录：账号信息 + 在线收藏 -->
     <template v-if="store.userProfile !== undefined && !showLoginForm">
       <div class="user-profile-bar">
@@ -244,30 +240,6 @@ async function clearUsernameAndPasswordInConfig() {
   min-height: 0;
   flex-direction: column;
   background: #fff;
-}
-
-.account-hero {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 20px;
-  border-bottom: 1px solid #f0edf3;
-  background: #fff;
-}
-
-.account-hero h1 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  color: #282739;
-  font-size: 22px;
-}
-
-.account-hero h1 svg {
-  color: #fb7299;
 }
 
 .user-profile-bar {
@@ -494,10 +466,6 @@ async function clearUsernameAndPasswordInConfig() {
 }
 
 @media (max-width: 760px) {
-  .account-hero {
-    padding: 14px;
-  }
-
   .user-profile-bar {
     padding: 14px;
   }
