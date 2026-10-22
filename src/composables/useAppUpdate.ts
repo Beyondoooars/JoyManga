@@ -203,10 +203,10 @@ export function useAppUpdate() {
           installProgress.value = 0
           if (progress.state === 'error') errorMessage.value = message
         }
-        // done 之后原生才拉起安装器，失败信息会晚一步到，所以这时先继续监听，
-        // 下一次点击更新时再移除旧监听器。安装器已经拉起（installer）后不会再
-        // 有成功/失败事件——用户取消安装就停在这里，必须复位，否则按钮永远
-        // 停在「下载中」且无法再次点击。
+        // done 之后原生才提交安装会话，失败信息会晚一步到，所以这时先继续监听，
+        // 下一次点击更新时再移除旧监听器。安装会话已提交（installer）后必须复位，
+        // 否则按钮永远停在「下载中」且无法再次点击；但监听器要留着——
+        // PackageInstaller 会在用户取消或安装失败时再回一条 error。
         if (progress.state === 'permission' || progress.state === 'error' || progress.state === 'installer') {
           installing.value = false
         }
