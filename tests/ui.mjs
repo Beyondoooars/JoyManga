@@ -58,6 +58,9 @@ mockIPC(async (command, args) => {
   if (command === 'plugin:event|unlisten') return listeners.delete(args.eventId)
   if (command === 'plugin:app|version') return '0.2.1'
   if (command === 'get_config') return structuredClone(config)
+  // 初始化会读取会话与域名预设，缺任一项整页都会停在「应用初始化失败」。
+  if (command === 'get_session') return { sessionEpoch: 1, profile: null }
+  if (command === 'get_api_domain_presets') return [{ mode: 'Official', label: '官方', domain: 'api.fixture.invalid' }]
   if (command === 'get_logs_dir_size') return 0
   if (command === 'get_downloaded_comics') return structuredClone(comics.filter((comic) => !removedComics.has(comic.id)))
   if (command === 'get_download_tasks') return structuredClone(tasks)

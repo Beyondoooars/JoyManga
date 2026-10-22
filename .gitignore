@@ -53,3 +53,6 @@ verify-report*.txt
 /env-check.bat
 /verify-all.bat
 /新建 文本文档.txt
+
+# `pnpm gen:icons` 会同时生成 iOS 图标，本应用只发布 Android，不纳入仓库
+src-tauri/icons/ios/

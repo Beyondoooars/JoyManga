@@ -383,6 +383,9 @@ onUnmounted(() => {
 
 <style scoped>
 .bili-app {
+  /* 底栏高度只在这里定义一次：底栏自身与内容区底部留白都引用它，
+     调整导航高度时不会出现「内容被遮住」或「多留一条白边」 */
+  --mobile-nav-h: calc(56px + env(safe-area-inset-bottom, 0px));
   display: flex;
   width: 100%;
   height: 100vh;
@@ -506,14 +509,16 @@ onUnmounted(() => {
   transform: scale(0.94);
 }
 
-/* Main Viewport & Content Surface */
+/* Main Viewport & Content Surface
+   界面只面向 Android 移动端（桌面外壳已删除），所以这里直接写移动端形态：
+   内容区与顶栏、底栏连成一片，白色主体不被灰带或卡片边框断开。 */
 .main-viewport {
   display: flex;
   min-height: 0;
   flex: 1;
   flex-direction: column;
   overflow: hidden;
-  padding: 10px 14px 12px;
+  padding: 0 0 var(--mobile-nav-h) 0;
   background: #f6f7f8;
 }
 
@@ -523,10 +528,7 @@ onUnmounted(() => {
   flex: 1;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid #e3e5e7;
-  border-radius: var(--radius-panel);
   background: #ffffff;
-  box-shadow: var(--shadow-surface);
 }
 
 .content-surface > * {
@@ -541,7 +543,7 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   z-index: 30;
-  height: calc(56px + env(safe-area-inset-bottom, 0px));
+  height: var(--mobile-nav-h);
   align-items: center;
   justify-content: space-around;
   padding: 0 8px env(safe-area-inset-bottom, 0px);
@@ -648,18 +650,6 @@ onUnmounted(() => {
 /* Android Mobile Specific Layout */
 .bili-app.is-mobile-app .mobile-nav {
   display: flex;
-}
-
-/* 移动端内容区与顶栏、底栏连成一片：外圈不留灰底，避免白色主体被灰带断开。
-   底部留出与底栏等高的内边距，内容不会被固定底栏遮住。 */
-.bili-app.is-mobile-app .main-viewport {
-  padding: 0 0 calc(56px + env(safe-area-inset-bottom, 0px)) 0;
-}
-
-.bili-app.is-mobile-app .content-surface {
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
 }
 
 .bili-app.is-mobile-app .bili-header {
