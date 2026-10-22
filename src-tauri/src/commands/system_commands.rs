@@ -73,18 +73,34 @@ pub fn show_path_in_file_manager(app: AppHandle, path: &str) -> CommandResult<()
 #[specta::specta]
 #[allow(clippy::needless_pass_by_value)]
 pub fn clear_logs(app: AppHandle) -> CommandResult<()> {
-    let logs_dir = logger::logs_dir(&app)
-        .context("获取日志目录失败")
-        .map_err(|err| CommandError::from("获取日志目录失败", err))?;
-    if logs_dir.exists() {
-        // 只删除本应用管理的日志，用户放进日志目录的其他文件保持原样
-        let failures = logger::clear_managed_logs(&logs_dir);
-        if failures > 0 {
-            tracing::warn!(failures, "部分日志文件删除失败");
+    // 两处都要清：应用数据目录里的滚动日志，以及用户导出到书库 logs 的诊断日志。
+    // 导出后诊断日志就搬到了书库，只清前者会让「清理日志」看起来没生效。
+    let mut failures = 0;
+    for logs_dir in all_logs_dirs(&app) {
+        if logs_dir.exists() {
+            // 只删除本应用管理的日志，用户放进日志目录的其他文件保持原样
+            failures += logger::clear_managed_logs(&logs_dir);
         }
+    }
+    if failures > 0 {
+        tracing::warn!(failures, "部分日志文件删除失败");
     }
     tracing::info!("已清空应用日志");
     Ok(())
+}
+
+/// 应用日志可能落在两处：应用数据目录（滚动日志、崩溃报告）与书库 `logs`
+/// （用户主动导出的诊断日志）。清理与大小统计必须覆盖同一组目录。
+fn all_logs_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(dir) = logger::logs_dir(app) {
+        dirs.push(dir);
+    }
+    let library_logs = diagnostic_logs_dir(&app.get_config().read().download_dir);
+    if !dirs.contains(&library_logs) {
+        dirs.push(library_logs);
+    }
+    dirs
 }
 
 #[tauri::command(async)]
@@ -175,7 +191,7 @@ pub fn clear_all_downloads(app: AppHandle) -> CommandResult<()> {
             for (name, root) in existing_roots {
                 // 导出日志写在书库下的 logs 目录里；清空下载时整目录跳过，
                 // 否则刚导出的诊断日志会被 remove_dir_all 一并删掉。
-                let logs_dir = root.join("logs");
+                let logs_dir = diagnostic_logs_dir(&root);
                 for entry in std::fs::read_dir(&root).context(format!("读取{name}目录失败"))?
                 {
                     let entry = entry?;
@@ -270,15 +286,19 @@ fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[tauri::command(async)]
 #[specta::specta]
 pub fn get_logs_dir_size(app: AppHandle) -> CommandResult<u64> {
-    let logs_dir = logger::logs_dir(&app)
-        .context("获取日志目录失败")
-        .map_err(|err| CommandError::from("获取日志目录大小失败", err))?;
-    let logs_dir_size = walkdir::WalkDir::new(&logs_dir)
+    // 与「清理日志」覆盖同一组目录，否则导出到书库的日志不会计入占用
+    let logs_dir_size = all_logs_dirs(&app)
         .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| entry.metadata().ok())
-        .map(|metadata| metadata.len())
+        .filter(|dir| dir.exists())
+        .flat_map(|dir| {
+            walkdir::WalkDir::new(dir)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .filter_map(|entry| entry.metadata().ok())
+                .map(|metadata| metadata.len())
+                .collect::<Vec<_>>()
+        })
         .sum::<u64>();
     tracing::debug!("获取日志目录大小成功");
     Ok(logs_dir_size)
@@ -292,6 +312,15 @@ pub struct ExportLogsResult {
     pub message: String,
 }
 
+/// 诊断日志的固定位置：书库下的 `logs` 目录。
+///
+/// 书库默认是公共 `Download/JoyManga`，日志在文件管理器里直接可见，卸载应用也不会
+/// 被系统清理；用户主动导出的诊断日志属于反馈材料，不该随应用数据一起消失。
+/// 不提供修改入口，导出位置只有这一个。`clear_all_downloads` 会整目录跳过它。
+pub(crate) fn diagnostic_logs_dir(library_dir: &Path) -> PathBuf {
+    library_dir.join("logs")
+}
+
 #[tauri::command(async)]
 #[specta::specta]
 #[allow(clippy::needless_pass_by_value)]
@@ -301,23 +330,10 @@ pub fn export_logs(
 ) -> CommandResult<ExportLogsResult> {
     let config = app.get_config().read().clone();
 
-    // 优先写入应用数据目录：诊断日志属于本机运行数据，应与配置一起随卸载清除。
-    // 若写进书库（可能位于公共下载目录），卸载后文件管理器里会一直留着这些 txt，
-    // 与「卸载即清理本机数据」的预期不符。书库不可写时同样回退到应用数据目录。
-    let target_dir = {
-        let app_data = app
-            .path()
-            .app_data_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
-        let preferred = app_data.join("logs");
-        if crate::utils::probe_directory_writable(&preferred) {
-            preferred
-        } else {
-            config.download_dir.join("logs")
-        }
-    };
-
-    let _ = std::fs::create_dir_all(&target_dir);
+    let target_dir = diagnostic_logs_dir(&config.download_dir);
+    std::fs::create_dir_all(&target_dir)
+        .context(format!("创建日志目录`{}`失败", target_dir.display()))
+        .map_err(|err| CommandError::from("导出日志失败", err))?;
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -477,6 +493,24 @@ mod tests {
         assert!(!crate::config::is_public_library_dir(Path::new(
             "/storage/emulated/0/Download"
         )));
+    }
+
+    #[test]
+    fn diagnostic_logs_live_under_the_library_and_survive_bulk_clear() {
+        let root = std::env::temp_dir().join(format!("jm-logs-{}", uuid::Uuid::new_v4()));
+        let library = root.join("JoyManga");
+        std::fs::create_dir_all(&library).unwrap();
+        // 导出日志的位置必须与「清空下载」跳过的目录一致，否则日志会被一并删掉
+        assert_eq!(diagnostic_logs_dir(&library), library.join("logs"));
+        let logs_dir = diagnostic_logs_dir(&library);
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(logs_dir.join("joymanga-log-1.txt"), b"diagnosis").unwrap();
+        assert!(is_user_data_file("joymanga-log-1.txt"));
+        assert_eq!(
+            std::fs::read(logs_dir.join("joymanga-log-1.txt")).unwrap(),
+            b"diagnosis"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
