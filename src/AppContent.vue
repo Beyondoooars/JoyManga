@@ -650,8 +650,16 @@ onUnmounted(() => {
   display: flex;
 }
 
+/* 移动端内容区与顶栏、底栏连成一片：外圈不留灰底，避免白色主体被灰带断开。
+   底部留出与底栏等高的内边距，内容不会被固定底栏遮住。 */
 .bili-app.is-mobile-app .main-viewport {
-  padding: 8px 8px calc(64px + env(safe-area-inset-bottom, 0px)) 8px;
+  padding: 0 0 calc(56px + env(safe-area-inset-bottom, 0px)) 0;
+}
+
+.bili-app.is-mobile-app .content-surface {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .bili-app.is-mobile-app .bili-header {
