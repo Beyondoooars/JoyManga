@@ -3,6 +3,7 @@ package com.joymanga.app
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.*
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -39,6 +40,9 @@ class MainActivity : TauriActivity() {
     // 安装成功走 PACKAGE_REPLACED 广播，用户取消/失败则由 10 分钟兜底。
     private var pendingUpdateApkCleanup: File? = null
     private val updateApkCleanupTimeout = Runnable { runUpdateApkCleanup("超时未收到安装结果") }
+    // PackageInstaller 会话结果的回传广播。用应用内私有 action + 动态注册，
+    // 不写进清单，其他应用无法伪造「安装成功/失败」。
+    private var updateInstallReceiverRegistered = false
     // WebView 创建早于页面加载，事件在 Vue 注册监听器之前派发就会丢失。这里改成
     // 前端注册监听器后主动通知（notifyOpenFileReady），之后再按顺序补发。用队列而不是
     // 单槽位，连续「用 JoyManga 打开」多个 CBZ 时不会只剩最后一个。
@@ -188,6 +192,11 @@ class MainActivity : TauriActivity() {
         // 整个 Activity 与 WebView 直到超时。工作线程同样在这里回收。
         handler.removeCallbacks(updateApkCleanupTimeout)
         pendingUpdateApkCleanup = null
+        // 接收器持有 Activity 的隐式引用，不注销会随 Activity 泄漏
+        if (updateInstallReceiverRegistered) {
+            try { unregisterReceiver(updateInstallReceiver) } catch (_: Exception) {}
+            updateInstallReceiverRegistered = false
+        }
         worker.shutdownNow()
         updateWorker.shutdownNow()
         super.onDestroy()
@@ -655,7 +664,17 @@ class MainActivity : TauriActivity() {
             runOnUiThread { volumeKeyPaging = enabled }
         }
     }
-    /** 把下载好的 APK 交给系统安装器；未授予「安装未知应用」时先跳到对应设置页。 */
+    /**
+     * 把下载好的 APK 交给系统安装。
+     *
+     * 走 `PackageInstaller.Session` 而不是 `ACTION_VIEW`：前者把 APK 直接写进安装会话，
+     * 由框架层的 PackageInstallerService 接管，不再经过小米等 ROM 自绘的安装器 Activity。
+     * MIUI/HyperOS 桌面在安装期间会额外画一个「安装中」占位图标，那是启动器对
+     * `PACKAGE_REMOVED(EXTRA_REPLACING=true)` 的反应；换用 Session 后是否还会出现，
+     * 取决于该 ROM 是挂在安装器界面还是挂在包状态变化上，需要在真机上验证。
+     *
+     * 用户确认弹窗仍然由系统给出（非系统签名应用无法静默安装）。
+     */
     private fun installApk(apk: File) {
         if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
             emitUpdateEvent("permission", message = "请在设置中允许 JoyManga 安装未知应用，然后重新点击更新")
@@ -667,15 +686,76 @@ class MainActivity : TauriActivity() {
             return
         }
         try {
-            val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.fileprovider", apk)
-            startActivity(Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-            emitUpdateEvent("installer", message = "请在系统安装器中确认安装")
+            val installer = packageManager.packageInstaller
+            val params = android.content.pm.PackageInstaller.SessionParams(
+                android.content.pm.PackageInstaller.SessionParams.MODE_FULL_INSTALL,
+            ).apply {
+                // 目标包名写进会话参数，安装器据此识别这是「更新同包」而非新装，
+                // 也是桌面能正确复用原图标条目的前提。
+                setAppPackageName(packageName)
+            }
+            val sessionId = installer.createSession(params)
+            installer.openSession(sessionId).use { session ->
+                apk.inputStream().use { input ->
+                    session.openWrite("base.apk", 0, apk.length()).use { output ->
+                        input.copyTo(output)
+                        // 必须 fsync：只写不刷会把截断的 APK 交给安装器，安装直接失败
+                        session.fsync(output)
+                    }
+                }
+                // 结果通过 PendingIntent 回传。用显式 Intent 指向本进程的广播接收器，
+                // 不注册清单项，避免导出组件被其他应用伪造安装结果。
+                val resultIntent = Intent(UPDATE_INSTALL_ACTION).setPackage(packageName)
+                val flags = if (Build.VERSION.SDK_INT >= 31) {
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+                } else {
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                }
+                val pending = PendingIntent.getBroadcast(this, sessionId, resultIntent, flags)
+                session.commit(pending.intentSender)
+            }
+            updateInstallReceiverRegistered = true
+            registerReceiver(
+                updateInstallReceiver,
+                IntentFilter(UPDATE_INSTALL_ACTION),
+                if (Build.VERSION.SDK_INT >= 33) Context.RECEIVER_NOT_EXPORTED else 0,
+            )
+            emitUpdateEvent("installer", message = "请在系统弹窗中确认安装")
             scheduleUpdateApkCleanup(apk)
         } catch (error: Exception) {
-            emitUpdateEvent("error", message = "无法拉起系统安装器：${error.message ?: "未知错误"}")
+            emitUpdateEvent("error", message = "无法启动安装：${error.message ?: "未知错误"}")
+        }
+    }
+
+    /** PackageInstaller 的会话结果回调；注册在 installApk 里，销毁时注销。 */
+    private val updateInstallReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != UPDATE_INSTALL_ACTION) return
+            val status = intent.getIntExtra(android.content.pm.PackageInstaller.EXTRA_STATUS, -1)
+            when (status) {
+                android.content.pm.PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                    // 系统还需要用户在弹窗里点一次「安装」：把确认界面拉起来
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)?.let { confirm ->
+                        try {
+                            startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        } catch (error: Exception) {
+                            emitUpdateEvent("error", message = "无法打开安装确认界面：${error.message ?: "未知错误"}")
+                        }
+                    }
+                }
+                android.content.pm.PackageInstaller.STATUS_SUCCESS -> {
+                    // 成功时进程通常已被替换杀掉，这里多数情况跑不到，保留是为了覆盖
+                    // 系统选择「不杀进程」的机型。安装包由启动兜底清理接手。
+                    runUpdateApkCleanup("安装成功")
+                }
+                else -> {
+                    val reason = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "安装未完成"
+                    emitUpdateEvent("error", message = if (status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED) "已取消安装" else reason)
+                    // 用户取消或安装失败：安装器不会再读这个文件，立刻清掉
+                    runUpdateApkCleanup("安装未完成")
+                }
+            }
         }
     }
 
@@ -725,5 +805,9 @@ class MainActivity : TauriActivity() {
         ""
     }
 
-    companion object { private const val PICK_DOCUMENTS = 3101 }
+    companion object {
+        private const val PICK_DOCUMENTS = 3101
+        /** PackageInstaller 会话结果广播的私有 action */
+        private const val UPDATE_INSTALL_ACTION = "com.joymanga.app.UPDATE_INSTALL_RESULT"
+    }
 }
