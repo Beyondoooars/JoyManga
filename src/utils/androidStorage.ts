@@ -13,6 +13,7 @@ declare global {
       downloadStatus(active: number, speed: string, current: number, total: number): void
       exitApp(): void
       setKeepScreenOn(enabled: boolean): void
+      setImmersiveMode(enabled: boolean): void
       setVolumeKeyPaging(enabled: boolean): void
       downloadsPath(): string
       hasAllFilesAccess(): boolean
@@ -174,6 +175,19 @@ export function onPermissionResult(listener: (granted: boolean) => void): () => 
  */
 export function setKeepScreenOn(enabled: boolean) {
   window.JmAndroid?.setKeepScreenOn(enabled)
+}
+
+/**
+ * 沉浸式全屏：隐藏状态栏与导航栏。
+ *
+ * 仅在原生桥可用时生效；浏览器/测试环境下由阅读器自身的全屏样式兜底。
+ */
+export function setImmersiveMode(enabled: boolean) {
+  try {
+    window.JmAndroid?.setImmersiveMode(enabled)
+  } catch (error) {
+    console.error('切换沉浸式全屏失败', error)
+  }
 }
 
 export function setVolumeKeyPaging(enabled: boolean) {

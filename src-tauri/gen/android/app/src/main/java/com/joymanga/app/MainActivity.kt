@@ -659,6 +659,26 @@ class MainActivity : TauriActivity() {
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             }
         }
+        /**
+         * 阅读器沉浸式全屏：隐藏状态栏与导航栏，内容延伸到屏幕边缘。
+         *
+         * 用 WindowInsetsController 而不是旧的 systemUiVisibility 标志：后者在
+         * Android 11+ 已废弃，且不会让内容真正铺到刘海/手势条下方。关闭时恢复，
+         * 退出阅读器页面被销毁时也要调用，否则状态栏会一直不回来。
+         */
+        @JavascriptInterface fun setImmersiveMode(enabled: Boolean) {
+            runOnUiThread {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                if (enabled) {
+                    // BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE：从边缘滑动可临时唤出系统栏
+                    controller.systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(WindowInsetsCompat.Type.systemBars())
+                } else {
+                    controller.show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
         /** 音量键翻页：由前端根据设置开启，原生侧只在开启时接管按键。 */
         @JavascriptInterface fun setVolumeKeyPaging(enabled: Boolean) {
             runOnUiThread { volumeKeyPaging = enabled }

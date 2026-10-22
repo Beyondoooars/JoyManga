@@ -504,6 +504,10 @@ defaultCbzMode?: CbzMode;
  */
 readingDirection?: ReadingDirection; 
 /**
+ * 阅读排版：单页翻页或上下滚动。
+ */
+readingMode?: ReadingMode; 
+/**
  * 阅读时保持屏幕常亮。
  */
 keepScreenOn?: boolean; 
@@ -576,6 +580,18 @@ export type ReadingDirection =
  * 从右往左：右侧点击/右滑为上一页（日漫默认）
  */
 "RightToLeft"
+/**
+ * 阅读时的翻页排版方式。
+ */
+export type ReadingMode = 
+/**
+ * 单页翻页：一次显示一页，点击/滑动/键盘翻页。日漫默认。
+ */
+"Paginated" | 
+/**
+ * 上下滚动：整章纵向排列，一屏可看多页，适合条漫和快速浏览。
+ */
+"Scroll"
 export type RelatedListRespData = { id: string; author: string; name: string; image: string }
 export type SearchResult = { searchQuery: string; total: number; content: ComicInSearch[] }
 export type SearchResultVariant = { SearchResult: SearchResult } | { Comic: Comic }

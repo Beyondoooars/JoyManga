@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { commands, type ChapterReaderData, type ChapterNavInfo, type ReadingDirection } from '../bindings.ts'
+import { commands, type ChapterReaderData, type ChapterNavInfo, type ReadingDirection, type ReadingMode } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { getErrorMessage } from '../utils/errors.ts'
 import { imageUrlFor } from '../utils/imageCache.ts'
@@ -13,17 +13,21 @@ import {
   PhCaretDoubleLeft,
   PhCaretDoubleRight,
   PhArrowsHorizontal,
+  PhArrowsVertical,
   PhBookmarkSimple,
   PhListBullets,
+  PhCornersOut,
 } from '@phosphor-icons/vue'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
 import {
   onVolumeKeyPage,
+  setImmersiveMode,
   setKeepScreenOn,
   setVolumeKeyPaging,
 } from '../utils/androidStorage.ts'
 import {
+  currentPageFromVisiblePages,
   pageActionForHorizontalGesture,
   pageActionForTapZone,
   pageActionForKey,
@@ -45,6 +49,18 @@ const message = useMessage()
 
 const { isAndroid } = useIsMobile()
 const hudVisible = ref(true)
+
+// 全屏：进入阅读器默认沉浸式（隐藏状态栏/导航栏），头部按钮可切回
+const fullscreen = ref(true)
+
+function applyFullscreen() {
+  setImmersiveMode(fullscreen.value)
+}
+
+function toggleFullscreen() {
+  fullscreen.value = !fullscreen.value
+  applyFullscreen()
+}
 
 function toggleHud() {
   hudVisible.value = !hudVisible.value
@@ -70,6 +86,86 @@ const fitMode = ref<FitMode>('width')
 const zoom = ref<Transform>({ ...IDENTITY_TRANSFORM })
 const viewerBody = ref<HTMLElement | null>(null)
 const currentPage = ref(1)
+
+// 阅读排版：单页翻页 / 上下滚动。偏好来自设置，可在阅读器头部临时切换。
+const readingMode = ref<ReadingMode>(store.config?.readingMode ?? 'Paginated')
+const scrollViewer = ref<HTMLElement | null>(null)
+// 滚动模式下当前可见页，用于进度保存与页码显示；由 IntersectionObserver 维护。
+let scrollObserver: IntersectionObserver | undefined
+
+// 设置页改动阅读方式后立刻同步（阅读器可能还开着）
+watch(
+  () => store.config?.readingMode,
+  (mode) => {
+    if (mode && mode !== readingMode.value) {
+      readingMode.value = mode
+      if (mode === 'Scroll') {
+        void nextTick(() => {
+          observeScrollPages()
+          scrollToPage(currentPage.value, 'auto')
+        })
+      } else {
+        scrollObserver?.disconnect()
+        scrollObserver = undefined
+      }
+    }
+  },
+)
+
+function toggleReadingMode() {
+  readingMode.value = readingMode.value === 'Paginated' ? 'Scroll' : 'Paginated'
+  if (store.config) store.config.readingMode = readingMode.value
+  resetZoom()
+  if (readingMode.value === 'Scroll') {
+    // 切到滚动后建立观察器并把当前页滚进视野，避免从第一页重新开始
+    void nextTick(() => {
+      observeScrollPages()
+      scrollToPage(currentPage.value, 'auto')
+    })
+  } else {
+    scrollObserver?.disconnect()
+    scrollObserver = undefined
+  }
+}
+
+/** 滚动模式：把指定页滚动到视口顶部附近 */
+function scrollToPage(page: number, behavior: 'auto' | 'smooth' = 'smooth') {
+  const container = scrollViewer.value
+  if (!container) return
+  const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`)
+  if (!target) return
+  // 不能用 offsetTop：它的参照是 offsetParent（这里是定位的 reader-body），
+  // 不是滚动容器；两者一旦有内边距或偏移就会滚错位置。
+  const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+  container.scrollTo({ top, behavior })
+}
+
+/** 滚动模式：监听各页可见比例，把「最靠上的可见页」作为当前页 */
+function observeScrollPages() {
+  scrollObserver?.disconnect()
+  const container = scrollViewer.value
+  if (!container) return
+  const pages = container.querySelectorAll<HTMLElement>('[data-page]')
+  scrollObserver = new IntersectionObserver(
+    (entries) => {
+      const containerTop = container.getBoundingClientRect().top
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .map((entry) => ({
+          page: Number((entry.target as HTMLElement).dataset.page),
+          top: entry.boundingClientRect.top - containerTop,
+        }))
+        .filter((item) => Number.isFinite(item.page))
+      const page = currentPageFromVisiblePages(visible)
+      if (page !== null && page !== currentPage.value) {
+        currentPage.value = page
+        preloadCurrentRange()
+      }
+    },
+    { root: container, threshold: [0.1, 0.5] },
+  )
+  pages.forEach((page) => scrollObserver?.observe(page))
+}
 
 const currentImagePath = computed(() => {
   if (!chapterData.value) return null
@@ -185,7 +281,14 @@ async function loadChapter(comicId: number, chapterId: number, page = 1) {
     if (generation === chapterGeneration) {
       loading.value = false
       await nextTick()
-      if (generation === chapterGeneration) saveProgress()
+      if (generation === chapterGeneration) {
+        saveProgress()
+        // 滚动模式需要等所有页节点渲染完再建立观察器与定位
+        if (readingMode.value === 'Scroll') {
+          observeScrollPages()
+          scrollToPage(currentPage.value, 'auto')
+        }
+      }
     }
   }
 }
@@ -194,6 +297,8 @@ function goToPage(page: number) {
   if (!chapterData.value) return
   currentPage.value = Math.max(1, Math.min(page, chapterData.value.totalImages))
   preloadCurrentRange()
+  // 滚动模式下页码滑块/书签跳转要真的把对应页滚进视野
+  if (readingMode.value === 'Scroll') scrollToPage(currentPage.value)
 }
 
 function onSliderUpdate(page: number) {
@@ -438,16 +543,39 @@ let keepScreenOnWatch: (() => void) | undefined
 let unsubscribeVolumeKeys: (() => void) | undefined
 
 function runPageAction(action: PageAction): void {
+  // 滚动模式下「上一页/下一页」是滚动一屏，而不是切换单页显示
+  if (readingMode.value === 'Scroll') {
+    scrollByViewport(action === 'next' ? 1 : -1)
+    return
+  }
   if (action === 'next') nextPage()
   else prevPage()
 }
 
+/** 滚动模式：按容器高度的 85% 滚动，留一点重叠便于接续阅读 */
+function scrollByViewport(direction: 1 | -1) {
+  const container = scrollViewer.value
+  if (!container) return
+  const atTop = container.scrollTop <= 0
+  const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2
+  // 已经到底还继续「下一页」时进入下一章，与单页模式的行为一致
+  if (direction === 1 && atBottom && chapterData.value?.nextChapter) {
+    goToChapter(chapterData.value.nextChapter)
+    return
+  }
+  if (direction === -1 && atTop && chapterData.value?.prevChapter) {
+    goToChapter(chapterData.value.prevChapter)
+    return
+  }
+  container.scrollBy({ top: direction * container.clientHeight * 0.85, behavior: 'smooth' })
+}
+
 function tapLeft(): void {
-  runPageAction(pageActionForTapZone(readingDirection.value, 'left'))
+  runPageAction(pageActionForTapZone('left'))
 }
 
 function tapRight(): void {
-  runPageAction(pageActionForTapZone(readingDirection.value, 'right'))
+  runPageAction(pageActionForTapZone('right'))
 }
 
 function handleKeyDown(e: KeyboardEvent) {
@@ -455,7 +583,7 @@ function handleKeyDown(e: KeyboardEvent) {
     store.closeReader()
     return
   }
-  const action = pageActionForKey(readingDirection.value, e.key)
+  const action = pageActionForKey(e.key)
   if (!action) return
   // 空格/PageDown/PageUp 会滚动页面，必须阻止默认行为
   if (e.key === ' ' || e.key === 'PageDown' || e.key === 'PageUp') e.preventDefault()
@@ -486,6 +614,8 @@ onMounted(() => {
     ([keepScreenOn, reading]) => setKeepScreenOn(keepScreenOn && reading),
     { immediate: true },
   )
+  // 阅读器一打开就进入沉浸式；退出时必须恢复系统栏，否则状态栏会一直消失
+  applyFullscreen()
   setVolumeKeyPaging(store.config?.volumeKeyPaging ?? false)
   unsubscribeVolumeKeys = onVolumeKeyPage((action) => runPageAction(action))
 })
@@ -495,6 +625,10 @@ onUnmounted(() => {
   keepScreenOnWatch?.()
   keepScreenOnWatch = undefined
   setKeepScreenOn(false)
+  // 退出阅读器恢复系统栏
+  setImmersiveMode(false)
+  scrollObserver?.disconnect()
+  scrollObserver = undefined
   setVolumeKeyPaging(false)
   unsubscribeVolumeKeys?.()
   unsubscribeVolumeKeys = undefined
@@ -542,11 +676,28 @@ onUnmounted(() => {
             title="查看本书书签" @click="bookmarksShowing = !bookmarksShowing"><PhListBullets :size="18" /></button>
 
           <button
+            v-if="readingMode === 'Paginated'"
             type="button"
             :class="['action-btn', { active: fitMode !== 'width' }]"
             :title="`适配：${FIT_MODE_LABELS[fitMode]}（点击切换）`"
             @click="cycleFitMode">
             <PhArrowsHorizontal :size="18" />
+          </button>
+
+          <button
+            type="button"
+            :class="['action-btn', { active: readingMode === 'Scroll' }]"
+            :title="readingMode === 'Scroll' ? '切换到单页翻页' : '切换到上下滚动'"
+            @click="toggleReadingMode">
+            <PhArrowsVertical :size="18" />
+          </button>
+
+          <button
+            type="button"
+            :class="['action-btn', { active: fullscreen }]"
+            :title="fullscreen ? '退出全屏' : '全屏阅读'"
+            @click="toggleFullscreen">
+            <PhCornersOut :size="18" />
           </button>
 
           <button
@@ -588,15 +739,43 @@ onUnmounted(() => {
         </div>
 
         <template v-else-if="chapterData">
+          <!-- 上下滚动模式：整章纵向排列，一次能看多页 -->
+          <div
+            v-if="readingMode === 'Scroll'"
+            ref="scrollViewer"
+            class="scroll-viewer"
+            @click="handleViewerBodyClick">
+            <div
+              v-for="(path, index) in chapterData.imagePaths"
+              :key="path"
+              :data-page="index + 1"
+              class="scroll-page">
+              <div v-if="imageErrors.has(path)" class="image-skeleton image-error">
+                <span>第 {{ index + 1 }} 页读取失败</span>
+                <small>{{ imageErrors.get(path) }}</small>
+                <n-button size="small" @click.stop="retryImage(path)">重新读取</n-button>
+              </div>
+              <img
+                v-else
+                :src="imageSrc(path)"
+                :alt="`第 ${index + 1} 页`"
+                class="reader-img"
+                loading="lazy"
+                @error="markImageError(path)"
+                :draggable="false" />
+            </div>
+          </div>
+
           <!-- 单页翻页模式（滑动 / 点击区域 / 键盘） -->
           <div
+            v-else
             class="paginated-viewer"
             ref="viewerBody"
             @touchstart="onTouchStart"
             @touchmove="onTouchMove"
             @touchend="onTouchEnd"
             @touchcancel="onTouchCancel">
-            <div class="click-zone click-prev" @click="!justSwiped && tapLeft()" :title="pageActionForTapZone(readingDirection, 'left') === 'next' ? '下一页 (← / A)' : '上一页 (← / A)'">
+            <div class="click-zone click-prev" @click="!justSwiped && tapLeft()" title="上一页 (← / A)">
               <PhCaretLeft :size="38" class="zone-icon" />
             </div>
 
@@ -631,7 +810,7 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="click-zone click-next" @click="!justSwiped && tapRight()" :title="pageActionForTapZone(readingDirection, 'right') === 'next' ? '下一页 (→ / D / 空格)' : '上一页 (→ / D)'">
+            <div class="click-zone click-next" @click="!justSwiped && tapRight()" title="下一页 (→ / D / 空格)">
               <PhCaretRight :size="38" class="zone-icon" />
             </div>
           </div>
@@ -865,6 +1044,46 @@ onUnmounted(() => {
 .image-error small {
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+/* 上下滚动模式 */
+.scroll-viewer {
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background-color: #18191C;
+  /* 惯性滚动与滚动链交给浏览器，避免整页跟着弹动 */
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scroll-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 页与页之间不留缝：日漫跨页图需要连续排列 */
+  margin: 0;
+  padding: 0;
+}
+
+/*
+ * 滚动模式的图片宽度：始终铺满容器宽度，高度按原始比例。
+ * 漫画页通常窄于屏幕（尤其是条漫），若按 contain 处理会左右留黑边、
+ * 字变小；按宽度铺满才是滚动阅读的正确排版。
+ */
+.scroll-page .reader-img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  box-shadow: none;
+}
+
+.scroll-page .image-skeleton {
+  width: 100%;
+  max-width: none;
 }
 
 /* Paginated Viewer */

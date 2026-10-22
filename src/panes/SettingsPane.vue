@@ -3,7 +3,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, 
 import { PhArrowClockwise, PhArrowLeft, PhCaretRight } from '@phosphor-icons/vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
-import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection } from '../bindings.ts'
+import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
@@ -158,6 +158,16 @@ const readingDirection = computed({
   get: () => store.config?.readingDirection ?? 'RightToLeft',
   set: (value: ReadingDirection) => {
     if (store.config) store.config.readingDirection = value
+  },
+})
+const readingModeOptions = [
+  { label: '单页翻页', value: 'Paginated' },
+  { label: '上下滚动', value: 'Scroll' },
+]
+const readingMode = computed({
+  get: () => store.config?.readingMode ?? 'Paginated',
+  set: (value: ReadingMode) => {
+    if (store.config) store.config.readingMode = value
   },
 })
 const keepScreenOn = computed({
@@ -400,7 +410,10 @@ function goBack() {
   else emit('back')
 }
 
-const readingSummary = computed(() => (readingDirection.value === 'RightToLeft' ? '从右往左' : '从左往右'))
+const readingSummary = computed(() => {
+  if (readingMode.value === 'Scroll') return '上下滚动'
+  return readingDirection.value === 'RightToLeft' ? '单页 · 从右往左' : '单页 · 从左往右'
+})
 </script>
 
 <template>
@@ -525,8 +538,13 @@ const readingSummary = computed(() => (readingDirection.value === 'RightToLeft' 
       <template v-else-if="openPanel === 'reading'">
         <section class="group">
           <div class="field">
+            <label class="field-label">阅读方式</label>
+            <n-select v-model:value="readingMode" :options="readingModeOptions" />
+          </div>
+          <div v-if="readingMode === 'Paginated'" class="field">
             <label class="field-label">翻页方向</label>
             <n-select v-model:value="readingDirection" :options="readingDirectionOptions" />
+            <span class="field-hint">点击左侧上一页、右侧下一页；滑动翻页跟随此方向。</span>
           </div>
           <div class="row">
             <div class="row-copy"><strong>阅读时屏幕常亮</strong></div>
