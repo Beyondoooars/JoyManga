@@ -332,8 +332,11 @@ mod end_to_end_scan_tests {
         )
         .unwrap();
         for page in [1, 2] {
-            zip.start_file(format!("000{page}.jpg"), zip::write::SimpleFileOptions::default())
-                .unwrap();
+            zip.start_file(
+                format!("000{page}.jpg"),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
             zip.write_all(b"not-a-real-jpeg").unwrap();
         }
         zip.finish().unwrap();
@@ -357,7 +360,11 @@ mod end_to_end_scan_tests {
             chapter_infos: vec![chapter.clone()],
             ..Comic::default()
         };
-        let path = root.join(crate::utils::storage_cbz_filename(&comic.name, comic.id, 456));
+        let path = root.join(crate::utils::storage_cbz_filename(
+            &comic.name,
+            comic.id,
+            456,
+        ));
         write_downloaded_chapter(&path, &comic, &chapter);
         assert!(path.is_file(), "打包产物应当存在于书库根目录");
 
