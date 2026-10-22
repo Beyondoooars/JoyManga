@@ -27,7 +27,8 @@ import {
   setVolumeKeyPaging,
 } from '../utils/androidStorage.ts'
 import {
-  currentPageFromVisiblePages,
+  currentPageFromViewport,
+  isTapGesture,
   pageActionForHorizontalGesture,
   pageActionForTapZone,
   pageActionForKey,
@@ -92,6 +93,15 @@ const readingMode = ref<ReadingMode>(store.config?.readingMode ?? 'Paginated')
 const scrollViewer = ref<HTMLElement | null>(null)
 // 滚动模式下当前可见页，用于进度保存与页码显示；由 IntersectionObserver 维护。
 let scrollObserver: IntersectionObserver | undefined
+// 程序化定位的目标页。非 null 表示正在等上方图片解码、持续校正位置（见 scrollToPage）。
+let pendingScrollPage: number | null = null
+let scrollResizeObserver: ResizeObserver | undefined
+let scrollPollTimer: ReturnType<typeof setTimeout> | undefined
+let scrollDeadlineTimer: ReturnType<typeof setTimeout> | undefined
+/** 校正期间检查位置与上方图片解码情况的间隔 */
+const SCROLL_ALIGN_POLL_MS = 150
+/** 校正的兜底时限：上方图片迟迟不返回时也不能一直压着页码观察器 */
+const SCROLL_SETTLE_MAX_MS = 10000
 
 // 设置页改动阅读方式后立刻同步（阅读器可能还开着）
 watch(
@@ -99,15 +109,8 @@ watch(
   (mode) => {
     if (mode && mode !== readingMode.value) {
       readingMode.value = mode
-      if (mode === 'Scroll') {
-        void nextTick(() => {
-          observeScrollPages()
-          scrollToPage(currentPage.value, 'auto')
-        })
-      } else {
-        scrollObserver?.disconnect()
-        scrollObserver = undefined
-      }
+      if (mode === 'Scroll') enterScrollMode()
+      else leaveScrollMode()
     }
   },
 )
@@ -116,28 +119,170 @@ function toggleReadingMode() {
   readingMode.value = readingMode.value === 'Paginated' ? 'Scroll' : 'Paginated'
   if (store.config) store.config.readingMode = readingMode.value
   resetZoom()
-  if (readingMode.value === 'Scroll') {
-    // 切到滚动后建立观察器并把当前页滚进视野，避免从第一页重新开始
-    void nextTick(() => {
-      observeScrollPages()
-      scrollToPage(currentPage.value, 'auto')
-    })
-  } else {
-    scrollObserver?.disconnect()
-    scrollObserver = undefined
-  }
+  if (readingMode.value === 'Scroll') enterScrollMode()
+  else leaveScrollMode()
 }
 
-/** 滚动模式：把指定页滚动到视口顶部附近 */
-function scrollToPage(page: number, behavior: 'auto' | 'smooth' = 'smooth') {
+/** 切到滚动：等模板渲染出容器后建立观察器，并把当前页滚进视野，避免从第一页重新开始 */
+function enterScrollMode() {
+  void nextTick(() => {
+    observeScrollPages()
+    scrollToPage(currentPage.value)
+  })
+}
+
+function leaveScrollMode() {
+  scrollObserver?.disconnect()
+  scrollObserver = undefined
+  // 收尾会按当前布局补算一次当前页，切回单页时正好落在正在读的那一页
+  finishScrollSettle()
+}
+
+/**
+ * 滚动模式：把指定页对齐到视口顶部。
+ *
+ * 只滚一次是不够的：`loading="lazy"` 的图片在解码前高度为 0，目标页上方任何一张
+ * 图加载完成都会把它往下推，一次 scrollTo 之后位置就漂了。所以先粗定位，再持续
+ * 把目标页贴回顶部，直到上方每页都拿到确定高度（或到达兜底时限）。
+ * 用户一旦自己触摸/滚轮接管，就立即停止校正，不抢滚动条。
+ */
+function scrollToPage(page: number) {
   const container = scrollViewer.value
-  if (!container) return
-  const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`)
+  // 新的定位开始前先收掉上一次的校正，避免两套目标互相拉扯
+  cancelScrollSettle()
+  if (!container || !container.querySelector(`[data-page="${page}"]`)) return
+  pendingScrollPage = page
+  scrollToPendingTarget()
+  // 图片解码会改变页高（ResizeObserver），缓存命中或已解码完的则未必再触发观察器，
+  // 所以再用低频轮询兜底。
+  scrollResizeObserver = new ResizeObserver(() => alignToPendingTarget())
+  container.querySelectorAll<HTMLElement>('[data-page]').forEach((el) => scrollResizeObserver?.observe(el))
+  scrollDeadlineTimer = setTimeout(finishScrollSettle, SCROLL_SETTLE_MAX_MS)
+  scheduleAlignPoll()
+}
+
+function scrollToPendingTarget() {
+  const container = scrollViewer.value
+  if (!container || pendingScrollPage === null) return
+  const target = container.querySelector<HTMLElement>(`[data-page="${pendingScrollPage}"]`)
   if (!target) return
   // 不能用 offsetTop：它的参照是 offsetParent（这里是定位的 reader-body），
   // 不是滚动容器；两者一旦有内边距或偏移就会滚错位置。
   const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
-  container.scrollTo({ top, behavior })
+  // 一律瞬时定位：平滑滚动期间目标还会被图片推走，动画落点必然是错的。
+  container.scrollTo({ top, behavior: 'auto' })
+}
+
+/**
+ * 定位校正：把目标页贴回顶部；上方图片都已解码且已贴住，就结束校正。
+ *
+ * 判据用「上方每一页是否都有确定高度」，而不是 load 事件或固定时长的静置：
+ * 图片可能命中缓存、在监听建立前就解码完；也可能很慢，慢到静置计时早就到期，
+ * 之后再加载又把位置推走。只有上方高度确定下来，位置才算稳定。
+ */
+function alignToPendingTarget() {
+  const container = scrollViewer.value
+  if (!container || pendingScrollPage === null) return
+  const target = container.querySelector<HTMLElement>(`[data-page="${pendingScrollPage}"]`)
+  // 目标页已不在（换章/退出滚动模式）：必须收掉校正，否则观察器会被一直挡着，
+  // 页码和阅读进度就再也不更新了
+  if (!target) {
+    finishScrollSettle()
+    return
+  }
+  scrollToPendingTarget()
+  if (!pagesAboveAreDecoded(container, pendingScrollPage)) return
+  const offset = target.getBoundingClientRect().top - container.getBoundingClientRect().top
+  // 已经贴住，或者滚到底了也贴不住（最后几页不足一屏）——上方高度已确定，位置不会再变。
+  // 「到底」必须以内容真的超出容器为前提：章节还没撑开时 scrollTop 也是 0，
+  // 若认成到底就会提前收尾，让观察器把当前页改回第一页并写坏阅读进度。
+  if (Math.abs(offset) <= 1 || (container.scrollHeight > container.clientHeight + 1 && scrollContainerAtEnd(container))) {
+    finishScrollSettle()
+  }
+}
+
+/**
+ * 轮询兜底。ResizeObserver 覆盖图片解码引起的尺寸变化，但缓存命中、解码发生在
+ * 观察器建立之前的图片不会再触发它，所以用低频轮询补上。
+ */
+function scheduleAlignPoll() {
+  scrollPollTimer = setTimeout(() => {
+    scrollPollTimer = undefined
+    if (pendingScrollPage === null) return
+    alignToPendingTarget()
+    if (pendingScrollPage !== null) scheduleAlignPoll()
+  }, SCROLL_ALIGN_POLL_MS)
+}
+
+/** 目标页上方的每一页是否都已拿到确定高度（图片解码完成或已失败换成骨架） */
+function pagesAboveAreDecoded(container: HTMLElement, page: number): boolean {
+  for (const el of container.querySelectorAll<HTMLElement>('[data-page]')) {
+    if (Number(el.dataset.page) >= page) continue
+    const img = el.querySelector('img')
+    if (img && !img.complete) return false
+    if (el.getBoundingClientRect().height < 1) return false
+  }
+  return true
+}
+
+/**
+ * 结束定位校正：位置已稳定，或用户/退出滚动模式接手了滚动。
+ *
+ * 校正期间可见性反映的是布局中间态，观察器结果被压着不用；结束后必须按当前
+ * 布局补算一次当前页，否则页码与阅读进度会停在校正前的位置。
+ */
+function finishScrollSettle(syncPage = true) {
+  if (scrollDeadlineTimer !== undefined) {
+    clearTimeout(scrollDeadlineTimer)
+    scrollDeadlineTimer = undefined
+  }
+  if (scrollPollTimer !== undefined) {
+    clearTimeout(scrollPollTimer)
+    scrollPollTimer = undefined
+  }
+  scrollResizeObserver?.disconnect()
+  scrollResizeObserver = undefined
+  pendingScrollPage = null
+  const container = scrollViewer.value
+  // 卸载时不再回写页码：此时进度已经 flush 过，改出来的新进度没有机会落盘
+  if (syncPage && container) syncCurrentPageFromLayout(container)
+}
+
+/** 滚动容器是否已到底（末尾不足一屏时，最后一页永远贴不到顶部） */
+function scrollContainerAtEnd(container: HTMLElement): boolean {
+  return container.scrollHeight > container.clientHeight
+    && container.scrollTop >= container.scrollHeight - container.clientHeight - 2
+}
+
+/** 用一份可见页列表更新当前页；号码没变就什么都不做 */
+function applyScrollCurrentPage(container: HTMLElement, visible: Array<{ page: number; top: number }>) {
+  const page = currentPageFromViewport(visible, scrollContainerAtEnd(container))
+  if (page !== null && page !== currentPage.value) {
+    currentPage.value = page
+    preloadCurrentRange()
+  }
+}
+
+/** 按几何位置取可见页，规则与 IntersectionObserver 的回调一致 */
+function syncCurrentPageFromLayout(container: HTMLElement) {
+  const containerRect = container.getBoundingClientRect()
+  const visible: Array<{ page: number; top: number }> = []
+  for (const el of container.querySelectorAll<HTMLElement>('[data-page]')) {
+    const rect = el.getBoundingClientRect()
+    const overlap = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
+    // 阈值与观察器的 0.1 对齐：只露一条边不算这一页可见
+    if (rect.height <= 0 || overlap / rect.height < 0.1) continue
+    visible.push({ page: Number(el.dataset.page), top: rect.top - containerRect.top })
+  }
+  applyScrollCurrentPage(container, visible)
+}
+
+/**
+ * 中断校正（用户接管、开始新的定位）。不回写当前页：调用方刚设好的目标页
+ * 才是此刻的正确值，按旧布局补算反而会把它覆盖掉。
+ */
+function cancelScrollSettle() {
+  if (pendingScrollPage !== null) finishScrollSettle(false)
 }
 
 /** 滚动模式：监听各页可见比例，把「最靠上的可见页」作为当前页 */
@@ -148,6 +293,9 @@ function observeScrollPages() {
   const pages = container.querySelectorAll<HTMLElement>('[data-page]')
   scrollObserver = new IntersectionObserver(
     (entries) => {
+      // 定位校正期间页面高度还在变，此时的可见性反映的是布局中间态，
+      // 用它覆盖 currentPage 会把刚恢复的进度改回第一页。
+      if (pendingScrollPage !== null) return
       const containerTop = container.getBoundingClientRect().top
       const visible = entries
         .filter((entry) => entry.isIntersecting)
@@ -156,11 +304,7 @@ function observeScrollPages() {
           top: entry.boundingClientRect.top - containerTop,
         }))
         .filter((item) => Number.isFinite(item.page))
-      const page = currentPageFromVisiblePages(visible)
-      if (page !== null && page !== currentPage.value) {
-        currentPage.value = page
-        preloadCurrentRange()
-      }
+      applyScrollCurrentPage(container, visible)
     },
     { root: container, threshold: [0.1, 0.5] },
   )
@@ -286,7 +430,7 @@ async function loadChapter(comicId: number, chapterId: number, page = 1) {
         // 滚动模式需要等所有页节点渲染完再建立观察器与定位
         if (readingMode.value === 'Scroll') {
           observeScrollPages()
-          scrollToPage(currentPage.value, 'auto')
+          scrollToPage(currentPage.value)
         }
       }
     }
@@ -531,6 +675,52 @@ function handleViewerBodyClick() {
   toggleHud()
 }
 
+/**
+ * 滚动模式的轻点判定。`click` 在手指轻微移动后照样会派发，直接用它切 HUD
+ * 会频繁误触，所以触摸设备上按触点位移判定，合成 click 一律忽略。
+ */
+let scrollTouchStart: { x: number; y: number; time: number } | null = null
+let lastScrollTouchTime = 0
+
+function onScrollTouchStart(e: TouchEvent) {
+  lastScrollTouchTime = Date.now()
+  // 用户接管滚动：停止程序化定位的校正，不跟手指抢滚动条
+  cancelScrollSettle()
+  // 落在按钮上的触摸交给按钮自己处理（如「重新读取」）：click 上的 .stop 拦不住
+  // touch 事件，这里必须主动排除，否则点按钮会顺带把 HUD 也切了。
+  if (e.touches.length !== 1 || (e.target instanceof Element && e.target.closest('button, a, input, select, textarea, [role="button"]'))) {
+    scrollTouchStart = null
+    return
+  }
+  const touch = e.touches[0]
+  scrollTouchStart = { x: touch.clientX, y: touch.clientY, time: Date.now() }
+}
+
+function onScrollTouchEnd(e: TouchEvent) {
+  // 合成 click 紧跟在 touchend 之后，用结束时刻计时才能覆盖长时间的拖动
+  lastScrollTouchTime = Date.now()
+  const start = scrollTouchStart
+  scrollTouchStart = null
+  const touch = e.changedTouches[0]
+  if (!start || !touch) return
+  if (isTapGesture(start, { x: touch.clientX, y: touch.clientY, time: Date.now() })) toggleHud()
+}
+
+function onScrollTouchCancel() {
+  lastScrollTouchTime = Date.now()
+  scrollTouchStart = null
+}
+
+function handleScrollViewerClick() {
+  // 触摸设备会紧跟 touchend 派发合成 click；HUD 已在 onScrollTouchEnd 里判定过
+  if (Date.now() - lastScrollTouchTime < 700) return
+  toggleHud()
+}
+
+function onScrollWheel() {
+  cancelScrollSettle()
+}
+
 function goToChapter(nav: ChapterNavInfo) {
   if (!chapterData.value) return
   store.openReader(chapterData.value.comicId, nav.chapterId, chapterData.value.comicTitle)
@@ -556,6 +746,8 @@ function runPageAction(action: PageAction): void {
 function scrollByViewport(direction: 1 | -1) {
   const container = scrollViewer.value
   if (!container) return
+  // 键盘/音量键翻屏属于用户主动接管，先停掉定位校正
+  cancelScrollSettle()
   const atTop = container.scrollTop <= 0
   const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2
   // 已经到底还继续「下一页」时进入下一章，与单页模式的行为一致
@@ -629,6 +821,7 @@ onUnmounted(() => {
   setImmersiveMode(false)
   scrollObserver?.disconnect()
   scrollObserver = undefined
+  finishScrollSettle(false)
   setVolumeKeyPaging(false)
   unsubscribeVolumeKeys?.()
   unsubscribeVolumeKeys = undefined
@@ -744,7 +937,11 @@ onUnmounted(() => {
             v-if="readingMode === 'Scroll'"
             ref="scrollViewer"
             class="scroll-viewer"
-            @click="handleViewerBodyClick">
+            @touchstart.passive="onScrollTouchStart"
+            @touchend="onScrollTouchEnd"
+            @touchcancel="onScrollTouchCancel"
+            @wheel.passive="onScrollWheel"
+            @click="handleScrollViewerClick">
             <div
               v-for="(path, index) in chapterData.imagePaths"
               :key="path"
