@@ -301,17 +301,19 @@ pub fn export_logs(
 ) -> CommandResult<ExportLogsResult> {
     let config = app.get_config().read().clone();
 
-    // 优先写入书库下的 logs 目录（用户可通过文件管理器访问）；不可写时退回应用数据目录。
+    // 优先写入应用数据目录：诊断日志属于本机运行数据，应与配置一起随卸载清除。
+    // 若写进书库（可能位于公共下载目录），卸载后文件管理器里会一直留着这些 txt，
+    // 与「卸载即清理本机数据」的预期不符。书库不可写时同样回退到应用数据目录。
     let target_dir = {
-        let preferred = config.download_dir.join("logs");
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let preferred = app_data.join("logs");
         if crate::utils::probe_directory_writable(&preferred) {
             preferred
         } else {
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."));
-            app_data.join("logs")
+            config.download_dir.join("logs")
         }
     };
 
