@@ -311,12 +311,8 @@ async function exportLogs() {
     const logs = store.logRecords.slice(-1000).map((record) => `[${record.level}] ${record.formatedLog}`)
     const result = await commands.exportLogs(logs)
     if (result.status === 'error') throw new Error(result.error.err_message)
-    // 书库为公共下载时诊断日志写进 JoyManga/logs，文件管理器已可见，无需再复制
-    if (isUnderPublicDownloads(result.data.filePath)) {
-      message.success('诊断日志已保存到书库的 logs 目录')
-      return
-    }
-    await exportToAndroidDownloads(result.data.filePath)
+    // 固定保存在书库下的 logs 目录，不再另存一份到系统下载：位置只有这一个
+    message.success(`诊断日志已保存到 ${result.data.filePath}`)
   })
 }
 
@@ -566,7 +562,7 @@ const readingSummary = computed(() => (readingDirection.value === 'RightToLeft' 
             <n-spin v-else :size="16" />
           </button>
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="exportLogs">
-            <div class="nav-copy"><strong>导出诊断日志</strong><span>出问题时导出给开发者定位</span></div>
+            <div class="nav-copy"><strong>导出诊断日志</strong><span>固定保存到书库的 logs 目录</span></div>
             <PhCaretRight v-if="dataBusy !== 'logs'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
@@ -586,7 +582,7 @@ const readingSummary = computed(() => (readingDirection.value === 'RightToLeft' 
               <span class="row-value">{{ logsSizeText }}</span>
               <n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs-clear'" @click="clearLogsAction">清理日志</n-button>
             </div>
-            <p class="note">日志按天滚动保存，保留 7 天，总量上限 20MB。</p>
+            <p class="note">滚动日志按天保存，保留 7 天、上限 20MB；「清理日志」同时清除已导出的诊断日志。</p>
             <n-button type="error" secondary :disabled="!!dataBusy" @click="resetSettings">重置设置</n-button>
           </div>
         </section>
