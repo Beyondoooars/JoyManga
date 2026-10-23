@@ -62,7 +62,7 @@ fn import_batch_with_mode(
     copy_files: bool,
 ) -> ImportReport {
     let mut report = ImportReport::default();
-    let known = super::library_commands::scan_downloaded_comics(download_dir);
+    let known = super::library_commands::scan_downloaded_comics(download_dir).comics;
     for source in paths {
         let source = Path::new(&source);
         let files = if source.is_dir() {
@@ -484,7 +484,7 @@ mod tests {
         let library = root.join("library");
         assert!(import_source(&source, &library).unwrap());
         assert!(!import_source(&source, &library).unwrap());
-        let comics = super::super::library_commands::scan_downloaded_comics(&library);
+        let comics = super::super::library_commands::scan_downloaded_comics(&library).comics;
         assert_eq!(comics.len(), 1);
         assert!(comics[0].id < 0);
         assert!(comics[0].chapter_infos[0].is_downloaded.unwrap());
@@ -516,7 +516,7 @@ mod tests {
         zip.finish().unwrap();
         let library = root.join("library");
         assert!(import_source(&source, &library).unwrap());
-        let comics = super::super::library_commands::scan_downloaded_comics(&library);
+        let comics = super::super::library_commands::scan_downloaded_comics(&library).comics;
         assert_eq!(comics.len(), 1);
         assert_eq!(
             super::super::reader_commands::chapter_reader_data_from_comic(
@@ -535,7 +535,9 @@ mod tests {
         zip.finish().unwrap();
         assert!(import_source(&invalid, &library).is_err());
         assert_eq!(
-            super::super::library_commands::scan_downloaded_comics(&library).len(),
+            super::super::library_commands::scan_downloaded_comics(&library)
+                .comics
+                .len(),
             1
         );
         assert!(source.exists());

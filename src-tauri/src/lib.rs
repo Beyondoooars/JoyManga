@@ -84,6 +84,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             show_path_in_file_manager,
             sync_favorite_folder,
             get_downloaded_comics,
+            diagnose_library,
             delete_downloaded_comic,
             export_cbz,
             export_merged_cbz,

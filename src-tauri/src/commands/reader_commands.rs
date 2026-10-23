@@ -478,7 +478,9 @@ mod tests {
             archive.finish().unwrap();
             paths.push(path);
         }
-        let merged = super::super::library_commands::scan_downloaded_comics(&root).remove(0);
+        let merged = super::super::library_commands::scan_downloaded_comics(&root)
+            .comics
+            .remove(0);
         let first = chapter_reader_data_from_comic(merged.clone(), 101).unwrap();
         let third = chapter_reader_data_from_comic(merged, 103).unwrap();
         assert!(first.image_paths[0].starts_with(paths[0].to_str().unwrap()));

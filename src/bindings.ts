@@ -262,6 +262,17 @@ async syncFavoriteFolder() : Promise<Result<null, CommandError>> {
 async getDownloadedComics() : Promise<Comic[]> {
     return await TAURI_INVOKE("get_downloaded_comics");
 },
+/**
+ * 检查本地书库当前是否真的读到了内容，供书库页在「空列表」时给出原因。
+ * 
+ * Android 上最常见的两种「下载完成却看不到本子」：
+ * 1. 配置里的书库目录与文件实际落点不一致（例如仍是旧的私有目录）；
+ * 2. 目录不可读（权限被撤销）或其中的 CBZ 无法识别，扫描全部失败。
+ * 这两种情况此前都只呈现为「暂无漫画」，用户无从判断。
+ */
+async diagnoseLibrary() : Promise<LibraryDiagnosis | null> {
+    return await TAURI_INVOKE("diagnose_library");
+},
 async deleteDownloadedComic(comic: Comic) : Promise<Result<null, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_downloaded_comic", { comic }) };
@@ -549,6 +560,18 @@ export type ImageDomainMode = "Domain1" | "Domain2" | "Domain3" | "Domain4" | "D
 export type ImageDomainPreset = { mode: ImageDomainMode; label: string; domain: string }
 export type ImportReport = { imported: number; skipped: number; errors: string[] }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
+/**
+ * 书库诊断：没有报错时返回 `None`，有需要用户处理的异常时返回可展示的中文说明。
+ */
+export type LibraryDiagnosis = { 
+/**
+ * `Missing`：目录不存在；`Empty`：目录存在但一本都没有；`Unreadable`：无法读取
+ */
+kind: string; message: string; 
+/**
+ * 扫描时被跳过的文件（最多前 5 条），附原因
+ */
+skipped: string[] }
 export type LogEvent = { timestamp: string; level: LogLevel; fields: { [key in string]: JsonValue }; target: string; filename: string; line_number: number }
 /**
  * 日志等级。
