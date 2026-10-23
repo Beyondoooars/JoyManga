@@ -99,6 +99,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             test_domain_latency,
             get_chapter_reader_data,
             set_network_metered,
+            set_network_vpn,
             import_local_comics,
             remove_library_comic,
         ])

@@ -389,6 +389,20 @@ async setNetworkMetered(metered: boolean) : Promise<Result<null, CommandError>> 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Android 侧把当前默认网络是否由 VPN 承载推给后端。
+ * 
+ * 手动 HTTP 代理只在没有 VPN 时生效（见 `Config::effective_proxy_url`），
+ * 所以状态一旦变化就必须重建已缓存的 HTTP 客户端，否则要等到下次改设置。
+ */
+async setNetworkVpn(active: boolean) : Promise<Result<null, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_network_vpn", { active }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async importLocalComics(paths: string[]) : Promise<Result<ImportReport, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_local_comics", { paths }) };

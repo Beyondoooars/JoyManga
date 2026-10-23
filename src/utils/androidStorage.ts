@@ -210,6 +210,23 @@ export function watchNetworkMetered(handler: (metered: boolean) => void): () => 
 }
 
 /**
+ * 监听系统 VPN 状态（启动与切换网络时各一次）。
+ *
+ * 后端在 VPN 开启时跳过手动 HTTP 代理：VPN 已在系统层接管流量，再连本机代理端口
+ * 往往连不上，表现就是「开了 VPN 反而上不了网」。非 Android 环境恒为 false。
+ * 返回值用于取消订阅。
+ */
+export function watchNetworkVpn(handler: (active: boolean) => void): () => void {
+  if (!isAndroid) {
+    handler(false)
+    return () => {}
+  }
+  const listener = (event: Event) => handler(Boolean((event as CustomEvent<boolean>).detail))
+  window.addEventListener('jm-network-vpn', listener)
+  return () => window.removeEventListener('jm-network-vpn', listener)
+}
+
+/**
  * 「用 JoyManga 打开 CBZ」：原生把外部文件复制到暂存区后推送此事件。
  * 返回取消订阅函数；回调负责导入并在结束后调用 `discardImports(id)`。
  */

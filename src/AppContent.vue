@@ -16,7 +16,7 @@ import { getErrorMessage } from './utils/errors.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
 import { useIsMobile } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
-import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered } from './utils/androidStorage.ts'
+import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered, watchNetworkVpn } from './utils/androidStorage.ts'
 import { onOpenExternalComic } from './libraryApi.ts'
 
 const StorageOnboardingDialog = defineAsyncComponent(() => import('./dialogs/StorageOnboardingDialog.vue'))
@@ -221,6 +221,7 @@ async function initializeApp() {
 }
 
 let stopNetworkWatch: (() => void) | undefined
+let stopVpnWatch: (() => void) | undefined
 let stopCancelListener: (() => void) | undefined
 let stopOpenFileListener: (() => void) | undefined
 
@@ -229,6 +230,10 @@ onMounted(() => {
   // 把 Android 的网络计费状态同步给后端，「仅 Wi-Fi 下载」依赖它做判断
   stopNetworkWatch = watchNetworkMetered((metered) => {
     void commands.setNetworkMetered(metered).catch(() => { /* 旧后端无此命令时忽略 */ })
+  })
+  // VPN 开启时后端跳过手动代理，否则「开 VPN 反而连不上」
+  stopVpnWatch = watchNetworkVpn((active) => {
+    void commands.setNetworkVpn(active).catch(() => { /* 旧后端无此命令时忽略 */ })
   })
   // 通知栏"取消当前"：由原生转发事件，这里执行取消并给出反馈
   const onCancelCurrent = async () => {
@@ -267,6 +272,8 @@ onUnmounted(() => {
   document.removeEventListener('contextmenu', preventContextMenu)
   stopNetworkWatch?.()
   stopNetworkWatch = undefined
+  stopVpnWatch?.()
+  stopVpnWatch = undefined
   stopCancelListener?.()
   stopCancelListener = undefined
   stopOpenFileListener?.()
