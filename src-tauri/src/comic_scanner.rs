@@ -803,7 +803,7 @@ mod new_storage_tests {
             zip.write_all(b"page").unwrap();
             zip.finish().unwrap();
         }
-        let books = crate::commands::library_commands::scan_downloaded_comics(&root);
+        let books = crate::commands::library_commands::scan_downloaded_comics(&root).comics;
         assert_eq!(books.len(), 1);
         let downloaded: Vec<_> = books[0]
             .chapter_infos

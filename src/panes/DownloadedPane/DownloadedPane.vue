@@ -1,5 +1,5 @@
 <script setup lang="tsx">
-import { Comic, commands } from '../../bindings.ts'
+import { Comic, LibraryDiagnosis, commands } from '../../bindings.ts'
 import { computed, onActivated, onMounted, ref, watch, watchEffect } from 'vue'
 import DownloadedComicCard from './components/DownloadedComicCard.vue'
 import { useStore } from '../../store.ts'
@@ -17,7 +17,8 @@ import UpdateDownloadedComicsButton from './components/UpdateDownloadedComicsBut
 import PathField from '../../components/PathField.vue'
 import { useDialog, useMessage } from 'naive-ui'
 import { getErrorMessage } from '../../utils/errors.ts'
-import { withAndroidSelection } from '../../utils/androidStorage.ts'
+import { hasAllFilesAccess, requestAllFilesAccessAndWait, withAndroidSelection } from '../../utils/androidStorage.ts'
+import { isAndroid } from '../../composables/useIsMobile.ts'
 import { filterLibrary } from '../../utils/librarySearch.ts'
 import { libraryApi } from '../../libraryApi.ts'
 import { isMergeableComic } from '../../utils/mergeableComics.ts'
@@ -88,11 +89,52 @@ async function executeImport(paths: string[]) {
   }
 }
 
+// 书库为空或被跳过了文件时，后端能给出具体原因（目录不存在/不可读/文件损坏）。
+// 只显示「暂无漫画」时用户无从判断是没下载好、位置不对还是权限丢了。
+const diagnosis = ref<LibraryDiagnosis | null>(null)
+const dismissedDiagnosis = ref('')
+
+// 有内容但跳过了文件时才提示；用户关掉后同样的结论不再重复弹出，
+// 结论变了（多了/少了坏文件）才会再出现。
+const partialWarning = computed(() => {
+  const value = diagnosis.value
+  if (value?.kind !== 'Partial' || value.message === dismissedDiagnosis.value) return null
+  return value
+})
+
+async function updateDiagnosis() {
+  try {
+    diagnosis.value = await commands.diagnoseLibrary()
+  } catch (error) {
+    console.error('书库诊断失败', error)
+    diagnosis.value = null
+  }
+}
+
 async function refreshLibrary() {
   loading.value = true
-  try { await store.refreshDownloadedComics() }
-  catch (error) { message.error(`刷新书库失败：${getErrorMessage(error)}`) }
+  try {
+    await store.refreshDownloadedComics()
+    await updateDiagnosis()
+  } catch (error) { message.error(`刷新书库失败：${getErrorMessage(error)}`) }
   finally { loading.value = false }
+}
+
+/** 诊断提示里的「授权后重试」：申请「所有文件访问」并重新扫描。 */
+async function grantStorageAndRetry() {
+  const granted = await requestAllFilesAccessAndWait()
+  if (!granted) {
+    message.warning('未获得「所有文件访问」权限，书库仍可能无法读取')
+  }
+  await refreshLibrary()
+}
+
+function openStorageSettings() {
+  store.openSettings()
+}
+
+function dismissPartialWarning() {
+  dismissedDiagnosis.value = diagnosis.value?.message ?? ''
 }
 
 watch(() => store.authoritativeConfig?.downloadDir, (path, previous) => {
@@ -334,6 +376,17 @@ async function deleteDownloadedComics() {
         <span class="banner-arrow">查看进度 ›</span>
       </div>
 
+      <!-- 部分文件被跳过：列表非空但少了几本，必须说明否则用户以为丢书 -->
+      <div v-if="partialWarning" class="library-warning" role="status">
+        <div>
+          <strong>{{ partialWarning.message }}</strong>
+          <ul v-if="partialWarning.skipped.length" class="diagnosis-skipped">
+            <li v-for="item in partialWarning.skipped" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <button type="button" class="library-warning-close" aria-label="关闭提示" @click="dismissPartialWarning">×</button>
+      </div>
+
       <section class="library-hero">
         <div>
           <h1>本地书库<span>{{ store.downloadedComics.length }} 本</span></h1>
@@ -423,6 +476,23 @@ async function deleteDownloadedComics() {
           <strong v-else>{{ libraryFilter === 'mergeable' ? '暂无可合并的多话漫画' : '暂无漫画' }}</strong>
           <span v-if="searchQuery.trim()">可尝试更短的关键词，或清空搜索框。</span>
           <span v-else-if="libraryFilter === 'mergeable'">需要同一本漫画至少两话已下载。</span>
+          <template v-else-if="diagnosis">
+            <p class="diagnosis-message">{{ diagnosis.message }}</p>
+            <ul v-if="diagnosis.skipped.length" class="diagnosis-skipped">
+              <li v-for="item in diagnosis.skipped" :key="item">{{ item }}</li>
+            </ul>
+            <div class="diagnosis-actions">
+              <n-button
+                v-if="isAndroid && !hasAllFilesAccess()"
+                size="small"
+                type="primary"
+                @click="grantStorageAndRetry">
+                授予存储权限后重试
+              </n-button>
+              <n-button size="small" :loading="loading" @click="refreshLibrary">重新扫描</n-button>
+              <n-button size="small" @click="openStorageSettings">更改书库位置</n-button>
+            </div>
+          </template>
         </div>
         <div class="comic-grid">
         <DownloadedComicCard
@@ -590,6 +660,69 @@ async function deleteDownloadedComics() {
 .library-empty svg {
   margin-bottom: 12px;
   color: #fb7299;
+}
+
+.diagnosis-message {
+  max-width: 520px;
+  margin: 8px 0 0;
+  padding: 0 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.diagnosis-skipped {
+  max-width: 520px;
+  margin: 8px 0 0;
+  padding: 0 16px 0 32px;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: left;
+  word-break: break-all;
+}
+
+.diagnosis-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.library-warning {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin: 10px 16px 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 156, 46, 0.35);
+  border-radius: 12px;
+  background: rgba(255, 156, 46, 0.08);
+  color: #18191c;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.library-warning-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #61666d;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.library-warning-close:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.library-warning .diagnosis-skipped {
+  padding: 0 0 0 18px;
 }
 
 .library-subtabs-bar {

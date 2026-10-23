@@ -230,10 +230,18 @@ pub fn aes256_ecb_decrypt_base64(key: &[u8], data: &str) -> anyhow::Result<Vec<u
 
 type ComicIndex = (PathBuf, HashMap<i64, Comic>);
 
+/// 最近一次书库扫描的摘要，供 `diagnose_library` 复用，避免刷新后立刻再扫一遍整库。
+pub struct LibraryScanSnapshot {
+    pub root: PathBuf,
+    pub comic_count: usize,
+    pub skipped: Vec<String>,
+}
+
 #[derive(Default)]
 pub struct DownloadedLibraryCache {
     map: RwLock<Option<HashMap<i64, PathBuf>>>,
     comics: RwLock<Option<ComicIndex>>,
+    scan: RwLock<Option<LibraryScanSnapshot>>,
 }
 
 impl DownloadedLibraryCache {
@@ -241,7 +249,23 @@ impl DownloadedLibraryCache {
         Self {
             map: RwLock::new(None),
             comics: RwLock::new(None),
+            scan: RwLock::new(None),
         }
+    }
+
+    pub fn set_scan(&self, root: &Path, comic_count: usize, skipped: Vec<String>) {
+        *self.scan.write() = Some(LibraryScanSnapshot {
+            root: root.to_path_buf(),
+            comic_count,
+            skipped,
+        });
+    }
+
+    /// 只在书库根目录没变时复用；换过目录后旧摘要说明不了新目录的情况。
+    pub fn scan_summary(&self, root: &Path) -> Option<(usize, Vec<String>)> {
+        let guard = self.scan.read();
+        let snapshot = guard.as_ref()?;
+        (snapshot.root == root).then(|| (snapshot.comic_count, snapshot.skipped.clone()))
     }
 
     pub fn get(&self) -> Option<HashMap<i64, PathBuf>> {
@@ -252,6 +276,7 @@ impl DownloadedLibraryCache {
         // 路径映射变了，基于旧映射建立的漫画快照同样失效；否则归档整合会拿到
         // 章节没有下载路径的旧快照，整本合并直接失败。
         *self.comics.write() = None;
+        *self.scan.write() = None;
         *self.map.write() = Some(map);
     }
 
@@ -274,6 +299,8 @@ impl DownloadedLibraryCache {
     pub fn invalidate(&self) {
         *self.map.write() = None;
         *self.comics.write() = None;
+        // 扫描摘要同样过期：下载完成/整合后书库内容已经变了。
+        *self.scan.write() = None;
     }
 
     pub fn set_comics(&self, root: &Path, comics: &[Comic]) {

@@ -11,45 +11,73 @@ use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
 use crate::types::{Comic, ComicInFavorite, ComicInSearch, ComicInWeekly};
 use crate::utils;
 
+/// 书库扫描结果：漫画列表 + 扫描过程中被跳过的项。
+///
+/// 单独返回原因而不是只打日志：书库页拿到空列表时，用户看到的永远是「暂无漫画」，
+/// 而真正的原因（某个 CBZ 损坏、目录不可读）只留在日志里，等于无法排查。
+pub(crate) struct LibraryScan {
+    pub comics: Vec<Comic>,
+    pub skipped: Vec<String>,
+}
+
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_lines)]
 #[tauri::command(async)]
 #[specta::specta]
 pub fn get_downloaded_comics(app: AppHandle) -> Vec<Comic> {
+    downloaded_library(&app).comics
+}
+
+/// 读取本地书库（扫描结果 + 书库记录里的导入项）。
+pub(crate) fn downloaded_library(app: &AppHandle) -> LibraryScan {
     let download_dir = app.get_config().read().download_dir.clone();
     let catalog = {
         let _guard = crate::library_catalog::CATALOG_LOCK.lock();
-        crate::library_catalog::LibraryCatalog::load(&crate::library_catalog::catalog_path(&app))
+        crate::library_catalog::LibraryCatalog::load(&crate::library_catalog::catalog_path(app))
     };
-    let Ok(catalog) = catalog else {
-        tracing::error!(error = ?catalog.err(), "读取书库记录失败");
-        return Vec::new();
+    let catalog = match catalog {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            // 记录损坏时导入项与"已移除"记录会一起丢失，但磁盘上的漫画仍应显示：
+            // 继续用空记录扫描，而不是把整个书库当作空列表返回。
+            tracing::error!(error = ?error, "读取书库记录失败，本次按空记录继续扫描");
+            crate::library_catalog::LibraryCatalog::default()
+        }
     };
     let removed = catalog.removed_ids(&download_dir);
-    let mut comics = scan_downloaded_comics(&download_dir);
-    comics.retain(|comic| !removed.contains(&comic.id));
+    let mut scan = scan_downloaded_comics(&download_dir);
     for record in catalog.visible_imports(&download_dir) {
         match crate::library_catalog::registered_cbz_comic(&record) {
-            Ok(comic) => comics.push(comic),
+            Ok(comic) => scan.comics.push(comic),
             Err(error) => {
-                tracing::warn!(path = %record.path.display(), error = %error, "跳过无法读取的导入漫画")
+                tracing::warn!(path = %record.path.display(), error = %error, "跳过无法读取的导入漫画");
+                scan.skipped.push(format!(
+                    "{}：{error}",
+                    record
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                ));
             }
         }
     }
+    scan.comics.retain(|comic| !removed.contains(&comic.id));
     if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
         let mut map = std::collections::HashMap::new();
-        for comic in &comics {
+        for comic in &scan.comics {
             if let Some(dir) = &comic.comic_download_dir {
                 map.insert(comic.id, dir.clone());
             }
         }
         cache.set(map);
-        cache.set_comics(&download_dir, &comics);
+        cache.set_comics(&download_dir, &scan.comics);
+        cache.set_scan(&download_dir, scan.comics.len(), scan.skipped.clone());
     }
-    comics
+    scan
 }
 
-pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> Vec<Comic> {
+pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> LibraryScan {
     // 1. 扫描下载根目录下的平铺 .cbz 文件
     let mut flat_cbz_items = Vec::new();
     if let Ok(entries) = std::fs::read_dir(download_dir) {
@@ -88,6 +116,7 @@ pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> Vec<Comic> {
     all_items.sort_by(|(_, a, _), (_, b, _)| b.cmp(a));
 
     let mut downloaded_comics = Vec::new();
+    let mut skipped = Vec::new();
     for (path, _, is_cbz) in all_items {
         let res = if is_cbz {
             Comic::from_cbz(&path).context(format!("从CBZ`{}`转为Comic失败", path.display()))
@@ -101,6 +130,10 @@ pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> Vec<Comic> {
                 let err_title = "获取已下载漫画的过程中遇到错误，已跳过";
                 let string_chain = err.to_string_chain();
                 tracing::error!(err_title, message = string_chain);
+                skipped.push(format!(
+                    "{}：{string_chain}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
             }
         }
     }
@@ -143,7 +176,83 @@ pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> Vec<Comic> {
         unique_comics.push(base_comic);
     }
 
-    unique_comics
+    LibraryScan {
+        comics: unique_comics,
+        skipped,
+    }
+}
+
+/// 书库诊断：没有报错时返回 `None`，有需要用户处理的异常时返回可展示的中文说明。
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDiagnosis {
+    /// `Missing`：目录不存在；`Empty`：目录存在但一本都没有；`Unreadable`：无法读取
+    pub kind: String,
+    pub message: String,
+    /// 扫描时被跳过的文件（最多前 5 条），附原因
+    pub skipped: Vec<String>,
+}
+
+/// 检查本地书库当前是否真的读到了内容，供书库页在「空列表」时给出原因。
+///
+/// Android 上最常见的两种「下载完成却看不到本子」：
+/// 1. 配置里的书库目录与文件实际落点不一致（例如仍是旧的私有目录）；
+/// 2. 目录不可读（权限被撤销）或其中的 CBZ 无法识别，扫描全部失败。
+/// 这两种情况此前都只呈现为「暂无漫画」，用户无从判断。
+#[tauri::command(async)]
+#[specta::specta]
+#[allow(clippy::needless_pass_by_value)]
+pub fn diagnose_library(app: AppHandle) -> Option<LibraryDiagnosis> {
+    let download_dir = app.get_config().read().download_dir.clone();
+    // 刚刷新过书库时直接复用那次扫描的摘要：诊断紧跟在刷新之后调用，
+    // 再扫一遍整库会让空书库页也要等一次全量 walkdir。
+    let (comic_count, all_skipped) = match app
+        .try_state::<utils::DownloadedLibraryCache>()
+        .and_then(|cache| cache.scan_summary(&download_dir))
+    {
+        Some(summary) => summary,
+        None => {
+            let scan = downloaded_library(&app);
+            (scan.comics.len(), scan.skipped)
+        }
+    };
+    let skipped_count = all_skipped.len();
+    let skipped: Vec<String> = all_skipped.into_iter().take(5).collect();
+    if comic_count > 0 {
+        // 有内容时只有"部分文件被跳过"值得提示
+        if skipped.is_empty() {
+            return None;
+        }
+        return Some(LibraryDiagnosis {
+            kind: "Partial".into(),
+            message: format!(
+                "书库中有 {skipped_count} 个文件无法读取，已跳过；它们不会显示在列表中。"
+            ),
+            skipped,
+        });
+    }
+    match std::fs::read_dir(&download_dir) {
+        Ok(_) => Some(LibraryDiagnosis {
+            kind: "Empty".into(),
+            message: format!(
+                "书库目录 `{}` 中没有可识别的漫画。若文件管理器里能在别处看到 .cbz，说明应用的书库位置与实际保存位置不一致，可在设置中更改书库位置。",
+                download_dir.display()
+            ),
+            skipped,
+        }),
+        Err(error) => Some(LibraryDiagnosis {
+            kind: if download_dir.exists() {
+                "Unreadable".into()
+            } else {
+                "Missing".into()
+            },
+            message: format!(
+                "无法读取书库目录 `{}`：{error}。请检查存储权限，或在设置中重新选择书库位置。",
+                download_dir.display()
+            ),
+            skipped,
+        }),
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -368,7 +477,7 @@ mod end_to_end_scan_tests {
         write_downloaded_chapter(&path, &comic, &chapter);
         assert!(path.is_file(), "打包产物应当存在于书库根目录");
 
-        let scanned = scan_downloaded_comics(&root);
+        let scanned = scan_downloaded_comics(&root).comics;
         assert_eq!(scanned.len(), 1, "刚下载的本子必须出现在书库扫描结果里");
         assert_eq!(scanned[0].id, 123);
         assert_eq!(scanned[0].is_downloaded, Some(true));
@@ -376,6 +485,21 @@ mod end_to_end_scan_tests {
             scanned[0].chapter_infos[0].chapter_download_dir.as_deref(),
             Some(path.as_path())
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_archives_are_reported_instead_of_silently_hidden() {
+        // 书库里只有一个坏文件时，旧实现只打一行日志，界面永远是「暂无漫画」。
+        let root = std::env::temp_dir().join(format!("jm-scan-bad-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("损坏的本子.cbz"), b"not a zip").unwrap();
+
+        let scan = scan_downloaded_comics(&root);
+        assert!(scan.comics.is_empty());
+        assert_eq!(scan.skipped.len(), 1, "扫描失败的文件必须带原因返回");
+        assert!(scan.skipped[0].contains("损坏的本子.cbz"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
