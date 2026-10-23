@@ -156,13 +156,31 @@ class MainActivity : TauriActivity() {
             manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                     pushMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
+                    pushVpn(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
                 }
-                override fun onLost(network: Network) { pushMetered(manager.isActiveNetworkMetered) }
+                override fun onLost(network: Network) {
+                    pushMetered(manager.isActiveNetworkMetered)
+                    pushVpn(isVpnActive(manager))
+                }
             })
             pushMetered(manager.isActiveNetworkMetered)
+            pushVpn(isVpnActive(manager))
         } catch (error: Exception) {
             android.util.Log.w("JoyManga", "读取网络计费状态失败", error)
         }
+    }
+
+    /**
+     * 当前默认网络是否由 VPN 承载。
+     *
+     * 只看默认网络：部分 ROM 会常驻一个未激活的 VPN 配置（或分应用代理），
+     * 按 TRANSPORT_VPN 全局查询会把没开 VPN 的用户也判成"已开启"，从而错误地
+     * 跳过用户手动配置的代理。默认网络的能力里出现 TRANSPORT_VPN 才说明流量
+     * 真的走 VPN。NET_CAPABILITY_NOT_VPN 在 API 28+ 才存在，这里用传输类型判断。
+     */
+    private fun isVpnActive(manager: ConnectivityManager): Boolean {
+        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
     }
 
     private fun pushMetered(metered: Boolean) {
@@ -173,6 +191,15 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    /** VPN 状态单独推送：后端据此决定是否跳过手动 HTTP 代理（见 Config::effective_proxy_url）。 */
+    private fun pushVpn(active: Boolean) {
+        if (!visible) return
+        runOnUiThread {
+            appWebView?.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('jm-network-vpn', {detail:$active}))", null)
+        }
+    }
+
     override fun onStart() {
         super.onStart()
         visible = true
@@ -180,6 +207,7 @@ class MainActivity : TauriActivity() {
         AppState.foreground = true
         updateDownloadService()
         pushMetered(getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered)
+        pushVpn(isVpnActive(getSystemService(ConnectivityManager::class.java)))
         installPendingUpdate()
     }
     override fun onStop() {

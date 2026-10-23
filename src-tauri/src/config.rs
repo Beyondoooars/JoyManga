@@ -433,20 +433,35 @@ impl Config {
         }
     }
 
+    /// 当前实际生效的手动代理地址；`None` 表示不额外设置代理。
+    ///
+    /// 系统 VPN 开启时跳过手动代理：VPN 已经在系统层接管了全部流量，再把手动
+    /// 代理地址（通常是某代理客户端的 127.0.0.1:7890）套上去，一旦那个端口
+    /// 并没有在监听（VPN 走的是 tun 模式，或客户端换了端口），所有请求都会
+    /// 卡在连接本地代理上——表现就是「开 VPN 反而连不上网」。
+    /// 设置页的说明「VPN 随系统生效；开启 VPN 时应用会自动跳过此代理」即指此处。
+    pub fn effective_proxy_url(&self) -> Option<String> {
+        match self.proxy_mode {
+            ProxyMode::Custom if !crate::network_state::is_vpn_active() => {
+                Some(format!("http://{}:{}", self.proxy_host, self.proxy_port))
+            }
+            _ => None,
+        }
+    }
+
     pub fn apply_proxy(
         &self,
         builder: reqwest::ClientBuilder,
     ) -> anyhow::Result<reqwest::ClientBuilder> {
-        match self.proxy_mode {
-            ProxyMode::NoProxy => Ok(builder.no_proxy()),
-            ProxyMode::System => Ok(builder),
-            ProxyMode::Custom => {
-                let proxy_url = format!("http://{}:{}", self.proxy_host, self.proxy_port);
-                let proxy = reqwest::Proxy::all(&proxy_url)
-                    .context(format!("创建代理`{proxy_url}`失败"))?;
-                Ok(builder.proxy(proxy))
-            }
+        if self.proxy_mode == ProxyMode::NoProxy {
+            return Ok(builder.no_proxy());
         }
+        let Some(proxy_url) = self.effective_proxy_url() else {
+            return Ok(builder);
+        };
+        let proxy =
+            reqwest::Proxy::all(&proxy_url).context(format!("创建代理`{proxy_url}`失败"))?;
+        Ok(builder.proxy(proxy))
     }
 
     pub fn apply_proxy_best_effort(
@@ -454,19 +469,18 @@ impl Config {
         builder: reqwest::ClientBuilder,
         client_name: &str,
     ) -> reqwest::ClientBuilder {
-        match self.proxy_mode {
-            ProxyMode::NoProxy => builder.no_proxy(),
-            ProxyMode::System => builder,
-            ProxyMode::Custom => {
-                let proxy_url = format!("http://{}:{}", self.proxy_host, self.proxy_port);
-                match reqwest::Proxy::all(&proxy_url) {
-                    Ok(proxy) => builder.proxy(proxy),
-                    Err(err) => {
-                        let err_title = format!("`{client_name}`设置代理`{proxy_url}`失败");
-                        tracing::error!(err_title, message = %err);
-                        builder
-                    }
-                }
+        if self.proxy_mode == ProxyMode::NoProxy {
+            return builder.no_proxy();
+        }
+        let Some(proxy_url) = self.effective_proxy_url() else {
+            return builder;
+        };
+        match reqwest::Proxy::all(&proxy_url) {
+            Ok(proxy) => builder.proxy(proxy),
+            Err(err) => {
+                let err_title = format!("`{client_name}`设置代理`{proxy_url}`失败");
+                tracing::error!(err_title, message = %err);
+                builder
             }
         }
     }
@@ -698,6 +712,46 @@ mod tests {
         assert_eq!(merged.username, "bob");
         assert_eq!(merged.img_concurrency, 4);
         merged.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod proxy_selection_tests {
+    use super::*;
+
+    fn custom_proxy_config() -> Config {
+        let mut config = Config::default(Path::new("test-app-data"));
+        config.proxy_mode = ProxyMode::Custom;
+        config.proxy_host = "127.0.0.1".into();
+        config.proxy_port = 7890;
+        config
+    }
+
+    #[test]
+    fn manual_proxy_is_used_only_without_a_vpn() {
+        let _guard = crate::network_state::STATE_TEST_LOCK.lock();
+        let config = custom_proxy_config();
+        crate::network_state::set_vpn(false);
+        assert_eq!(
+            config.effective_proxy_url().as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+
+        // VPN 已在系统层接管流量：再套手动代理只会连到本机端口，开 VPN 反而断网
+        crate::network_state::set_vpn(true);
+        assert_eq!(config.effective_proxy_url(), None);
+        crate::network_state::set_vpn(false);
+    }
+
+    #[test]
+    fn direct_and_system_modes_never_add_a_manual_proxy() {
+        let _guard = crate::network_state::STATE_TEST_LOCK.lock();
+        let mut config = custom_proxy_config();
+        crate::network_state::set_vpn(false);
+        config.proxy_mode = ProxyMode::System;
+        assert_eq!(config.effective_proxy_url(), None);
+        config.proxy_mode = ProxyMode::NoProxy;
+        assert_eq!(config.effective_proxy_url(), None);
     }
 }
 

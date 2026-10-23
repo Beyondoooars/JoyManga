@@ -529,7 +529,7 @@ const readingSummary = computed(() => {
               <div class="field"><label class="field-label">主机</label><n-input v-model:value="store.config.proxyHost" placeholder="127.0.0.1" /></div>
               <div class="field"><label class="field-label">端口</label><n-input-number :value="store.config.proxyPort" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
             </div>
-            <p class="note">VPN 随系统生效；开启 VPN 时应用会自动跳过此代理。</p>
+            <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。</p>
           </div>
         </section>
       </template>
