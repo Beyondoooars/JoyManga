@@ -105,6 +105,18 @@ impl DomainHealthStore {
             .is_some_and(|health| health.in_cooldown(now))
     }
 
+    /// 该线路近期是否已确认不可用（连续失败且仍在冷却）。
+    ///
+    /// 用于把失效的配置线路从候选首位挪开：域名过期被停放后，每条请求都先撞它
+    /// 一次，用户要多等一次往返甚至一次超时。
+    pub fn is_failing(&self, domain: &str) -> bool {
+        let now = Instant::now();
+        self.entries
+            .read()
+            .get(domain)
+            .is_some_and(|health| health.consecutive_failures > 0 && health.in_cooldown(now))
+    }
+
     pub fn failure_count(&self, domain: &str) -> u32 {
         self.entries
             .read()
@@ -148,6 +160,20 @@ mod tests {
         store.record_success("recover.example", Duration::from_millis(120));
         assert!(!store.is_cooling_down("recover.example"));
         assert_eq!(store.failure_count("recover.example"), 0);
+    }
+
+    #[test]
+    fn failing_domain_is_reported_so_it_can_be_demoted() {
+        let store = DomainHealthStore::new();
+        // 只失败一次还不算确认失效：偶发抖动不该改变用户配置的优先线路
+        store.record_failure("parked.example");
+        assert!(!store.is_failing("parked.example"));
+        // 连续失败进入冷却后，候选列表就能把它挪开
+        store.record_failure("parked.example");
+        assert!(store.is_failing("parked.example"));
+        // 恢复后不再算失效
+        store.record_success("parked.example", Duration::from_millis(80));
+        assert!(!store.is_failing("parked.example"));
     }
 
     #[test]

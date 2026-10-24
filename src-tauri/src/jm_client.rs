@@ -123,7 +123,7 @@ fn api_failure(status: StatusCode, code: Option<i64>, message: &str) -> anyhow::
     })
 }
 
-/// 网关/拦截页面特征：换一条线路可能恢复，且报文不代表真正的业务响应。
+/// 网关/拦截/停放页面特征：换一条线路可能恢复，且报文不代表真正的业务响应。
 fn is_blocked_page(message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "网页防火墙",
@@ -134,7 +134,22 @@ fn is_blocked_page(message: &str) -> bool {
         "cf-error",
         "Just a moment",
     ];
-    MARKERS.iter().any(|marker| message.contains(marker))
+    if MARKERS.iter().any(|marker| message.contains(marker)) {
+        return true;
+    }
+    // 域名过期后常被停放商接管：HTTP 200 + 一个 HTML 跳转页（例如
+    // `window.location.href="/lander"`）。业务响应一定是 JSON，出现 HTML 就说明
+    // 这条线路已经不再提供服务。此前它被当成普通业务错误直接终止整轮请求，
+    // 明明刷新后已有可用线路，却一条都不会被尝试。
+    is_html_page(message)
+}
+
+/// 报文是否是 HTML 文档而不是 API 的 JSON。
+fn is_html_page(message: &str) -> bool {
+    let trimmed = message.trim_start();
+    let head: String = trimmed.chars().take(200).collect::<String>().to_lowercase();
+    // 停放页可能以注释、空白或 BOM 开头，不能只看第一个字符
+    head.contains("<!doctype html") || head.contains("<html")
 }
 
 fn is_authentication_error(error: &anyhow::Error) -> bool {
@@ -486,10 +501,16 @@ impl JmClient {
         if let Some(last) = self.last_success_domain.read().clone() {
             push_unique(&mut list, &last);
         }
-        push_unique(&mut list, &current);
+        // 配置线路已确认失效（停放页/拦截/连不上）时不要继续排在动态域名前面：
+        // 每条请求都先撞它一次，用户要多吃一次往返甚至一次 12 秒超时。
+        if !self.domain_health.is_failing(&current) {
+            push_unique(&mut list, &current);
+        }
         for domain in self.updated_api_domains.read().iter() {
             push_unique(&mut list, domain);
         }
+        // 放在动态域名之后：实测失效的配置线路仍保留为兜底，但不再优先。
+        push_unique(&mut list, &current);
         for mode in [
             ApiDomainMode::Domain2,
             ApiDomainMode::Domain3,
@@ -507,7 +528,10 @@ impl JmClient {
         self.domain_health.sort_candidates(&mut sorted_tail);
         list.truncate(1);
         list.extend(sorted_tail);
-        list.truncate(4);
+        // 候选上限。原先只留 4 条，而动态域名列表本身就有 4 条，加上配置线路后
+        // 被截断，官方刚下发的新线路反而试不到（旧线路全部过期时会一直失败）。
+        // 放宽到 8 条：读接口换线是顺序尝试，实际很少走满。
+        list.truncate(8);
         list
     }
 
@@ -1526,6 +1550,16 @@ mod tests {
         use reqwest::StatusCode;
         let blocked = api_failure(StatusCode::OK, None, "<html>Access Denied</html>");
         assert!(is_route_unreachable(&blocked));
+        // 域名被停放商接管：HTTP 200 + HTML 跳转页，必须换线路而不是直接失败
+        let parked = api_failure(
+            StatusCode::OK,
+            None,
+            r#"<!DOCTYPE html><html><head><script>window.onload=function(){window.location.href="/lander"}</script></head></html>"#,
+        );
+        assert!(is_route_unreachable(&parked));
+        // 业务响应是 JSON：不能因为报文里出现 html 字样就误判
+        let business = api_failure(StatusCode::OK, Some(201), "目标漫画不存在");
+        assert!(!is_route_unreachable(&business));
         let forbidden = api_failure(StatusCode::FORBIDDEN, None, "forbidden");
         assert!(is_route_unreachable(&forbidden));
         let gateway = api_failure(StatusCode::BAD_GATEWAY, None, "bad gateway");
