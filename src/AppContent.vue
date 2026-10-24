@@ -162,31 +162,39 @@ async function initializeApp() {
   try {
     await store.initStateListeners()
     store.applyConfig(await commands.getConfig())
-    if (isAndroid && store.config && !store.config.androidStorageInitialized && window.JmAndroid) {
+    if (isAndroid && store.config && window.JmAndroid) {
       const bridge = window.JmAndroid
-      if (!supportsPublicStorage()) {
-        // Android 10 既没有「所有文件访问」也无法申请写外部存储：直接落到应用专用目录
-        const result = await commands.initializeAndroidStorage(bridge.libraryPath() ?? '')
-        if (result.status === 'error') throw new Error(result.error.err_message)
-        store.applyConfig(result.data)
-      } else {
-        // 默认就落在公共下载 Download/JoyManga：未授权时先申请「所有文件访问」，
-        // 用户返回后再完成初始化，不再让用户手动挑目录。
-        if (!hasAllFilesAccess()) {
-          await requestAllFilesAccessAndWait()
-        }
-        if (hasAllFilesAccess() && canWritePublicDownloads()) {
-          const result = await commands.initializeAndroidStorage(downloadsPath())
-          if (result.status === 'error') {
-            // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
-            console.error(result.error)
-            storageOnboardingShowing.value = true
-          } else {
+      // 已初始化也可能停在旧的私有目录（旧版配置迁移过来的），或用户撤销了
+      // 「所有文件访问」权限。这两种情况都要重新选书库，否则下载写进一个目录、
+      // 书库扫描另一个目录，表现就是「下载完成却看不到本子」。
+      const libraryLocationUninitialized = !store.config.androidStorageInitialized
+      if (libraryLocationUninitialized || !hasAllFilesAccess()) {
+        if (!supportsPublicStorage()) {
+          // Android 10 既没有「所有文件访问」也无法申请写外部存储：直接落到应用专用目录
+          if (!store.config.androidStorageInitialized) {
+            const result = await commands.initializeAndroidStorage(bridge.libraryPath() ?? '')
+            if (result.status === 'error') throw new Error(result.error.err_message)
             store.applyConfig(result.data)
           }
         } else {
-          // 用户拒绝授权或公共目录暂不可写：兜底引导，可改用应用专用目录
-          storageOnboardingShowing.value = true
+          // 默认就落在公共下载 Download/JoyManga：未授权时先申请「所有文件访问」，
+          // 用户返回后再完成初始化，不再让用户手动挑目录。
+          if (!hasAllFilesAccess()) {
+            await requestAllFilesAccessAndWait()
+          }
+          if (hasAllFilesAccess() && canWritePublicDownloads()) {
+            const result = await commands.initializeAndroidStorage(downloadsPath())
+            if (result.status === 'error') {
+              // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
+              console.error(result.error)
+              storageOnboardingShowing.value = true
+            } else {
+              store.applyConfig(result.data)
+            }
+          } else if (libraryLocationUninitialized) {
+            // 用户拒绝授权或公共目录暂不可写：兜底引导，可改用应用专用目录
+            storageOnboardingShowing.value = true
+          }
         }
       }
     }

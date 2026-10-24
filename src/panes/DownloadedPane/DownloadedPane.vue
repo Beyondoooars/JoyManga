@@ -6,6 +6,7 @@ import { useStore } from '../../store.ts'
 import { NCheckbox } from 'naive-ui'
 import {
   PhArchive,
+  PhArrowClockwise,
   PhBooks,
   PhDownloadSimple,
   PhFileZip,
@@ -388,12 +389,15 @@ async function deleteDownloadedComics() {
       </div>
 
       <section class="library-hero">
-        <div>
-          <h1>本地书库<span>{{ store.downloadedComics.length }} 本</span></h1>
+        <div class="hero-title">
+          <h1>本地书库</h1>
+          <span class="hero-count">{{ store.downloadedComics.length }} 本</span>
         </div>
         <div class="hero-import">
-          <n-button type="primary" :loading="importing" @click="importComics(false)"><template #icon><PhPlus :size="18" /></template>导入 CBZ</n-button>
-          <n-button :loading="importing" @click="importComics(true)">导入文件夹</n-button>
+          <n-button type="primary" size="small" :loading="importing" @click="importComics(false)">
+            <template #icon><PhPlus :size="16" /></template>导入
+          </n-button>
+          <n-button size="small" :loading="importing" @click="importComics(true)">文件夹</n-button>
         </div>
       </section>
       <section v-if="recentComics.length" class="continue-section">
@@ -404,24 +408,32 @@ async function deleteDownloadedComics() {
           </button>
         </div>
       </section>
+      <!-- 搜索与筛选放在最前面：手机上这是最常用的入口，书库路径与刷新收进「更多」 -->
       <div class="library-toolbar">
-        <PathField
-          v-model:value="store.config.downloadDir"
-          label="漫画书库" />
-        <div class="library-toolbar-buttons"><n-button size="small" :loading="loading" @click="refreshLibrary">刷新书库</n-button><update-downloaded-comics-button /></div>
+        <div class="library-filters">
+          <n-input
+            v-model:value="searchQuery"
+            class="library-search"
+            size="small"
+            clearable
+            placeholder="搜索标题 / 作者 / 标签 / ID"
+            aria-label="搜索书库" />
+          <n-select v-model:value="libraryFilter" :options="filterOptions" class="library-select" size="small" aria-label="筛选书库" />
+          <n-select v-model:value="sortOrder" :options="sortOptions" class="library-select" size="small" aria-label="书库排序" />
+          <n-button size="small" quaternary class="library-refresh" :loading="loading" :aria-label="`刷新书库`" @click="refreshLibrary">
+            <template #icon><PhArrowClockwise :size="16" /></template>
+          </n-button>
+        </div>
+        <details class="library-path-details">
+          <summary>书库位置</summary>
+          <!-- 路径与更新按钮默认收起：手机上一行就能看到列表更重要 -->
+          <div class="library-path-body">
+            <PathField v-model:value="store.config.downloadDir" label="漫画书库" />
+            <update-downloaded-comics-button />
+          </div>
+        </details>
       </div>
       <div class="library-actions select-none">
-        <div class="library-filters">
-        <n-input
-          v-model:value="searchQuery"
-          class="library-search"
-          size="small"
-          clearable
-          placeholder="搜索标题 / 作者 / 标签 / ID"
-          aria-label="搜索书库" />
-        <n-select v-model:value="libraryFilter" :options="filterOptions" class="library-select" aria-label="筛选书库" />
-        <n-select v-model:value="sortOrder" :options="sortOptions" class="library-select" aria-label="书库排序" />
-        </div>
         <div class="export-format-actions">
           <n-button
             class="export-format-button"
@@ -519,9 +531,10 @@ async function deleteDownloadedComics() {
 
 <style scoped>
 .library-page { background: #fff; }
-.library-hero { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border-bottom: 1px solid #f0edf3; background: #fff; }
-.library-hero h1 { margin: 0; color: #282739; font-size: 22px; }
-.library-hero h1 span { margin-left: 12px; padding: 4px 9px; color: #ab657d; background: #fcebf2; font-size: 12px; border-radius: 7px; vertical-align: middle; letter-spacing: 0; }
+.library-hero { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #f0edf3; background: #fff; }
+.library-hero h1 { margin: 0; color: #282739; font-size: 17px; line-height: 1.2; }
+.hero-title { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.hero-count { flex-shrink: 0; padding: 2px 7px; color: #ab657d; background: #fcebf2; font-size: 11px; border-radius: 6px; letter-spacing: 0; }
 .hero-import { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .continue-section { padding: 16px 20px 2px; }
 .section-caption { color: #6b6170; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
@@ -531,12 +544,30 @@ async function deleteDownloadedComics() {
 .continue-grid strong { display: block; font-size: 12px; color: #514553; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .continue-grid small { display: block; color: #a28495; font-size: 10px; margin-top: 5px; }
 .continue-dot { color: #c65e87; background: #f9dfeb; padding: 6px 10px; border-radius: 8px; }
-.library-select { width: 125px; flex-shrink: 0; }
-.library-search { width: 210px; flex-shrink: 1; min-width: 140px; }
-.library-toolbar-buttons { display: flex; align-items: center; gap: 6px; }
+.library-select { width: 108px; flex-shrink: 0; }
+.library-search { flex: 1; min-width: 0; }
+.library-refresh { flex-shrink: 0; }
+.library-path-details { margin-top: 6px; font-size: 11px; color: #61666d; }
+.library-path-details summary { padding: 4px 2px; cursor: pointer; list-style: none; }
+.library-path-details summary::before { content: '›'; display: inline-block; margin-right: 4px; transition: transform 150ms ease; }
+.library-path-details[open] summary::before { transform: rotate(90deg); }
+.library-path-body { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
 .comic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; padding: 4px 6px 12px; }
-@media (max-width: 760px) { .library-hero { padding: 14px; flex-wrap: wrap; } .hero-import { justify-content: flex-start; } .continue-grid { grid-template-columns: 1fr; } .continue-grid button:nth-child(n+2) { display: none; } .comic-grid { grid-template-columns: 1fr; } }
-@media (max-height: 680px) { .library-hero { padding: 12px 20px; } .continue-section { display: none; } }
+/* 手机（393dp 宽）：一屏要能看到书，功能条压成两行，卡片改双列 */
+@media (max-width: 760px) {
+  .library-hero { padding: 8px 12px; }
+  .library-hero h1 { font-size: 16px; }
+  .hero-import { flex-wrap: nowrap; }
+  .continue-section { padding: 10px 12px 0; }
+  .continue-grid { grid-template-columns: 1fr; }
+  .continue-grid button:nth-child(n+2) { display: none; }
+  .library-toolbar { padding: 8px 12px 4px; }
+  .library-filters { flex-wrap: nowrap; gap: 6px; }
+  .library-select { width: 92px; }
+  .library-actions { padding: 4px 12px 6px; }
+  .comic-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 2px 4px 10px; }
+}
+@media (max-height: 680px) { .library-hero { padding: 8px 16px; } .continue-section { display: none; } }
 .library-filters {
   display: flex;
   align-items: center;
@@ -597,36 +628,33 @@ async function deleteDownloadedComics() {
     justify-content: flex-end;
   }
 
-  /* 触屏：工具栏与批量操作按钮统一 44dp，避免小目标连点误触 */
+  /* 触屏：主要点击目标保持 36dp 以上，但不为每个控件单独占一行 */
   .library-toolbar-buttons :deep(.n-button),
   .export-format-actions :deep(.n-button),
   .library-filters :deep(.n-base-selection),
   .library-filters :deep(.n-input) {
-    min-height: 44px;
+    min-height: 36px;
   }
 
-  /* 移动端搜索框独占一行，筛选与排序并排，避免宽度挤压 */
+  /* 搜索/筛选/排序/刷新并排一行；双列卡片已经保住每项的可点面积 */
   .library-filters {
     width: 100%;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .library-search {
-    width: 100%;
-    flex-basis: 100%;
-  }
-
-  .library-select {
-    flex: 1 1 0;
+    flex: 1 1 auto;
     width: auto;
   }
 
-  .subtab-btn {
-    min-height: 44px;
+  .library-select {
+    flex: 0 0 auto;
+    width: 92px;
   }
 
+  /* 旧版这里把导入按钮抬到 44dp，双列卡片后顶部空间更宝贵，统一 36dp */
   .hero-import :deep(.n-button) {
-    min-height: 44px;
+    min-height: 36px;
   }
 }
 

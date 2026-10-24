@@ -137,7 +137,7 @@ async function handleMergeCbz() {
         </span>
       </div>
       <div class="chapter-summary">
-        {{ downloadedChapters }} 话已缓存<span v-if="progress"> · 上次读到第 {{ progress.page }} 页</span>
+        {{ downloadedChapters }} 话<span v-if="progress"> · 第 {{ progress.page }} 页</span>
         <span v-if="store.isArchiving(comic.id)" class="archiving-badge">正在整合 CBZ…</span>
       </div>
       <div v-if="progress" class="reading-progress"><span :style="{ width: `${Math.min(100, progress.page / progress.totalPages * 100)}%` }"></span></div>
@@ -239,6 +239,62 @@ async function handleMergeCbz() {
   flex-direction: column;
   flex: 1;
   min-width: 0;
+}
+
+/* 触屏双列：封面在上、信息在下，卡片约 200dp 高，一屏能放下 3 行 */
+@media (max-width: 760px) {
+  .downloaded-comic-card {
+    flex-direction: column;
+    padding: 8px;
+    gap: 6px;
+  }
+
+  /* 双列宽度有限，卡片内操作改成紧凑图标按钮（44dp 靠内边距保住） */
+  .read-button,
+  .merge-button {
+    min-height: 36px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  .read-button svg { width: 15px; height: 15px; }
+
+  .card-bottom-actions :deep(.icon-button) {
+    min-width: 36px;
+    min-height: 36px;
+  }
+
+  .cover-button {
+    width: 100%;
+    margin-right: 0;
+    aspect-ratio: 3 / 4;
+    /* 双列时封面不能把整屏吃掉：限制高度，保证一屏能看到两行以上 */
+    max-height: 132px;
+  }
+
+  .cover-button .comic-cover {
+    width: 100%;
+    height: 100%;
+    margin-right: 0;
+    object-fit: cover;
+  }
+
+  /* 没有封面时撑满同一块区域，否则会缩在左上角被图片层压住 */
+  .cover-placeholder { width: 100%; height: 100%; }
+
+  .comic-title { font-size: 13px; -webkit-line-clamp: 1; }
+  /* 双列卡片里作者与缓存话数信息量低、又各占一行：并成一行小字 */
+  .card-details {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    column-gap: 6px;
+  }
+  .author-row { margin: 0; font-size: 11px; }
+  .chapter-summary { margin-bottom: 0; font-size: 10px; }
+  .origin-badge { font-size: 9px; margin-top: 0; }
+  .reading-progress { margin: 3px 0 4px; }
+  .card-bottom-actions { gap: 2px; margin-top: 2px; }
 }
 
 .title-row {
