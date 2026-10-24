@@ -62,6 +62,17 @@ static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 /// 当前文件日志收集等级：供 watcher 重建文件层与定时清理任务读取，
 /// 随设置页切换更新，而不是停留在启动时的等级。
 static CURRENT_LEVEL: OnceLock<parking_lot::RwLock<LogLevel>> = OnceLock::new();
+/// 已解析的日志目录。
+///
+/// 解析过程会在目标目录写一个探针文件确认可写，而 watcher 就在监听的目录里；
+/// 每次调用都重新探测会「写探针 → watcher 收到 Remove → 重载 → 再写探针」无限循环。
+/// 因此只解析一次并缓存；书库位置变化时由 `reset_logs_dir` 显式失效。
+static LOGS_DIR: OnceLock<parking_lot::RwLock<Option<std::path::PathBuf>>> = OnceLock::new();
+
+/// 当前文件日志等级（供配置变更后切目录时判断是否需要重建文件层）。
+pub fn current_log_level() -> LogLevel {
+    current_level()
+}
 
 fn current_level() -> LogLevel {
     CURRENT_LEVEL
@@ -80,6 +91,11 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     let level = app.get_config().read().log_level;
     CURRENT_LEVEL.get_or_init(|| parking_lot::RwLock::new(level));
     let _ = APP_HANDLE.set(app.clone());
+    // 崩溃报告跟着日志目录走：此时配置已加载，书库路径可用。
+    // 日志目录退回配置目录时崩溃报告同样留在那里，两者总在同一处，方便一起反馈。
+    if let Ok(dir) = logs_dir(app) {
+        crate::crash::set_dir(&dir);
+    }
     // 输出到文件
     let (file_layer, guard) = create_file_layer(app, level)?;
     let (reloadable_file_layer, reload_handle) = tracing_subscriber::reload::Layer::new(file_layer);
@@ -282,7 +298,15 @@ async fn file_log_watcher(app: AppHandle) {
     while let Some(res) = receiver.recv().await {
         match res.map_err(anyhow::Error::from) {
             Ok(event) => {
-                if let notify::EventKind::Remove(_) = event.kind {
+                // 只对受管的日志文件重载：书库目录里还有本子、备份与探针文件，
+                // 任何删除都重建文件层既无必要，也会让探针与 watcher 互相触发。
+                let managed = event
+                    .paths
+                    .iter()
+                    .filter_map(|path| path.file_name()?.to_str())
+                    .any(is_managed_log_file);
+                let removed = matches!(event.kind, notify::EventKind::Remove(_));
+                if managed && removed {
                     // 当前等级为 Off 时文件层是 sink，重建无意义，跳过。
                     let level = current_level();
                     if level != LogLevel::Off {
@@ -430,8 +454,64 @@ async fn auto_cleanup_logs_task(app: AppHandle) {
     }
 }
 
+/// 滚动日志的落盘目录：书库下的 `logs`，与用户下载的本子放在一起。
+///
+/// 书库默认是公共 `Download/JoyManga`，日志在文件管理器里直接可见，卸载应用也不会
+/// 被系统一并清掉；出问题时用户能自己把日志拷出来。书库不可写（未授予「所有文件
+/// 访问」、书库被删除或只读）时退回应用配置目录，日志功能不能因此中断。
+///
+/// 结果会缓存，避免「写探针 → watcher 删除事件 → 重载 → 再写探针」的循环。
+/// 书库变更后调用 `reset_logs_dir` 让下次重新解析。
 pub fn logs_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
-    Ok(app.state::<ConfigStorage>().logs_dir().to_path_buf())
+    let cell = LOGS_DIR.get_or_init(|| parking_lot::RwLock::new(None));
+    if let Some(dir) = cell.read().clone() {
+        return Ok(dir);
+    }
+    let resolved = resolve_logs_dir(app)?;
+    *cell.write() = Some(resolved.clone());
+    Ok(resolved)
+}
+
+/// 让已缓存的日志目录失效（书库位置变化后调用），下次 `logs_dir` 重新解析。
+pub fn reset_logs_dir() {
+    if let Some(cell) = LOGS_DIR.get() {
+        *cell.write() = None;
+    }
+}
+
+fn resolve_logs_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    let library_dir = app.get_config().read().download_dir.clone();
+    let preferred = crate::commands::system_commands::diagnostic_logs_dir(&library_dir);
+    if is_dir_writable(&preferred) {
+        return Ok(preferred);
+    }
+    let fallback = app.state::<ConfigStorage>().logs_dir().to_path_buf();
+    if is_dir_writable(&fallback) {
+        return Ok(fallback);
+    }
+    Err(anyhow::anyhow!(
+        "日志目录不可写：`{}` 与 `{}`",
+        preferred.display(),
+        fallback.display()
+    ))
+}
+
+/// 目录存在且确实可写；不存在时尝试创建一次。
+///
+/// 只做 `create_dir_all` 不够：书库在未授权「所有文件访问」时目录可能已存在，
+/// 但写入会被系统拒绝，滚动日志会静默停止。这里真写一个探针文件确认。
+fn is_dir_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".write-probe-{}", uuid::Uuid::new_v4()));
+    match std::fs::write(&probe, b"1") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]

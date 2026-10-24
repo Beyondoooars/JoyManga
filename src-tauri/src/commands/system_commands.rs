@@ -89,16 +89,22 @@ pub fn clear_logs(app: AppHandle) -> CommandResult<()> {
     Ok(())
 }
 
-/// 应用日志可能落在两处：应用数据目录（滚动日志、崩溃报告）与书库 `logs`
-/// （用户主动导出的诊断日志）。清理与大小统计必须覆盖同一组目录。
+/// 应用日志可能落在三处：书库 `logs`（滚动日志、崩溃报告、导出的诊断日志都在这里），
+/// 以及书库不可写时退回的应用数据目录。清理与大小统计必须覆盖同一组目录，
+/// 否则「清理日志」会看起来没生效。
 fn all_logs_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(dir) = logger::logs_dir(app) {
-        dirs.push(dir);
-    }
     let library_logs = diagnostic_logs_dir(&app.get_config().read().download_dir);
-    if !dirs.contains(&library_logs) {
-        dirs.push(library_logs);
+    dirs.push(library_logs);
+    if let Ok(dir) = logger::logs_dir(app) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    // 书库可写时 logs_dir 就是书库 logs；退回配置目录时这里补上，两边都不漏。
+    let fallback = app.state::<ConfigStorage>().logs_dir().to_path_buf();
+    if !dirs.contains(&fallback) && fallback.exists() {
+        dirs.push(fallback);
     }
     dirs
 }

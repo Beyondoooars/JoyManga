@@ -147,8 +147,16 @@ fn is_app_private_library_path(path: &str) -> bool {
     if !path.file_name().is_some_and(|name| name == "library") {
         return false;
     }
-    // `/data/user/<id>/<pkg>/files/library` 或 `/data/data/<pkg>/files/library`。
-    // 只比对路径组件，不依赖平台的分隔符解析细节。
+    // 只比对路径组件，不依赖平台的分隔符解析细节。历史上出现过三种落点：
+    //
+    // 1. `/data/user/<id>/<pkg>/files/library`（或 `/data/data/<pkg>/files/library`）
+    //    —— `Config::default` 用应用内部数据目录拼出来的默认书库；
+    // 2. `/data/user/<id>/<pkg>/library` —— 更早版本直接取应用数据目录的上级；
+    // 3. `/storage/emulated/0/Android/data/<pkg>/files/library`
+    //    —— v0.2.4 起首启走原生 `libraryPath()`（`getExternalFilesDir/library`）。
+    //
+    // 三者的共同点：都在「应用专属目录」内。用户手选的 SD 卡或自建目录（例如
+    // `/storage/1A2B/library`）不在应用专属目录下，不能擅自改动。
     let parts: Vec<String> = path
         .components()
         .filter_map(|component| match component {
@@ -156,11 +164,33 @@ fn is_app_private_library_path(path: &str) -> bool {
             _ => None,
         })
         .collect();
+    if parts.last().is_none_or(|part| part != "library") {
+        return false;
+    }
     let starts_with_data = parts.first().is_some_and(|part| part == "data");
-    let files_index = parts.iter().position(|part| part == "files");
-    starts_with_data
-        && parts.last().is_some_and(|part| part == "library")
-        && files_index == Some(parts.len() - 2)
+    if starts_with_data {
+        // 形态 1：`…/files/library`；形态 2：`…/<pkg>/library`
+        let files_index = parts.iter().position(|part| part == "files");
+        return match files_index {
+            Some(index) => index == parts.len() - 2,
+            // `<pkg>/library` 至少要有 data / user / <id> / <pkg> / library 五段
+            None => parts.len() >= 5,
+        };
+    }
+    // 形态 3：`/storage/<volume>/Android/data/<pkg>/files/library`
+    //
+    // 卷名长度不定（`emulated/0`、SD 卡 `1A2B-3C4D`），不能假定 `Android` 的固定下标；
+    // 只要求「storage 开头 → 某处是 Android → 紧接 data/<pkg>/files/library」。
+    if !parts.first().is_some_and(|part| part == "storage") {
+        return false;
+    }
+    let Some(android_index) = parts.iter().position(|part| part == "Android") else {
+        return false;
+    };
+    // `Android` 之后必须正好是 data / <pkg> / files / library 四段
+    parts.len() == android_index + 5
+        && parts[android_index + 1] == "data"
+        && parts[android_index + 3] == "files"
 }
 
 /// 当前配置 schema 版本。每次需要在已发布版本之上改写旧配置时递增。
@@ -240,16 +270,36 @@ fn migrate_config_schema(value: &mut serde_json::Value) {
     );
 }
 
-/// 将配置序列化为磁盘存储格式（明文JSON保存，便于用户查看与自用）。
+/// 将配置序列化为磁盘存储格式。
+///
+/// 密码单独加密后写入，其余字段仍是明文 JSON（便于用户查看与自用）。
 fn serialize_config_for_storage(config: &Config) -> anyhow::Result<String> {
-    serde_json::to_string_pretty(config).context("序列化配置失败")
+    let mut value = serde_json::to_value(config).context("序列化配置失败")?;
+    // 加密失败时不能退回明文：宁可这次保存失败，也不要让密码以明文落盘。
+    let encrypted = crate::credential_cipher::encrypt_for_this_machine(&config.password)
+        .context("加密登录密码失败")?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("password".into(), serde_json::Value::String(encrypted));
+    }
+    serde_json::to_string_pretty(&value).context("序列化配置失败")
 }
 
-/// 从磁盘存储格式反序列化配置（若包含旧版加密凭据则自动迁移为明文）。
+/// 从磁盘存储格式反序列化配置。
+///
+/// 密码先解密再交给 `Config`；历史明文密码原样通过，下次保存时自动转为密文。
 fn deserialize_config_from_storage(config_string: &str) -> anyhow::Result<Config> {
     let mut value: serde_json::Value =
         serde_json::from_str(config_string).context("解析配置JSON失败")?;
     migrate_config_schema(&mut value);
+    if let Some(password) = value
+        .get("password")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    {
+        let decrypted = crate::credential_cipher::decrypt_for_this_machine(&password)
+            .context("解密登录密码失败")?;
+        value["password"] = serde_json::Value::String(decrypted);
+    }
     serde_json::from_value(value).context("将配置JSON反序列化为Config失败")
 }
 
@@ -424,6 +474,18 @@ impl Config {
             return default_config;
         };
         migrate_config_schema(&mut user_value);
+        // 磁盘上密码是密文：逐字段恢复也要先解密，否则会把 `enc:v1:…` 当成密码。
+        // 解密失败（换过机器、文件被改）时清空该字段，让用户重新登录，而不是把
+        // 密文当密码发出去。
+        if let Some(password) = user_value
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+        {
+            let decrypted =
+                crate::credential_cipher::decrypt_for_this_machine(&password).unwrap_or_default();
+            user_value["password"] = serde_json::Value::String(decrypted);
+        }
         let serde_json::Value::Object(user_map) = user_value else {
             return default_config;
         };
@@ -494,9 +556,21 @@ impl Config {
     /// 卡在连接本地代理上——表现就是「开 VPN 反而连不上网」。
     /// 设置页的说明「VPN 随系统生效；开启 VPN 时应用会自动跳过此代理」即指此处。
     pub fn effective_proxy_url(&self) -> Option<String> {
+        let vpn_active = crate::network_state::is_vpn_active();
         match self.proxy_mode {
-            ProxyMode::Custom if !crate::network_state::is_vpn_active() => {
+            ProxyMode::Custom if !vpn_active => {
                 Some(format!("http://{}:{}", self.proxy_host, self.proxy_port))
+            }
+            ProxyMode::Custom if vpn_active => {
+                // 开着 VPN 却仍连不上时，首先要能确认「代理到底有没有被跳过」。
+                // 这条信息此前完全没有落盘，用户反馈「开 VPN 还是连不上」时无从判断
+                // 是 VPN 状态没识别到，还是跳过代理后线路本身不通。
+                tracing::info!(
+                    proxy_mode = ?self.proxy_mode,
+                    vpn_active,
+                    "VPN 已接管流量，本次跳过手动代理"
+                );
+                None
             }
             _ => None,
         }
@@ -701,22 +775,43 @@ mod tests {
     }
 
     #[test]
-    fn credentials_are_stored_in_plaintext() {
+    fn credentials_are_encrypted_on_disk_and_restored() {
         let app_data_dir = Path::new("test-app-data");
         let mut config = Config::default(app_data_dir);
         config.username = "alice".to_string();
         config.password = "plain-password".to_string();
 
-        // 磁盘存储序列化为明文，便于用户自用和查看
+        // 密码必须加密落盘：配置会被备份、被文件管理器看到，明文等于泄漏
         let stored = serialize_config_for_storage(&config).unwrap();
         assert!(stored.contains("alice"));
-        assert!(stored.contains("plain-password"));
-        assert!(!stored.contains("enc:"));
+        assert!(
+            !stored.contains("plain-password"),
+            "密码不能以明文出现在配置里"
+        );
+        assert!(stored.contains("enc:v1:"));
 
-        // 磁盘存储反序列化
+        // 读回来必须还原成明文，否则登录会用密文当密码
         let restored = deserialize_config_from_storage(&stored).unwrap();
         assert_eq!(restored.username, "alice");
         assert_eq!(restored.password, "plain-password");
+    }
+
+    #[test]
+    fn legacy_plaintext_password_is_still_readable() {
+        // 升级前落盘的是明文密码：必须能读出来，并在下次保存时转成密文。
+        let app_data_dir = Path::new("test-app-data");
+        let mut config = Config::default(app_data_dir);
+        config.username = "alice".to_string();
+        config.password = "plain-password".to_string();
+        let mut value = serde_json::to_value(&config).unwrap();
+        value["password"] = serde_json::json!("plain-password");
+        let legacy = serde_json::to_string(&value).unwrap();
+
+        let restored = deserialize_config_from_storage(&legacy).unwrap();
+        assert_eq!(restored.password, "plain-password");
+
+        let resaved = serialize_config_for_storage(&restored).unwrap();
+        assert!(!resaved.contains("plain-password"));
     }
 
     #[test]
@@ -865,16 +960,51 @@ mod route_migration_tests {
 
     #[test]
     fn private_library_detection_matches_android_app_dirs_only() {
+        // 形态 1：应用内部数据目录下的 files/library
         assert!(is_app_private_library_path(
             "/data/user/0/com.joymanga.app/files/library"
         ));
         assert!(is_app_private_library_path(
             "/data/data/com.joymanga.app/files/library"
         ));
+        // 形态 2：更早版本的 `<app_data_dir>/library`
+        assert!(is_app_private_library_path(
+            "/data/user/0/com.joymanga.app/library"
+        ));
+        // 形态 3：v0.2.4 起首启写入的外部应用专属目录
+        assert!(is_app_private_library_path(
+            "/storage/emulated/0/Android/data/com.joymanga.app/files/library"
+        ));
         assert!(!is_app_private_library_path(
             "/storage/emulated/0/Download/JoyManga"
         ));
         // 用户把书库放在 SD 卡名为 library 的深层目录，不能被当成应用私有目录
         assert!(!is_app_private_library_path("/storage/1A2B/library"));
+        // 形似外部专属目录但层级不对：不能误判
+        assert!(!is_app_private_library_path(
+            "/storage/emulated/0/Android/data/com.joymanga.app/library"
+        ));
+        assert!(!is_app_private_library_path("/data/library"));
+    }
+
+    #[test]
+    fn external_app_specific_library_is_also_migrated() {
+        // v0.2.4 起首启走原生 libraryPath()，落点是外部应用专属目录。
+        // 这类配置同样要重新初始化，否则书库仍停在一个不会随卸载保留的位置。
+        let mut value = serde_json::json!({
+            "schemaVersion": 1,
+            "androidStorageInitialized": true,
+            "downloadDir": "/storage/emulated/0/Android/data/com.joymanga.app/files/library",
+        });
+        migrate_config_schema(&mut value);
+        assert_eq!(value["androidStorageInitialized"], false);
+
+        let mut older = serde_json::json!({
+            "schemaVersion": 1,
+            "androidStorageInitialized": true,
+            "downloadDir": "/data/user/0/com.joymanga.app/library",
+        });
+        migrate_config_schema(&mut older);
+        assert_eq!(older["androidStorageInitialized"], false);
     }
 }

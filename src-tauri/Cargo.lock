@@ -2111,6 +2111,7 @@ dependencies = [
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",
+ "ring",
  "serde",
  "serde_json",
  "specta",

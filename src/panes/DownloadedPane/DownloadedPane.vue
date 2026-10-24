@@ -45,8 +45,6 @@ const libraryFilter = ref('all')
 const sortOrder = ref('added')
 const searchQuery = ref('')
 const importing = ref(false)
-const recentComics = computed(() => store.downloadedComics.filter((comic) => store.readingState.progress[String(comic.id)])
-  .sort((a, b) => store.readingState.progress[String(b.id)].updatedAt - store.readingState.progress[String(a.id)].updatedAt).slice(0, 3))
 const mergeableComics = computed(() => store.downloadedComics.filter(isMergeableComic))
 const checkedMergeableComics = computed(() => currentPageComics.value.filter((comic) => checkedIds.value.has(comic.id) && isMergeableComic(comic)))
 const filterOptions = computed(() => [ { label: '全部漫画', value: 'all' }, { label: `可合并多话（${mergeableComics.value.length} 本）`, value: 'mergeable' }, { label: '正在阅读', value: 'reading' },
@@ -400,14 +398,6 @@ async function deleteDownloadedComics() {
           <n-button size="small" :loading="importing" @click="importComics(true)">文件夹</n-button>
         </div>
       </section>
-      <section v-if="recentComics.length" class="continue-section">
-        <div class="section-caption">继续阅读</div>
-        <div class="continue-grid">
-          <button v-for="comic in recentComics" :key="comic.id" @click="store.continueReading(comic)">
-            <span class="continue-dot">↗</span><span><strong>{{ comic.name }}</strong><small>{{ store.readingState.progress[String(comic.id)].chapterTitle }} · 第 {{ store.readingState.progress[String(comic.id)].page }} 页</small></span>
-          </button>
-        </div>
-      </section>
       <!-- 搜索与筛选放在最前面：手机上这是最常用的入口，书库路径与刷新收进「更多」 -->
       <div class="library-toolbar">
         <div class="library-filters">
@@ -536,14 +526,6 @@ async function deleteDownloadedComics() {
 .hero-title { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .hero-count { flex-shrink: 0; padding: 2px 7px; color: #ab657d; background: #fcebf2; font-size: 11px; border-radius: 6px; letter-spacing: 0; }
 .hero-import { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.continue-section { padding: 16px 20px 2px; }
-.section-caption { color: #6b6170; font-size: 12px; font-weight: 700; margin-bottom: 8px; }
-.continue-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.continue-grid button { display: flex; gap: 10px; align-items: center; min-width: 0; text-align: left; padding: 12px; background: #fff7fa; border: 1px solid #f4e3eb; border-radius: 12px; cursor: pointer; }
-.continue-grid button > span:last-child { min-width: 0; }
-.continue-grid strong { display: block; font-size: 12px; color: #514553; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.continue-grid small { display: block; color: #a28495; font-size: 10px; margin-top: 5px; }
-.continue-dot { color: #c65e87; background: #f9dfeb; padding: 6px 10px; border-radius: 8px; }
 .library-select { width: 108px; flex-shrink: 0; }
 .library-search { flex: 1; min-width: 0; }
 .library-refresh { flex-shrink: 0; }
@@ -558,16 +540,13 @@ async function deleteDownloadedComics() {
   .library-hero { padding: 8px 12px; }
   .library-hero h1 { font-size: 16px; }
   .hero-import { flex-wrap: nowrap; }
-  .continue-section { padding: 10px 12px 0; }
-  .continue-grid { grid-template-columns: 1fr; }
-  .continue-grid button:nth-child(n+2) { display: none; }
   .library-toolbar { padding: 8px 12px 4px; }
   .library-filters { flex-wrap: nowrap; gap: 6px; }
   .library-select { width: 92px; }
   .library-actions { padding: 4px 12px 6px; }
   .comic-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 2px 4px 10px; }
 }
-@media (max-height: 680px) { .library-hero { padding: 8px 16px; } .continue-section { display: none; } }
+@media (max-height: 680px) { .library-hero { padding: 8px 16px; } }
 .library-filters {
   display: flex;
   align-items: center;

@@ -107,7 +107,13 @@ fn api_failure(status: StatusCode, code: Option<i64>, message: &str) -> anyhow::
         );
     // 被墙或拦截的线路常返回无业务包络的 403 或劫持 HTML；这类响应允许换线路重试。
     // 带业务包络（code 存在）的 403 是明确业务错误，不能换线路重复提交。
+    //
+    // 405 同理：不同镜像线路的接口集合并不一致，某条线路不提供 /login 或 /week 时
+    // 会直接回 405 Method Not Allowed。它不是账号或网络问题，换一条线路通常就正常；
+    // 若按普通业务错误直接返回，用户看到的就是「登录失败/每周必看加载失败：HTTP 405」，
+    // 而其余候选线路根本没被尝试过。带业务包络的 405 仍按业务错误处理。
     let blocked = (!authentication && code.is_none() && status == StatusCode::FORBIDDEN)
+        || (code.is_none() && status == StatusCode::METHOD_NOT_ALLOWED)
         || (code.is_none() && is_blocked_page(&message));
     anyhow::Error::new(ApiFailure {
         status,
@@ -620,7 +626,17 @@ impl JmClient {
                     );
                     last_error = Some(error);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // 不该换线路的失败（业务错误、认证失败）直接终止；把它记下来，
+                    // 否则「登录/每周必看失败」在日志里只有前端一句提示，无法定位。
+                    tracing::warn!(
+                        domain = %candidate,
+                        retry,
+                        error = %error,
+                        "线路返回不可重试的失败，停止换线路"
+                    );
+                    return Err(error);
+                }
             }
         }
         self.spawn_domain_refresh_in_background();
@@ -1514,6 +1530,12 @@ mod tests {
         assert!(is_route_unreachable(&forbidden));
         let gateway = api_failure(StatusCode::BAD_GATEWAY, None, "bad gateway");
         assert!(is_route_unreachable(&gateway));
+        // 某条镜像线路不提供该接口时回 405：换线路可能恢复，不能直接判失败
+        let method_not_allowed = api_failure(StatusCode::METHOD_NOT_ALLOWED, None, "");
+        assert!(is_route_unreachable(&method_not_allowed));
+        // 带业务包络的 405 是明确业务错误
+        let business_405 = api_failure(StatusCode::METHOD_NOT_ALLOWED, Some(405), "不支持");
+        assert!(!is_route_unreachable(&business_405));
         // 业务错误不能换线路重复提交
         let business = api_failure(StatusCode::OK, Some(201), "目标漫画不存在");
         assert!(!is_route_unreachable(&business));

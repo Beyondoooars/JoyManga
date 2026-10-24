@@ -52,6 +52,7 @@ tracing-appender = { version = "0.2.3" }
 notify = { version = "8.0.0" }
 walkdir = { version = "2.5.0" }
 indexmap = { version = "2.10.0", features = ["serde"] }
+ring = "0.17"
 
 [profile.release]
 strip = true

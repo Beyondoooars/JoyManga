@@ -66,6 +66,17 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
         if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
             cache.invalidate();
         }
+        // 日志与崩溃报告跟着书库走：位置变了要让日志目录重新解析并切到新书库。
+        crate::logger::reset_logs_dir();
+        let level = crate::logger::current_log_level();
+        if level != crate::types::LogLevel::Off {
+            if let Err(error) = crate::logger::reload_file_logger(level) {
+                tracing::warn!(error = %error, "书库变更后切换日志目录失败");
+            }
+            if let Ok(dir) = crate::logger::logs_dir(app) {
+                crate::crash::set_dir(&dir);
+            }
+        }
     }
     if previous.log_level != next.log_level {
         crate::logger::apply_log_level(next.log_level);
