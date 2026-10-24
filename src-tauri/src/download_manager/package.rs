@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,7 @@ use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
 use crate::atomic_fs;
-use crate::types::{ChapterInfo, Comic, ComicInfo};
+use crate::types::{ChapterInfo, Comic, ComicInfo, PageSize};
 use crate::utils;
 
 pub(crate) fn package_chapter_to_cbz(
@@ -96,6 +97,7 @@ pub(crate) fn package_chapter_to_cbz(
     )?;
 
     // 写入压缩包
+    let mut page_sizes: BTreeMap<String, PageSize> = BTreeMap::new();
     for (idx, image_path) in image_paths.into_iter().enumerate() {
         let ext = image_path
             .extension()
@@ -106,6 +108,10 @@ pub(crate) fn package_chapter_to_cbz(
 
         // 单条目超过 ZIP32 上限会让整章打包失败在半路，先按体积给出可读错误
         crate::zip_limits::ensure_entry_size(&image_path)?;
+        // 顺手记下尺寸：下载期文件就在手上，读一次文件头比阅读时再解压归档便宜得多
+        if let Some(size) = crate::page_size::size_from_path(&image_path) {
+            page_sizes.insert(entry_name.clone(), size);
+        }
         zip_writer
             .start_file(&entry_name, crate::zip_limits::image_entry_options())
             .context(format!("在CBZ创建条目`{entry_name}`失败"))?;
@@ -114,6 +120,8 @@ pub(crate) fn package_chapter_to_cbz(
         std::io::copy(&mut file, &mut zip_writer)
             .context(format!("将图片写入CBZ条目`{entry_name}`失败"))?;
     }
+    crate::page_size::write_pages_entry(&mut zip_writer, &page_sizes)
+        .context("写入`pages.json`失败")?;
 
     let zip_file = zip_writer.finish().context("关闭CBZ文件失败")?;
     zip_file.sync_all().context("同步CBZ到磁盘失败")?;

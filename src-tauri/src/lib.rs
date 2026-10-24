@@ -36,6 +36,7 @@ mod library_catalog;
 mod logger;
 mod network_check;
 mod network_state;
+mod page_size;
 mod responses;
 mod state_transactions;
 mod types;
