@@ -529,7 +529,7 @@ const readingSummary = computed(() => {
               <div class="field"><label class="field-label">主机</label><n-input v-model:value="store.config.proxyHost" placeholder="127.0.0.1" /></div>
               <div class="field"><label class="field-label">端口</label><n-input-number :value="store.config.proxyPort" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
             </div>
-            <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。</p>
+            <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN 后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断日志 会记录当时是否识别到 VPN、用的是哪条线路。</p>
           </div>
         </section>
       </template>

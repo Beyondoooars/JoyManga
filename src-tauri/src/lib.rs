@@ -21,6 +21,7 @@ mod config;
 mod config_updates;
 mod cover_cache;
 mod crash;
+mod credential_cipher;
 mod domain_health;
 mod download_manager;
 mod download_queue;
@@ -176,7 +177,8 @@ pub fn run() {
             builder.mount_events(app);
 
             let config_storage = ConfigStorage::new(app.handle())?;
-            // 配置目录确定后，把崩溃报告从临时目录改到日志目录，便于用户随日志一起反馈
+            // 崩溃报告与滚动日志同目录（书库下的 logs），启动时书库路径还没从配置读出来，
+            // 先放在配置目录，等 logger::init 时再改到书库；见下方 set_dir 调用。
             crash::set_dir(config_storage.logs_dir());
             // 封面缩略图缓存放在配置目录下，随应用数据一起管理
             cover_cache::set_dir(Some(config_storage.base_dir().join(".covers")));
