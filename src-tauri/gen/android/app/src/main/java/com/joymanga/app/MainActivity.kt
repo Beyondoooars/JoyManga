@@ -519,6 +519,15 @@ class MainActivity : TauriActivity() {
     }
 
     inner class AndroidBridge {
+        /**
+         * 当前默认网络是否由 VPN 承载；前端在注册监听后主动拉一次。
+         *
+         * 事件推送只在 WebView 加载完成、页面注册好监听之后才有效。冷启动时
+         * `registerNetworkCallback` 与 `onStart` 的推送都早于页面就绪，事件被丢弃，
+         * 后端会一直停留在「没有 VPN」，于是继续连那个大概已经失效的手动代理端口。
+         */
+        @JavascriptInterface fun isVpnActive(): Boolean =
+            isVpnActive(getSystemService(ConnectivityManager::class.java))
         @JavascriptInterface fun libraryPath(): String = libraryRoot().absolutePath
         /** 公共下载目录下的默认书库：文件管理器直接可见，卸载应用不随之删除。 */
         @JavascriptInterface fun downloadsPath(): String = publicLibraryRoot().absolutePath
