@@ -136,16 +136,65 @@ fn default_true() -> bool {
     true
 }
 
+/// 书库是否仍位于应用私有目录（`/data/user/<id>/<pkg>/files/library`）。
+///
+/// 这是公共 `Download/JoyManga` 引入之前的唯一位置。这类配置要继续迁移；
+/// 用户手选的 SD 卡或自建目录不在此列，不能擅自改动。
+fn is_app_private_library_path(path: &str) -> bool {
+    // 不能用 `Path::is_absolute()`：配置里的路径来自 Android，在桌面/CI 上
+    // （测试与交叉编译的单元测试）它会被判成相对路径。这里只按组件比对。
+    let path = Path::new(path);
+    if !path.file_name().is_some_and(|name| name == "library") {
+        return false;
+    }
+    // `/data/user/<id>/<pkg>/files/library` 或 `/data/data/<pkg>/files/library`。
+    // 只比对路径组件，不依赖平台的分隔符解析细节。
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let starts_with_data = parts.first().is_some_and(|part| part == "data");
+    let files_index = parts.iter().position(|part| part == "files");
+    starts_with_data
+        && parts.last().is_some_and(|part| part == "library")
+        && files_index == Some(parts.len() - 2)
+}
+
+/// 当前配置 schema 版本。每次需要在已发布版本之上改写旧配置时递增。
+const CONFIG_SCHEMA_VERSION: u32 = 2;
+
 fn migrate_config_schema(value: &mut serde_json::Value) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
-    if object
+    let version = object
         .get("schemaVersion")
         .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        != 0
-    {
+        .unwrap_or(0);
+    if version >= u64::from(CONFIG_SCHEMA_VERSION) {
+        return;
+    }
+    // v1：早期版本把书库放在应用私有目录，公共 Download/JoyManga 是后来才引入的。
+    // 只把「仍指向应用私有目录」的配置标记为未初始化，让启动流程按当前系统能力
+    // 重新选一次位置；用户手选到别处的书库（SD 卡、自建目录）不动。
+    if version == 1 {
+        let private_library = object
+            .get("downloadDir")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_app_private_library_path);
+        if private_library {
+            object.insert(
+                "androidStorageInitialized".into(),
+                serde_json::Value::Bool(false),
+            );
+        }
+        object.insert(
+            "schemaVersion".into(),
+            serde_json::Value::from(CONFIG_SCHEMA_VERSION),
+        );
         return;
     }
     // 无版本的旧配置无法区分 0.2.2/0.2.3；保留当前版本升级前实际使用的域名，并提示用户核对。
@@ -181,10 +230,14 @@ fn migrate_config_schema(value: &mut serde_json::Value) {
     object
         .entry("autoLogin")
         .or_insert(serde_json::Value::Bool(remember));
+    // 无版本的配置（早于公共书库）一律交给启动流程重新初始化书库位置。
     object
         .entry("androidStorageInitialized")
-        .or_insert(serde_json::Value::Bool(true));
-    object.insert("schemaVersion".into(), serde_json::Value::from(1));
+        .or_insert(serde_json::Value::Bool(false));
+    object.insert(
+        "schemaVersion".into(),
+        serde_json::Value::from(CONFIG_SCHEMA_VERSION),
+    );
 }
 
 /// 将配置序列化为磁盘存储格式（明文JSON保存，便于用户查看与自用）。
@@ -773,5 +826,55 @@ mod route_migration_tests {
         let once = value.clone();
         migrate_config_schema(&mut value);
         assert_eq!(once, value);
+    }
+
+    #[test]
+    fn legacy_private_library_is_reinitialized_instead_of_kept() {
+        // 0.2.4~0.2.20 写出的配置是 schemaVersion 1 + 应用私有书库。
+        // 若迁移时保持「已初始化」，启动流程就不会把它换到公共 Download/JoyManga，
+        // 下载写进私有目录、书库扫描另一个目录，表现为「下载完成却看不到本子」。
+        let mut value = serde_json::json!({
+            "schemaVersion": 1,
+            "androidStorageInitialized": true,
+            "downloadDir": "/data/user/0/com.joymanga.app/files/library",
+            "exportDir": "/data/user/0/com.joymanga.app/files/library",
+        });
+        migrate_config_schema(&mut value);
+        assert_eq!(value["androidStorageInitialized"], false);
+        assert_eq!(value["schemaVersion"], CONFIG_SCHEMA_VERSION);
+
+        // 用户手选的书库（公共下载 / SD 卡）不能被改写
+        let mut chosen = serde_json::json!({
+            "schemaVersion": 1,
+            "androidStorageInitialized": true,
+            "downloadDir": "/storage/emulated/0/Download/JoyManga",
+        });
+        migrate_config_schema(&mut chosen);
+        assert_eq!(chosen["androidStorageInitialized"], true);
+
+        // 已经是当前 schema 的配置不再重复迁移
+        let mut current = serde_json::json!({
+            "schemaVersion": CONFIG_SCHEMA_VERSION,
+            "androidStorageInitialized": true,
+            "downloadDir": "/data/user/0/com.joymanga.app/files/library",
+        });
+        let before = current.clone();
+        migrate_config_schema(&mut current);
+        assert_eq!(before, current);
+    }
+
+    #[test]
+    fn private_library_detection_matches_android_app_dirs_only() {
+        assert!(is_app_private_library_path(
+            "/data/user/0/com.joymanga.app/files/library"
+        ));
+        assert!(is_app_private_library_path(
+            "/data/data/com.joymanga.app/files/library"
+        ));
+        assert!(!is_app_private_library_path(
+            "/storage/emulated/0/Download/JoyManga"
+        ));
+        // 用户把书库放在 SD 卡名为 library 的深层目录，不能被当成应用私有目录
+        assert!(!is_app_private_library_path("/storage/1A2B/library"));
     }
 }
