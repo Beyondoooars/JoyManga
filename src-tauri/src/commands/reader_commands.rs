@@ -91,6 +91,9 @@ pub struct ChapterReaderData {
     pub next_chapter: Option<ChapterNavInfo>,
     pub total_images: usize,
     pub image_paths: Vec<String>,
+    /// 与 `image_paths` 等长；`None` 表示该页尺寸不可知（文件损坏或文件头超出读取预算），
+    /// 阅读器不为它预留高度。
+    pub page_sizes: Vec<Option<crate::types::PageSize>>,
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -160,6 +163,8 @@ pub(crate) fn chapter_reader_data_from_comic(
         .as_ref()
         .ok_or_else(|| CommandError::from("读取章节失败", anyhow!("章节尚未下载完成")))?;
 
+    // 两个分支各自填好尺寸（含 CBZ 与已解压目录），else 分支直接返回错误
+    let mut page_sizes: Vec<Option<crate::types::PageSize>>;
     let image_paths_str = if chapter_target.is_file() {
         let file = std::fs::File::open(chapter_target)
             .context(format!("打开章节CBZ文件`{}`失败", chapter_target.display()))
@@ -196,6 +201,10 @@ pub(crate) fn chapter_reader_data_from_comic(
                 })?
         };
 
+        // 尺寸必须在把 img_names 挪走之前取：优先命中原归档自带的 pages.json，
+        // 缺失的页现读文件头。取不到就是 None，阅读器该页不预留高度。
+        page_sizes = crate::page_size::resolve_archive_sizes(&mut archive, &img_names);
+
         let chapter_target_str = chapter_target.to_string_lossy();
         img_names
             .into_iter()
@@ -205,6 +214,10 @@ pub(crate) fn chapter_reader_data_from_comic(
         let image_paths = utils::collect_page_images(chapter_target)
             .map_err(|err| CommandError::from("读取章节图片失败", err))?;
 
+        page_sizes = image_paths
+            .iter()
+            .map(|path| crate::page_size::size_from_path(path))
+            .collect();
         image_paths
             .into_iter()
             .map(|p| p.to_string_lossy().to_string())
@@ -223,6 +236,8 @@ pub(crate) fn chapter_reader_data_from_comic(
             anyhow!("章节中没有可阅读的图片"),
         ));
     }
+    // 前端按 `imagePaths` 的下标取 `pageSizes`，两者长度必须一致；分支里漏算时补 None
+    page_sizes.resize(total_images, None);
 
     Ok(ChapterReaderData {
         comic_id: comic.id,
@@ -233,6 +248,7 @@ pub(crate) fn chapter_reader_data_from_comic(
         next_chapter,
         total_images,
         image_paths: image_paths_str,
+        page_sizes,
     })
 }
 

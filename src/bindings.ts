@@ -475,7 +475,12 @@ export type CbzMode =
 "perChapter"
 export type ChapterInfo = { chapterId: number; chapterTitle: string; order: number; isDownloaded?: boolean | null; chapterDownloadDir?: string | null }
 export type ChapterNavInfo = { chapterId: number; chapterTitle: string; order: number }
-export type ChapterReaderData = { comicId: number; comicTitle: string; chapterId: number; chapterTitle: string; prevChapter: ChapterNavInfo | null; nextChapter: ChapterNavInfo | null; totalImages: number; imagePaths: string[] }
+export type ChapterReaderData = { comicId: number; comicTitle: string; chapterId: number; chapterTitle: string; prevChapter: ChapterNavInfo | null; nextChapter: ChapterNavInfo | null; totalImages: number; imagePaths: string[]; 
+/**
+ * 与 `image_paths` 等长；`None` 表示该页尺寸不可知（文件损坏或文件头超出读取预算），
+ * 阅读器不为它预留高度。
+ */
+pageSizes: (PageSize | null)[] }
 export type Comic = { id: number; name: string; addtime: string; description: string; total_views: string; likes: string; chapterInfos: ChapterInfo[]; series_id: string; comment_total: string; author: string[]; tags: string[]; works: string[]; actors: string[]; related_list: RelatedListRespData[]; liked: boolean; is_favorite: boolean; is_aids: boolean; isDownloaded?: boolean | null; comicDownloadDir?: string | null; localCoverData?: string | null }
 /**
  * 下载完成后的 CBZ 自动整合（合并为单文件 / 逐话命名）过程事件。
@@ -602,6 +607,16 @@ export type LogLevel = "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" |
 export type LoginRespData = { profile: GetUserProfileRespData; sessionEpoch: number; switchedApiDomainMode: ApiDomainMode | null }
 export type NetworkCheckReport = { api: NetworkProbe; image: NetworkProbe; domain: NetworkProbe }
 export type NetworkProbe = { label: string; state: string; elapsedMs: number | null; message: string }
+/**
+ * 阅读器为单页预留高度所用的像素尺寸。
+ * 
+ * 图片解码前 `<img>` 的高度是 0，滚动模式下任意一页解码完成都会把下方内容推开，
+ * 程序化定位（恢复阅读进度、跳页）就再也对不准。
+ * 
+ * `ChapterReaderData::page_sizes` 里与之对应的元素可能是 `None`：该页的文件头
+ * 无法解析（多半是文件已损坏），此时不预留高度，退回按图片自身尺寸排版。
+ */
+export type PageSize = { width: number; height: number }
 export type ProxyMode = "System" | "NoProxy" | "Custom"
 /**
  * 阅读方向：决定点击区域、键盘、滑动与"上一页/下一页"按钮的语义。
