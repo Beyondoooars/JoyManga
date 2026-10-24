@@ -234,8 +234,10 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
         assert!(read_pages_entry(&mut archive).is_empty());
         let sizes = resolve_archive_sizes(&mut archive, &["0001.png".to_string()]);
-        assert_eq!((sizes[0].unwrap().width, sizes[0].unwrap().height), (10, 20));
+        assert_eq!(
+            (sizes[0].unwrap().width, sizes[0].unwrap().height),
+            (10, 20)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
-
 }
