@@ -863,7 +863,10 @@ mod tests {
         let png = |width: u32, height: u32| {
             let mut bytes = Vec::new();
             image::RgbImage::new(width, height)
-                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
                 .unwrap();
             bytes
         };
@@ -907,7 +910,10 @@ mod tests {
             .map(|i| archive.by_index(i).unwrap().name().to_string())
             .collect();
         // 单话合并时条目平铺，不带 `[NN] ` 前缀
-        assert!(entry_names.contains(&"0001.png".to_string()), "{entry_names:?}");
+        assert!(
+            entry_names.contains(&"0001.png".to_string()),
+            "{entry_names:?}"
+        );
         assert!(entry_names.contains(&crate::page_size::PAGES_ENTRY.to_string()));
 
         let cached = crate::page_size::read_pages_entry(&mut archive);
