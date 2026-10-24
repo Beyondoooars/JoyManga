@@ -19,6 +19,7 @@ declare global {
       hasAllFilesAccess(): boolean
       supportsPublicStorage(): boolean
       canWritePublicDownloads(): boolean
+      isVpnActive?(): boolean
       requestAllFilesAccess(): void
       downloadAndInstallApk(url: string, fileName: string): void
       updateDownloadState(): void
@@ -223,6 +224,13 @@ export function watchNetworkVpn(handler: (active: boolean) => void): () => void 
   }
   const listener = (event: Event) => handler(Boolean((event as CustomEvent<boolean>).detail))
   window.addEventListener('jm-network-vpn', listener)
+  // 冷启动时原生在页面注册监听之前就推送过事件，错过了就再也没有下一次
+  // （除非用户又切换一次网络）。这里主动拉一次当前状态兜底。
+  try {
+    handler(window.JmAndroid?.isVpnActive?.() ?? false)
+  } catch (error) {
+    console.error('读取 VPN 状态失败', error)
+  }
   return () => window.removeEventListener('jm-network-vpn', listener)
 }
 
