@@ -58,3 +58,6 @@ verify-report*.txt
 
 # `pnpm gen:icons` 会同时生成 iOS 图标，本应用只发布 Android，不纳入仓库
 src-tauri/icons/ios/
+
+# 官方 APP 逆向分析产物（80MB，仅本地参考，不入库）
+.analysis/
