@@ -136,10 +136,9 @@ fn default_true() -> bool {
     true
 }
 
-/// 书库是否仍位于应用私有目录（`/data/user/<id>/<pkg>/files/library`）。
+/// 书库是否仍位于应用专属目录（公共 `Download/JoyManga` 引入前的位置）。
 ///
-/// 这是公共 `Download/JoyManga` 引入之前的唯一位置。这类配置要继续迁移；
-/// 用户手选的 SD 卡或自建目录不在此列，不能擅自改动。
+/// 这类配置要继续迁移；用户手选的 SD 卡或自建目录不在此列，不能擅自改动。
 fn is_app_private_library_path(path: &str) -> bool {
     // 不能用 `Path::is_absolute()`：配置里的路径来自 Android，在桌面/CI 上
     // （测试与交叉编译的单元测试）它会被判成相对路径。这里只按组件比对。
@@ -149,9 +148,13 @@ fn is_app_private_library_path(path: &str) -> bool {
     }
     // 只比对路径组件，不依赖平台的分隔符解析细节。历史上出现过三种落点：
     //
-    // 1. `/data/user/<id>/<pkg>/files/library`（或 `/data/data/<pkg>/files/library`）
-    //    —— `Config::default` 用应用内部数据目录拼出来的默认书库；
-    // 2. `/data/user/<id>/<pkg>/library` —— 更早版本直接取应用数据目录的上级；
+    // 1. `/data/user/<id>/<pkg>/library`（或 `/data/data/<pkg>/library`）
+    //    —— `Config::default` 的默认值：Tauri 的 `app_data_dir()` 在 Android 上取
+    //    `Context.getDataDir()`（应用数据根目录，不含 `files`），再拼 `library`。
+    //    配置没被改写过时就是这个位置；
+    // 2. `/data/user/<id>/<pkg>/files/library`（或 `/data/data/<pkg>/files/library`）
+    //    —— 原生 `filesDir` 下的落点（`getExternalFilesDir(null)` 为 null 时的兜底），
+    //    也可能来自早期手动填写的路径；
     // 3. `/storage/emulated/0/Android/data/<pkg>/files/library`
     //    —— v0.2.4 起首启走原生 `libraryPath()`（`getExternalFilesDir/library`）。
     //
