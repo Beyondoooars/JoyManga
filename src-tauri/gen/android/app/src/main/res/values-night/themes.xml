@@ -1,6 +1,13 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.joymanga" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <!--
+          夜间限定符下的同名主题。应用通过 MODE_NIGHT_NO 锁死了浅色，
+          但部分 ROM 仍会先按系统深色挑中这一份，两处保持一致才能保证
+          状态栏始终是白色而不是 Material 默认的深色。
+        -->
+        <item name="android:statusBarColor">@android:color/white</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@android:color/white</item>
     </style>
 </resources>

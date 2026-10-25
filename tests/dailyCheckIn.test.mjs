@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  buildCalendarWeeks,
   compactNumber,
   dayOfMonth,
   expProgress,
@@ -86,4 +87,36 @@ test('金币过万折成万位显示', () => {
 test('dayOfMonth 与面板 date 形态一致', () => {
   assert.equal(dayOfMonth(new Date(2026, 9, 5)), '5')
   assert.equal(dayOfMonth(new Date(2026, 9, 25)), '25')
+})
+
+test('月历按真实星期补位，1 号落在它该在的那一列', () => {
+  // 2026 年 10 月 1 日是周四 → 前面补 3 个空位（周一、二、三）
+  const state = {
+    record: [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((d) => ({ date: String(d), signed: null, bonus: false }))],
+    signedDays: 0,
+    elapsedDays: 0,
+  }
+  const weeks = buildCalendarWeeks(state, new Date(2026, 9, 15))
+  assert.equal(weeks[0][0], null)
+  assert.equal(weeks[0][1], null)
+  assert.equal(weeks[0][2], null)
+  assert.equal(weeks[0][3].date, '1')
+  // 每一行都是完整的 7 列
+  for (const week of weeks) assert.equal(week.length, 7)
+})
+
+test('月历跨周时行数与星期对齐正确', () => {
+  const days = Array.from({ length: 31 }, (_, i) => ({ date: String(i + 1), signed: null, bonus: false }))
+  const state = { record: [days.slice(0, 7), days.slice(7)], signedDays: 0, elapsedDays: 0 }
+  // 2026 年 10 月：1 号周四，31 号周六 → 补齐月初 3 格后共 5 行
+  const weeks = buildCalendarWeeks(state, new Date(2026, 9, 15))
+  assert.equal(weeks.length, 5)
+  assert.equal(weeks[4][4].date, '30')
+  assert.equal(weeks[4][5].date, '31')
+  assert.equal(weeks[4][6], null)
+})
+
+test('空面板不产生任何行', () => {
+  assert.deepEqual(buildCalendarWeeks(undefined), [])
+  assert.deepEqual(buildCalendarWeeks({ record: [], signedDays: 0, elapsedDays: 0 }), [])
 })

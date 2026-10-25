@@ -8,6 +8,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     ComicCard: typeof import('./components/ComicCard.vue')['default']
+    DailyCheckInCard: typeof import('./components/DailyCheckInCard.vue')['default']
     DownloadAllFavoriteButton: typeof import('./components/DownloadAllFavoriteButton.vue')['default']
     FavoriteButton: typeof import('./components/FavoriteButton.vue')['default']
     FloatLabelInput: typeof import('./components/FloatLabelInput.vue')['default']

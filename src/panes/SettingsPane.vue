@@ -613,8 +613,10 @@ const readingSummary = computed(() => {
           <div class="brand-row">
             <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
               <rect width="48" height="48" rx="12" fill="#241C2B" />
-              <rect x="24.2" y="5.4" width="11.6" height="11.6" rx="2.4" transform="rotate(45 30 11.2)" fill="#00AEEC" />
-              <path d="M30 21.5 V30 A9 9 0 0 1 13 30" fill="none" stroke="#FB7299" stroke-width="10" stroke-linecap="round" />
+              <g transform="translate(24 24) scale(0.78) translate(-24 -24)" stroke="#FFFFFF" stroke-width="1.6" stroke-linejoin="round">
+                <path d="M3.5 5.5H15C20.5228 5.5 25 9.97715 25 15.5V40.5C25 36.0817 21.4183 32.5 17 32.5H3.5V5.5Z" fill="#FB7299" />
+                <path d="M44.5 5.5H33C27.4772 5.5 23 9.97715 23 15.5V40.5C23 36.0817 26.5817 32.5 31 32.5H44.5V5.5Z" fill="#00AEEC" />
+              </g>
             </svg>
             <div class="brand-copy"><strong>JoyManga</strong><span>下载 · 归档 · 阅读</span></div>
           </div>
@@ -951,12 +953,18 @@ const readingSummary = computed(() => {
   outline-offset: -2px;
 }
 
-:deep(.n-base-selection),
-:deep(.n-input) {
+/* 触控尺寸：控件统一 46dp。
+   关键是同时改 --n-height——naive-ui 把它作为**内联样式**写在 select/input
+   根元素上，内层 label、文字行、后缀箭头全按它排版；只把外层 min-height
+   拉到 46px 会让文字贴顶、箭头被 top:50% 顶到偏上。作者样式的 !important
+   能压过内联声明，所以这里要带 !important。 */
+.settings-page :deep(.n-base-selection),
+.settings-page :deep(.n-input) {
+  --n-height: 46px !important;
   min-height: 46px;
 }
 
-:deep(.n-button) {
+.settings-page :deep(.n-button) {
   min-height: 42px;
 }
 </style>
