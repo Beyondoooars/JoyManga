@@ -1,15 +1,34 @@
 <script setup lang="ts">
-import { ref, watch, onBeforeUnmount, onDeactivated } from 'vue'
+import { ref, computed, watch, onActivated, onBeforeUnmount, onDeactivated } from 'vue'
 import { commands } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import FloatLabelInput from '../components/FloatLabelInput.vue'
 import FavoritePane from './FavoritePane.vue'
+import DailyCheckInCard from '../components/DailyCheckInCard.vue'
 import { useStore } from '../store.ts'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
-import { PhHeart, PhSignOut, PhUser } from '@phosphor-icons/vue'
+import { compactNumber, expProgress } from '../utils/dailyCheckIn.ts'
+import { PhCoin, PhHeart, PhSignOut, PhTrendUp, PhUser } from '@phosphor-icons/vue'
 
 const store = useStore()
 const message = useMessage()
+
+/** 金币与等级经验都挂在用户资料上，签到成功后后端会重新拉取资料并经会话事件推回来 */
+const exp = computed(() => expProgress(store.userProfile))
+
+// 资料只在登录时写入 store，金币/经验会随时间变化：每次回到本页静默刷新一次。
+// 失败不提示——签到卡自己会显示拉取失败，这里再弹一次只是噪音。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  if (store.userProfile === undefined) return
+  void commands.getUserProfile().then((result) => {
+    if (result.status === 'error') console.error(result.error)
+  }).catch(console.error)
+})
 
 const username = ref<string>(store.config?.username ?? '')
 const password = ref<string>(store.config?.password ?? '')
@@ -165,6 +184,20 @@ async function clearUsernameAndPasswordInConfig() {
             <span class="dot-sep">•</span>
             <span class="text-neutral-500">云端收藏</span>
           </div>
+          <div class="user-stats">
+            <span class="user-stat" title="金币">
+              <PhCoin :size="14" weight="duotone" class="stat-icon coin" />
+              {{ compactNumber(store.userProfile.coin) }}
+            </span>
+            <span class="user-stat" :title="`经验 ${exp.current}${exp.target > 0 ? ` / ${exp.target}` : ''}`">
+              <PhTrendUp :size="14" weight="duotone" class="stat-icon exp" />
+              {{ exp.current }}
+              <span v-if="exp.target > 0" class="stat-target">/ {{ exp.target }}</span>
+            </span>
+            <span v-if="exp.target > 0" class="user-exp-bar" role="progressbar" :aria-valuenow="exp.percent" aria-valuemin="0" aria-valuemax="100">
+              <span class="user-exp-fill" :style="{ width: `${exp.percent}%` }"></span>
+            </span>
+          </div>
         </div>
         <button
           type="button"
@@ -176,6 +209,8 @@ async function clearUsernameAndPasswordInConfig() {
           <span>退出登录</span>
         </button>
       </div>
+
+      <DailyCheckInCard />
 
       <div class="favorites-header-title">
         <span class="pink-bar"></span>
@@ -262,7 +297,7 @@ async function clearUsernameAndPasswordInConfig() {
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
 .user-name-row {
@@ -307,6 +342,55 @@ async function clearUsernameAndPasswordInConfig() {
 
 .dot-sep {
   opacity: 0.5;
+}
+
+.user-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.user-stat {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  color: #61666d;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.stat-icon.coin {
+  color: #f5a623;
+}
+
+.stat-icon.exp {
+  color: #00aeec;
+}
+
+.stat-target {
+  color: #9499a0;
+  font-weight: 400;
+}
+
+.user-exp-bar {
+  flex: 0 1 96px;
+  height: 5px;
+  min-width: 48px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #f1f2f3;
+}
+
+.user-exp-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #00aeec 0%, #fb7299 100%);
+  transition: width 0.3s;
 }
 
 .logout-btn {
@@ -468,6 +552,20 @@ async function clearUsernameAndPasswordInConfig() {
 @media (max-width: 760px) {
   .user-profile-bar {
     padding: 14px;
+    gap: 12px;
+  }
+
+  /* 窄屏下退出按钮只留图标，把宽度让给金币/经验 */
+  .logout-btn span {
+    display: none;
+  }
+
+  .logout-btn {
+    padding: 8px;
+  }
+
+  .user-exp-bar {
+    flex-basis: 72px;
   }
 
   .favorites-header-title {

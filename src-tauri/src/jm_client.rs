@@ -19,11 +19,12 @@ use crate::config::{ApiDomainMode, Config, ConfigStorage};
 use crate::events::{FavoriteChangedEvent, SessionChangedEvent};
 use crate::extensions::AppHandleExt;
 use crate::responses::{
-    GetChapterRespData, GetComicRespData, GetFavoriteRespData, GetUserProfileRespData,
-    GetWeeklyInfoRespData, GetWeeklyRespData, JmResp, LoginRespData, RedirectRespData, SearchResp,
-    SearchRespData, ToggleFavoriteRespData, ToggleType,
+    DailyCheckInRespData, DailyCheckInResultRespData, GetChapterRespData, GetComicRespData,
+    GetFavoriteRespData, GetUserProfileRespData, GetWeeklyInfoRespData, GetWeeklyRespData, JmResp,
+    LoginRespData, RedirectRespData, SearchResp, SearchRespData, ToggleFavoriteRespData,
+    ToggleType,
 };
-use crate::types::{FavoriteSort, SearchSort};
+use crate::types::{DailyCheckInOutcome, DailyCheckInState, FavoriteSort, SearchSort};
 use crate::utils;
 use tauri_specta::Event;
 
@@ -189,6 +190,8 @@ enum ApiPath {
     GetWeeklyInfo,
     GetWeekly,
     Setting,
+    DailyCheckInStatus,
+    DailyCheckIn,
 }
 impl ApiPath {
     fn as_str(&self) -> &'static str {
@@ -202,6 +205,8 @@ impl ApiPath {
             ApiPath::GetWeeklyInfo => "/week",
             ApiPath::GetWeekly => "/week/filter",
             ApiPath::Setting => "/setting",
+            ApiPath::DailyCheckInStatus => "/daily",
+            ApiPath::DailyCheckIn => "/daily_chk",
         }
     }
 
@@ -216,6 +221,8 @@ impl ApiPath {
             ApiPath::GetFavoriteFolder => "获取收藏夹",
             ApiPath::GetWeeklyInfo | ApiPath::GetWeekly => "获取每周必看信息",
             ApiPath::Setting => "获取设置",
+            ApiPath::DailyCheckInStatus => "获取签到状态",
+            ApiPath::DailyCheckIn => "签到",
         }
     }
 }
@@ -228,6 +235,8 @@ pub struct JmClient {
     session: Arc<RwLock<SessionState>>,
     auth_lock: Arc<tokio::sync::Mutex<()>>,
     favorite_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 签到串行锁：写接口不能连点重复提交
+    daily_check_in_lock: Arc<tokio::sync::Mutex<()>>,
     auth_generation: Arc<AtomicU64>,
     auth_cancel: tokio::sync::watch::Sender<u64>,
     img_client: Arc<RwLock<ClientWithMiddleware>>,
@@ -264,6 +273,7 @@ impl JmClient {
             session: Arc::new(RwLock::new(SessionState::default())),
             auth_lock: Arc::new(tokio::sync::Mutex::new(())),
             favorite_lock: Arc::new(tokio::sync::Mutex::new(())),
+            daily_check_in_lock: Arc::new(tokio::sync::Mutex::new(())),
             auth_generation: Arc::new(AtomicU64::new(0)),
             auth_cancel: tokio::sync::watch::channel(0).0,
             img_client,
@@ -975,12 +985,98 @@ impl JmClient {
     }
 
     fn ensure_session_epoch(&self, epoch: u64) -> anyhow::Result<()> {
+        self.ensure_session_epoch_for(epoch, "收藏操作")
+    }
+
+    fn ensure_session_epoch_for(&self, epoch: u64, action: &str) -> anyhow::Result<()> {
         let state = self.session.read();
         anyhow::ensure!(
             state.epoch == epoch && state.profile.is_some(),
-            "账号已改变或退出，请重新确认收藏操作"
+            "账号已改变或退出，请重新确认{action}"
         );
         Ok(())
+    }
+
+    /// 当前会话的用户 ID；未登录直接报错，避免拿空 uid 去请求签到接口。
+    fn require_uid(&self) -> anyhow::Result<String> {
+        let state = self.session.read();
+        let uid = state.profile.as_ref().map(|p| p.uid.clone());
+        uid.filter(|uid| !uid.is_empty())
+            .context("尚未登录，请登录后签到")
+    }
+
+    /// 当月签到面板。`GET /daily?user_id=...`
+    pub async fn get_daily_check_in(&self) -> anyhow::Result<DailyCheckInState> {
+        let uid = self.require_uid()?;
+        let resp: DailyCheckInRespData = self
+            .jm_get_parsed(ApiPath::DailyCheckInStatus, Some(json!({ "user_id": uid })))
+            .await?;
+        Ok(DailyCheckInState::from_resp_data(resp))
+    }
+
+    /// 今日签到。`POST /daily_chk`
+    ///
+    /// 写接口语义：服务端对「今天已签过」同样回 200 + 一句文案，所以成败不能只看
+    /// HTTP 状态，也不能匹配中文文案（文案随时会改）。做法是签到后重新拉一次面板，
+    /// 用「已签天数是否增加」判定，并把最新面板一并返回供界面刷新。
+    pub async fn daily_check_in(&self, session_epoch: u64) -> anyhow::Result<DailyCheckInOutcome> {
+        let uid = self.require_uid()?;
+        // 写操作按账号串行，避免连点造成重复提交；与收藏互不阻塞
+        let _guard = self.daily_check_in_lock.lock().await;
+        self.ensure_session_epoch_for(session_epoch, "签到")?;
+
+        let before = self.get_daily_check_in().await?;
+        anyhow::ensure!(
+            before.daily_id > 0,
+            "签到活动信息缺失，请在「我的」页下拉刷新后重试"
+        );
+
+        let payload = json!({ "user_id": uid, "daily_id": before.daily_id.to_string() });
+        let result: DailyCheckInResultRespData = self
+            .post_without_retry_parsed(ApiPath::DailyCheckIn, None, Some(payload), "签到")
+            .await
+            .context("签到请求失败，请稍后重试")?;
+
+        // 回查：接口文案不可靠，以面板状态为准。回查失败时不能猜结果——
+        // 服务端已受理，但界面显示的状态会是旧的，必须让用户知道要去确认。
+        let after = match self.get_daily_check_in().await {
+            Ok(state) => state,
+            Err(error) => {
+                let server_msg = result.msg.trim();
+                let detail = if server_msg.is_empty() {
+                    String::new()
+                } else {
+                    format!("（服务端返回：{server_msg}）")
+                };
+                return Err(error.context(format!(
+                    "签到已提交{detail}，但刷新签到状态失败，请稍后下拉刷新确认"
+                )));
+            }
+        };
+        // 期间切换过账号（或退出）时，这份面板属于别的会话，不能交给界面显示
+        self.ensure_session_epoch_for(session_epoch, "签到")?;
+        let just_signed = after.signed_days > before.signed_days;
+
+        let message = if !result.msg.trim().is_empty() {
+            result.msg
+        } else if just_signed {
+            "签到成功".to_string()
+        } else {
+            "今日已签到".to_string()
+        };
+
+        if just_signed {
+            // 金币与经验都挂靠在用户资料上，签到后需要重新拉取才能看到新数值
+            if let Err(error) = self.get_user_profile().await {
+                tracing::warn!(error = %error, "签到成功但刷新用户资料失败");
+            }
+        }
+
+        Ok(DailyCheckInOutcome {
+            just_signed,
+            message,
+            state: after,
+        })
     }
 
     pub async fn search(

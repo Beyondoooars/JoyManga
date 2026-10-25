@@ -1,3 +1,4 @@
+mod daily_check_in_resp_data;
 mod get_chapter_resp_data;
 mod get_comic_resp_data;
 mod get_favorite_resp_data;
@@ -7,6 +8,7 @@ mod get_weekly_resp_data;
 mod search_resp;
 mod toggle_favorite_resp_data;
 
+pub use daily_check_in_resp_data::*;
 pub use get_chapter_resp_data::*;
 pub use get_comic_resp_data::*;
 pub use get_favorite_resp_data::*;

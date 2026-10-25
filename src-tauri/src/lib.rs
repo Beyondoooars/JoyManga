@@ -74,6 +74,8 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             get_weekly_info,
             get_weekly,
             get_user_profile,
+            get_daily_check_in,
+            daily_check_in,
             create_download_task,
             get_download_tasks,
             promote_comic_archive,

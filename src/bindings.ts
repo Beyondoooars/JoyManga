@@ -172,6 +172,22 @@ async getUserProfile() : Promise<Result<GetUserProfileRespData, CommandError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getDailyCheckIn() : Promise<Result<DailyCheckInState, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_daily_check_in") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async dailyCheckIn(sessionEpoch: number) : Promise<Result<DailyCheckInOutcome, CommandError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("daily_check_in", { sessionEpoch }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async createDownloadTask(comic: Comic, chapterId: number, cbzMode: CbzMode | null) : Promise<Result<null, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_download_task", { comic, chapterId, cbzMode }) };
@@ -554,6 +570,49 @@ downloadOnlyWifi?: boolean;
  */
 logLevel?: LogLevel }
 export type ConfigChangedEvent = { config: Config }
+/**
+ * 一次签到的结果。成败以「签到前后已签天数是否增加」为准，
+ * 服务端文案只作提示——官方 App 靠 `msg.includes(...)` 判断，文案一改就误判。
+ */
+export type DailyCheckInOutcome = { 
+/**
+ * 本次是否真的新增了一次签到（已签过则为 false）
+ */
+justSigned: boolean; message: string; state: DailyCheckInState }
+export type DailyCheckInRecordDay = { 
+/**
+ * 当月第几天，形如 `"5"`（补零的 `"05"` 也能解析）
+ */
+date: string; 
+/**
+ * `null` 表示未来日期（当天及以后尚未结算），`true` 已签，`false` 漏签
+ */
+signed: boolean | null; 
+/**
+ * 奖励日（每 3/7 天）
+ */
+bonus: boolean }
+/**
+ * 签到面板：界面直接渲染 `record`，另外附带两个统计量，
+ * 避免前端为「已签/应签」再遍历一次二维数组。
+ */
+export type DailyCheckInState = { dailyId: number; eventName: string; 
+/**
+ * 3 天/7 天奖励的进度，接口原样返回（如 `"42.86%"`）
+ */
+currentProgress: string; threeDaysCoin: string; threeDaysExp: string; sevenDaysCoin: string; sevenDaysExp: string; 
+/**
+ * 按周分组的当月日历；`signed` 为 `null` 表示未来日期
+ */
+record: DailyCheckInRecordDay[][]; 
+/**
+ * 到「今天」为止已经签到的天数
+ */
+signedDays: number; 
+/**
+ * 到「今天」为止应当签到的天数（已签 + 漏签），由接口给出的非 null 天数推出
+ */
+elapsedDays: number }
 export type DirectoryEntry = { name: string; path: string }
 export type DownloadAllFavoritesEvent = { event: "GetFavoritesStart" } | { event: "GetComicsProgress"; data: { current: number; total: number } } | { event: "StartCreateDownloadTasks"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreatingDownloadTask"; data: { comicId: number; current: number } } | { event: "EndCreateDownloadTasks"; data: { comicId: number } } | { event: "GetComicsEnd" }
 export type DownloadSpeedEvent = { speed: string }

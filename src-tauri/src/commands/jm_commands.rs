@@ -4,7 +4,8 @@ use crate::errors::{CommandError, CommandResult};
 use crate::extensions::AppHandleExt;
 use crate::responses::{GetUserProfileRespData, GetWeeklyInfoRespData, LoginRespData};
 use crate::types::{
-    Comic, FavoriteSort, GetFavoriteResult, GetWeeklyResult, SearchResultVariant, SearchSort,
+    Comic, DailyCheckInOutcome, DailyCheckInState, FavoriteSort, GetFavoriteResult,
+    GetWeeklyResult, SearchResultVariant, SearchSort,
 };
 use crate::utils;
 
@@ -36,6 +37,27 @@ pub async fn get_user_profile(app: AppHandle) -> CommandResult<GetUserProfileRes
         .map_err(|err| CommandError::from("获取用户信息失败", err))?;
 
     Ok(user_profile)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_daily_check_in(app: AppHandle) -> CommandResult<DailyCheckInState> {
+    app.get_jm_client()
+        .get_daily_check_in()
+        .await
+        .map_err(|err| CommandError::from("获取签到状态失败", err))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn daily_check_in(
+    app: AppHandle,
+    session_epoch: u64,
+) -> CommandResult<DailyCheckInOutcome> {
+    app.get_jm_client()
+        .daily_check_in(session_epoch)
+        .await
+        .map_err(|err| CommandError::from("签到失败", err))
 }
 
 #[tauri::command]
