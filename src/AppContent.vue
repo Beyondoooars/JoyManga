@@ -3,12 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, 
 import type { Component } from 'vue'
 import { commands } from './bindings.ts'
 import { useMessage, useNotification } from 'naive-ui'
-import {
-  PhBooks,
-  PhGearSix,
-  PhMagnifyingGlass,
-  PhUser,
-} from '@phosphor-icons/vue'
+import { PhBooks, PhCompass, PhDownloadSimple, PhHeart, PhUser } from '@phosphor-icons/vue'
 import { useStore } from './store.ts'
 import icon from './assets/icon.png'
 import type { CurrentTabName } from './types.ts'
@@ -40,6 +35,9 @@ const notification = useNotification()
 const { isAndroid } = useIsMobile()
 const { checkForUpdates } = useAppUpdate()
 
+/** 底部导航的四个一级页面；其余（详情、设置）是压栈的二级页面 */
+const MAIN_TABS: CurrentTabName[] = ['search', 'favorite', 'downloaded', 'account']
+
 const initializing = ref(false)
 const initializationError = ref('')
 // 首次启动（未完成过存储初始化且未获所有文件权限）时弹存储引导；不阻塞应用使用
@@ -60,6 +58,8 @@ store.registerConfigSaveWaiter(async () => {
   }
   await configSaveQueue
 })
+
+const chromeVisible = computed(() => MAIN_TABS.includes(store.currentTabName) && !store.chapterDetailShowing)
 
 function navigateToTab(tab: CurrentTabName) {
   if (tab === 'account') {
@@ -99,6 +99,11 @@ useBackHandler(() => {
   }
   // 「我的」是从其他标签进去的：返回键先回到来处，而不是直接提示退出应用
   if (store.closeAccount()) {
+    return true
+  }
+  // 其余二级标签回到「发现」，避免一次返回就直接退出应用
+  if (store.currentTabName === 'favorite' || store.currentTabName === 'downloaded') {
+    store.currentTabName = 'search'
     return true
   }
   return handleRootBackExit((msg) => message.info(msg))
@@ -293,90 +298,103 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="appReady && store.config !== undefined" class="bili-app is-mobile-app">
-    <!-- 顶部栏：移动端只保留品牌与设置，导航在底部 -->
-    <header class="bili-header" aria-label="应用主导航">
-      <div class="header-left">
-        <!-- Brand Logo -->
-        <button class="brand-button" type="button" title="回到发现" @click="navigateToTab('search')">
-          <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+  <div v-if="appReady && store.config !== undefined" class="app-shell">
+    <!-- 顶栏：品牌 + 下载状态 + 设置；二级页面自带导航，不再重复一条 -->
+    <header v-if="chromeVisible" class="app-header">
+      <button type="button" class="brand-button" title="回到发现" @click="navigateToTab('search')">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" focusable="false">
             <g stroke="#241C2B" stroke-width="3" stroke-linejoin="round">
               <path d="M3.5 5.5H15C20.5228 5.5 25 9.97715 25 15.5V40.5C25 36.0817 21.4183 32.5 17 32.5H3.5V5.5Z" fill="#FB7299" />
               <path d="M44.5 5.5H33C27.4772 5.5 23 9.97715 23 15.5V40.5C23 36.0817 26.5817 32.5 31 32.5H44.5V5.5Z" fill="#00AEEC" />
             </g>
           </svg>
-          <span class="brand-title">JoyManga</span>
-        </button>
-      </div>
+        </span>
+        <span class="brand-title">Joy<span>Manga</span></span>
+      </button>
 
-      <!-- Header Right Controls -->
-      <div class="header-right">
-        <!-- Settings Action -->
-        <div class="header-actions">
-          <button
-            type="button"
-            class="header-icon-btn"
-            :class="{ active: store.currentTabName === 'settings' }"
-            title="设置"
-            @click="navigateToTab('settings')">
-            <PhGearSix :size="18" />
-            <span class="sr-only">设置</span>
-          </button>
-        </div>
+      <div class="header-tools">
+        <button
+          v-if="store.activeDownloadCount > 0"
+          type="button"
+          class="download-chip"
+          :aria-label="`${store.activeDownloadCount} 个章节正在下载，查看传输`"
+          @click="store.openTransfers()">
+          <PhDownloadSimple :size="15" weight="bold" />
+          <span class="download-chip-count">{{ store.activeDownloadCount }}</span>
+          <span v-if="store.downloadSpeed" class="download-chip-speed">{{ store.downloadSpeed }}</span>
+        </button>
       </div>
     </header>
 
-    <!-- Main Workspace Surface (Full Width) -->
-    <n-alert v-if="store.config?.apiDomainMigrationPending" type="warning" closable @close="store.config.apiDomainMigrationPending = false">
+    <n-alert
+      v-if="store.config?.apiDomainMigrationPending"
+      class="shell-alert"
+      type="warning"
+      closable
+      @close="store.config.apiDomainMigrationPending = false">
       已保留升级前的线路设置，可在设置 → 网络中核对。
     </n-alert>
-    <main class="main-viewport">
-      <section class="content-surface">
-        <KeepAlive>
-          <ChapterPane
-            v-if="store.chapterDetailShowing"
-            key="chapter-detail"
-            @back="store.closeComicDetail" />
-          <component
-            v-else
-            :is="currentPaneComponent"
-            :key="store.currentTabName"
-            @open-login="navigateToTab('account')"
-            @back="store.closeSettings" />
-        </KeepAlive>
-      </section>
+
+    <main class="app-body">
+      <KeepAlive>
+        <ChapterPane
+          v-if="store.chapterDetailShowing"
+          key="chapter-detail"
+          @back="store.closeComicDetail" />
+        <component
+          v-else
+          :is="currentPaneComponent"
+          :key="store.currentTabName"
+          @open-login="navigateToTab('account')"
+          @back="store.closeSettings"
+          @open-transfers="store.openTransfers()" />
+      </KeepAlive>
     </main>
 
-    <!-- Mobile Bottom Navigation Bar (3 Tabs: 发现, 书库(含传输), 我的) -->
-    <nav class="mobile-nav" aria-label="移动端底部导航">
-      <!-- 发现 Tab -->
+    <!-- 底部导航：发现 / 收藏 / 书库 / 我的 -->
+    <nav v-if="chromeVisible" class="app-tabbar" aria-label="主导航">
       <button
         type="button"
-        :class="['mobile-nav-btn', { active: store.currentTabName === 'search' && !store.chapterDetailShowing }]"
+        class="tab-item"
+        :class="{ 'is-active': store.currentTabName === 'search' }"
+        :aria-current="store.currentTabName === 'search' ? 'page' : undefined"
         @click="navigateToTab('search')">
-        <PhMagnifyingGlass :size="20" weight="duotone" />
-        <span>发现</span>
+        <span class="tab-icon"><PhCompass :size="23" :weight="store.currentTabName === 'search' ? 'fill' : 'regular'" /></span>
+        <span class="tab-label">发现</span>
       </button>
 
-      <!-- 书库 Tab (包含已入库与传输) -->
       <button
         type="button"
-        :class="['mobile-nav-btn', { active: store.currentTabName === 'downloaded' && !store.chapterDetailShowing }]"
+        class="tab-item"
+        :class="{ 'is-active': store.currentTabName === 'favorite' }"
+        :aria-current="store.currentTabName === 'favorite' ? 'page' : undefined"
+        @click="navigateToTab('favorite')">
+        <span class="tab-icon"><PhHeart :size="23" :weight="store.currentTabName === 'favorite' ? 'fill' : 'regular'" /></span>
+        <span class="tab-label">收藏</span>
+      </button>
+
+      <button
+        type="button"
+        class="tab-item"
+        :class="{ 'is-active': store.currentTabName === 'downloaded' }"
+        :aria-current="store.currentTabName === 'downloaded' ? 'page' : undefined"
         @click="navigateToTab('downloaded')">
-        <div class="relative flex items-center justify-center">
-          <PhBooks :size="20" weight="duotone" />
-          <span v-if="store.activeDownloadCount > 0" class="mobile-badge">{{ store.activeDownloadCount }}</span>
-        </div>
-        <span>书库</span>
+        <span class="tab-icon">
+          <PhBooks :size="23" :weight="store.currentTabName === 'downloaded' ? 'fill' : 'regular'" />
+          <span v-if="store.activeDownloadCount > 0" class="tab-badge">{{ store.activeDownloadCount > 99 ? '99+' : store.activeDownloadCount }}</span>
+        </span>
+        <span class="tab-label">书库</span>
       </button>
 
-      <!-- 我的 Tab -->
       <button
         type="button"
-        :class="['mobile-nav-btn', { active: store.currentTabName === 'account' }]"
+        class="tab-item"
+        :class="{ 'is-active': store.currentTabName === 'account' }"
+        :aria-current="store.currentTabName === 'account' ? 'page' : undefined"
         @click="navigateToTab('account')">
-        <PhUser :size="20" weight="duotone" />
-        <span>我的</span>
+        <span class="tab-icon"><PhUser :size="23" :weight="store.currentTabName === 'account' ? 'fill' : 'regular'" /></span>
+        <span class="tab-label">我的</span>
       </button>
     </nav>
 
@@ -387,240 +405,237 @@ onUnmounted(() => {
   </div>
 
   <div v-else-if="initializationError" class="app-loading" role="alert">
-    <img :src="icon" alt="JoyManga" class="w-12 h-12 rounded-xl object-contain mb-2 shadow-lg" />
+    <img :src="icon" alt="JoyManga" class="loading-logo" />
     <div class="loading-copy">
-      <strong class="text-[#18191c] text-base">应用初始化失败</strong>
-      <span class="text-[#61666d] text-xs">{{ initializationError }}</span>
+      <strong>应用初始化失败</strong>
+      <span>{{ initializationError }}</span>
     </div>
     <n-button type="primary" :loading="initializing" @click="initializeApp">重试</n-button>
   </div>
 
   <div v-else class="app-loading" aria-live="polite">
-    <img :src="icon" alt="JoyManga" class="w-12 h-12 rounded-xl object-contain mb-2 animate-pulse shadow-lg" />
+    <img :src="icon" alt="JoyManga" class="loading-logo is-pulsing" />
     <div class="loading-copy">
-      <strong class="text-[#18191c] text-base font-bold tracking-tight">Joy<span class="text-[#fb7299]">Manga</span></strong>
-      <span class="text-[#61666d] text-xs">正在加载精彩漫库…</span>
+      <strong>Joy<span>Manga</span></strong>
+      <span>正在加载精彩漫库…</span>
     </div>
     <div class="loading-bar"><i></i></div>
   </div>
 </template>
 
 <style scoped>
-.bili-app {
-  /* 底栏高度只在这里定义一次：底栏自身与内容区底部留白都引用它，
-     调整导航高度时不会出现「内容被遮住」或「多留一条白边」 */
-  --mobile-nav-h: calc(56px + env(safe-area-inset-bottom, 0px));
+.app-shell {
   display: flex;
   width: 100%;
   height: 100vh;
+  height: 100dvh;
   flex-direction: column;
   overflow: hidden;
-  background: #f6f7f8;
-  color: #18191c;
+  background: var(--jm-bg);
+  color: var(--jm-text);
 }
 
-/* Bilibili Header */
-.bili-header {
-  position: relative;
-  z-index: 20;
+/* 顶栏：52px，随状态栏安全区内缩 */
+.app-header {
   display: flex;
-  height: 60px;
+  height: calc(var(--jm-header-h) + var(--safe-top));
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  padding: 0 22px;
-  background: rgba(255, 255, 255, 0.94);
-  border-bottom: 1px solid #e3e5e7;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  min-width: 0;
+  gap: 12px;
+  padding: var(--safe-top) calc(var(--jm-gutter) - 4px) 0 calc(var(--jm-gutter) - 4px);
+  border-bottom: 1px solid var(--jm-line);
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: saturate(180%) blur(12px);
 }
 
 .brand-button {
   display: flex;
+  min-height: 44px;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   padding: 4px 6px;
-  cursor: pointer;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--jm-r-md);
   background: transparent;
-  transition: all 160ms ease;
-}
-
-.brand-button:hover {
-  background: #f1f2f3;
+  cursor: pointer;
+  transition: background-color 160ms ease;
 }
 
 .brand-button:active {
-  transform: scale(0.95);
+  background: var(--jm-sunken);
 }
 
 .brand-mark {
-  width: 28px;
-  height: 28px;
+  display: grid;
+  width: 30px;
+  height: 30px;
   flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--jm-brand-soft);
+}
+
+.brand-mark svg {
+  width: 22px;
+  height: 22px;
 }
 
 .brand-title {
-  font-size: 15px;
+  color: var(--jm-text);
+  font-size: 17px;
   font-weight: 800;
-  color: #18191c;
   letter-spacing: -0.02em;
 }
 
-.brand-button:hover .brand-title {
-  color: #fb7299;
+.brand-title span {
+  color: var(--jm-brand);
 }
 
-.header-right {
+.header-tools {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
+  gap: 4px;
 }
 
-.header-actions {
-  display: flex;
+/* 下载中的常驻胶囊：点击直达传输页 */
+.download-chip {
+  display: inline-flex;
+  height: 34px;
   align-items: center;
   gap: 6px;
-}
-
-
-.header-icon-btn {
-  display: flex;
-  width: 32px;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  color: #61666d;
+  padding: 0 10px;
+  color: var(--jm-accent);
+  border: 0;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-accent-soft);
+  font-size: var(--jm-fs-sm);
+  font-weight: 700;
   cursor: pointer;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  transition: all 160ms ease;
+  transition: background-color 160ms ease;
 }
 
-.header-icon-btn:hover {
-  color: #fb7299;
-  background: #f1f2f3;
-  border-color: #e3e5e7;
+.download-chip:active {
+  background: rgba(0, 174, 236, 0.18);
 }
 
-/* 设置是整页而非弹窗：停留在设置页时齿轮保持高亮，用户能看出当前在哪 */
-.header-icon-btn.active {
-  color: #fb7299;
-  background: #fff0f5;
-  border-color: #fb7299;
+.download-chip-count {
+  font-variant-numeric: tabular-nums;
 }
 
-/* 触屏：顶栏图标按钮补足 44dp 可点区域（视觉尺寸仍 32px） */
-@media (max-width: 768px) {
-  .header-icon-btn {
-    width: 44px;
-    height: 44px;
-  }
-
-  .brand-button {
-    min-height: 44px;
-  }
-
-  .brand-mark {
-    width: 30px;
-    height: 30px;
-  }
+.download-chip-speed {
+  max-width: 92px;
+  overflow: hidden;
+  color: var(--jm-accent-deep);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.header-icon-btn:active {
-  transform: scale(0.94);
+.shell-alert {
+  flex: 0 0 auto;
+  border-radius: 0;
 }
 
-/* Main Viewport & Content Surface
-   界面只面向 Android 移动端（桌面外壳已删除），所以这里直接写移动端形态：
-   内容区与顶栏、底栏连成一片，白色主体不被灰带或卡片边框断开。 */
-.main-viewport {
+.app-body {
+  position: relative;
   display: flex;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  padding: 0 0 var(--mobile-nav-h) 0;
-  background: #f6f7f8;
+  background: var(--jm-surface);
 }
 
-.content-surface {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.content-surface > * {
+.app-body > * {
   height: 100%;
 }
 
-/* Mobile Bottom Navigation */
-.mobile-nav {
-  display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  z-index: 30;
-  height: var(--mobile-nav-h);
-  align-items: center;
-  justify-content: space-around;
-  padding: 0 8px env(safe-area-inset-bottom, 0px);
-  background: #ffffff;
-  border-top: 1px solid #e3e5e7;
-  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.04);
+/* 底部导航：58px + 安全区，四等分 */
+.app-tabbar {
+  display: flex;
+  height: calc(var(--jm-nav-h) + var(--safe-bottom));
+  flex: 0 0 auto;
+  align-items: stretch;
+  padding: 0 4px var(--safe-bottom);
+  border-top: 1px solid var(--jm-line);
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: saturate(180%) blur(12px);
 }
 
-.mobile-nav-btn {
+.tab-item {
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 2px;
-  padding: 6px 12px;
-  color: #61666d;
-  font-size: 10px;
-  font-weight: 600;
-  cursor: pointer;
+  padding: 6px 0 7px;
+  color: var(--jm-text-3);
   border: 0;
   background: transparent;
-  transition: color 150ms ease;
+  cursor: pointer;
+  transition: color 160ms ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.mobile-nav-btn.active {
-  color: #fb7299;
+.tab-icon {
+  position: relative;
+  display: grid;
+  width: 52px;
+  height: 30px;
+  place-items: center;
+  border-radius: var(--jm-r-pill);
+  transition:
+    background-color 180ms ease,
+    transform 180ms ease;
+}
+
+.tab-item.is-active {
+  color: var(--jm-brand);
+}
+
+.tab-item.is-active .tab-icon {
+  background: var(--jm-brand-soft);
+}
+
+.tab-item:active .tab-icon {
+  transform: scale(0.92);
+}
+
+.tab-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.tab-item.is-active .tab-label {
   font-weight: 700;
 }
 
-.mobile-badge {
+.tab-badge {
   position: absolute;
-  top: -4px;
-  right: -8px;
+  top: -3px;
+  right: 6px;
   display: flex;
+  min-width: 16px;
+  height: 16px;
   align-items: center;
   justify-content: center;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 3px;
+  padding: 0 4px;
   color: #fff;
-  border-radius: 999px;
-  background: #fb7299;
+  border: 1.5px solid var(--jm-surface);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-accent);
   font-size: 9px;
   font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Loading States */
+/* 加载 / 错误 */
 .app-loading {
   display: flex;
   width: 100%;
@@ -628,45 +643,65 @@ onUnmounted(() => {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  color: #18191c;
-  background: #f6f7f8;
+  gap: 18px;
+  padding: 32px;
+  color: var(--jm-text);
+  background: var(--jm-bg);
+}
+
+.loading-logo {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  box-shadow: var(--jm-shadow-2);
+  object-fit: contain;
+}
+
+.loading-logo.is-pulsing {
+  animation: loading-breathe 1.8s ease-in-out infinite;
 }
 
 .loading-copy {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+}
+
+.loading-copy strong {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.loading-copy strong span {
+  color: var(--jm-brand);
+}
+
+.loading-copy span {
+  max-width: 280px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-sm);
+  text-align: center;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .loading-bar {
-  width: 150px;
+  width: 132px;
   height: 3px;
   overflow: hidden;
-  border-radius: 999px;
-  background: #e3e5e7;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-line);
 }
 
 .loading-bar i {
   display: block;
-  width: 45%;
+  width: 42%;
   height: 100%;
   border-radius: inherit;
-  background: #fb7299;
+  background: var(--jm-brand);
   animation: loading-slide 1.1s ease-in-out infinite alternate;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
 @keyframes loading-slide {
@@ -674,26 +709,19 @@ onUnmounted(() => {
     transform: translateX(0);
   }
   to {
-    transform: translateX(122%);
+    transform: translateX(138%);
   }
 }
 
-/* Android Mobile Specific Layout */
-.bili-app.is-mobile-app .mobile-nav {
-  display: flex;
-}
-
-.bili-app.is-mobile-app .bili-header {
-  padding: env(safe-area-inset-top, 0px) 12px 0 12px;
-  height: calc(52px + env(safe-area-inset-top, 0px));
-}
-
-:global(.bili-drawer .n-drawer-header) {
-  border-bottom: 1px solid #e3e5e7;
-  background: #ffffff;
-}
-
-:global(.bili-drawer .n-drawer-body-content-wrapper) {
-  background: #ffffff;
+@keyframes loading-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.94);
+    opacity: 0.82;
+  }
 }
 </style>

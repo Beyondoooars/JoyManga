@@ -1,15 +1,23 @@
 <template>
-  <button type="button" class="icon-button cursor-pointer p-1 rounded-lg flex items-center justify-center text-[#61666D]">
+  <button type="button" class="icon-button">
     <slot />
   </button>
 </template>
 
 <style scoped>
 .icon-button {
-  min-width: 34px;
-  min-height: 34px;
+  display: inline-flex;
+  min-width: 40px;
+  min-height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--jm-text-2);
   border: 0;
+  border-radius: var(--jm-r-sm);
   background: transparent;
+  cursor: pointer;
   transition:
     color 160ms ease,
     background-color 160ms ease,
@@ -17,8 +25,8 @@
 }
 
 .icon-button:hover {
-  color: #fb7299;
-  background: rgba(251, 114, 153, 0.12);
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
 }
 
 .icon-button:active {
@@ -26,7 +34,7 @@
 }
 
 .icon-button:focus-visible {
-  outline: 2px solid rgba(251, 114, 153, 0.45);
+  outline: 2px solid var(--jm-brand-ring);
   outline-offset: 2px;
 }
 
@@ -37,12 +45,12 @@
 }
 
 .icon-button:disabled:hover {
-  color: #9499a0;
+  color: var(--jm-text-3);
   background: transparent;
 }
 
 /* 触屏：图标按钮补足 44dp 可点区域 */
-@media (max-width: 768px) {
+@media (pointer: coarse) {
   .icon-button {
     min-width: 44px;
     min-height: 44px;

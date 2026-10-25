@@ -8,6 +8,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     ComicCard: typeof import('./components/ComicCard.vue')['default']
+    ContinueReadingRow: typeof import('./components/ContinueReadingRow.vue')['default']
     DailyCheckInCard: typeof import('./components/DailyCheckInCard.vue')['default']
     DownloadAllFavoriteButton: typeof import('./components/DownloadAllFavoriteButton.vue')['default']
     FavoriteButton: typeof import('./components/FavoriteButton.vue')['default']
@@ -52,6 +53,7 @@ declare module 'vue' {
     NTag: typeof import('naive-ui')['NTag']
     NTooltip: typeof import('naive-ui')['NTooltip']
     NVirtualList: typeof import('naive-ui')['NVirtualList']
+    PageHeader: typeof import('./components/PageHeader.vue')['default']
     PathField: typeof import('./components/PathField.vue')['default']
   }
 }

@@ -1,39 +1,99 @@
+/* ==========================================================================
+   JoyManga 设计系统 v3
+   精炼品牌方向：保留 #FB7299 粉 + #00AEEC 蓝，收敛为一套严格的设计令牌。
+   粉 = 选中态 / 主操作；蓝 = 下载与信息；其余交互尽量用中性色。
+   ========================================================================== */
+
 :root {
-  /* === Design Tokens === */
-  --bili-pink: #FB7299;
-  --bili-pink-hover: #FF85AD;
-  --bili-pink-active: #E05D84;
-  --bili-pink-light: rgba(251, 114, 153, 0.12);
-  --bili-blue: #00AEEC;
-  --bili-blue-hover: #33BDEC;
-  --bili-blue-light: rgba(0, 174, 236, 0.08);
-  --bg-body: #F6F7F8;
-  --bg-card: #FFFFFF;
-  --bg-subtle: #F1F2F3;
-  --border-color: #E3E5E7;
-  --text-primary: #18191C;
-  --text-regular: #61666D;
-  --text-secondary: #9499A0;
-  --text-disabled: #C9CCD0;
+  /* --- 品牌 --- */
+  --jm-brand: #FB7299;
+  --jm-brand-hover: #FF8CB0;
+  --jm-brand-press: #E45B84;
+  --jm-brand-soft: #FFF0F5;
+  --jm-brand-tint: rgba(251, 114, 153, 0.12);
+  --jm-brand-ring: rgba(251, 114, 153, 0.36);
+  --jm-accent: #00AEEC;
+  --jm-accent-deep: #0E84B4;
+  --jm-accent-soft: rgba(0, 174, 236, 0.1);
+  --jm-coin: #D99A00;
+
+  /* --- 语义色 --- */
+  --jm-success: #1F9D63;
+  --jm-success-soft: rgba(31, 157, 99, 0.12);
+  --jm-warning: #D98300;
+  --jm-warning-soft: rgba(217, 131, 0, 0.12);
+  --jm-danger: #DE3B3B;
+  --jm-danger-soft: rgba(222, 59, 59, 0.1);
+
+  /* --- 表面与文字 --- */
+  --jm-bg: #F5F6F8;
+  --jm-surface: #FFFFFF;
+  --jm-sunken: #F1F2F4;
+  --jm-line: #E8EAEE;
+  --jm-line-strong: #DDE0E5;
+  --jm-text: #17181C;
+  --jm-text-2: #565C66;
+  --jm-text-3: #8A9099;
+  --jm-text-4: #B3B8C0;
+
+  /* --- 圆角 --- */
+  --jm-r-xs: 6px;
+  --jm-r-sm: 9px;
+  --jm-r-md: 12px;
+  --jm-r-lg: 16px;
+  --jm-r-xl: 20px;
+  --jm-r-pill: 999px;
+
+  /* --- 阴影 --- */
+  --jm-shadow-1: 0 1px 2px rgba(23, 24, 28, 0.05);
+  --jm-shadow-2: 0 6px 20px rgba(23, 24, 28, 0.07);
+  --jm-shadow-brand: 0 8px 20px rgba(251, 114, 153, 0.24);
+
+  /* --- 字号 --- */
+  --jm-fs-display: 22px;
+  --jm-fs-title: 17px;
+  --jm-fs-body: 14px;
+  --jm-fs-sm: 12.5px;
+  --jm-fs-xs: 11px;
+
+  /* --- 布局 --- */
+  --jm-gutter: 16px;
+  --jm-header-h: 52px;
+  --jm-nav-h: 58px;
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
 
-  /* === 密度令牌（方案 B：两端同一套语义，按端取值）=== */
-  --radius-card: 12px;
-  --radius-panel: 16px;
-  --radius-control: 8px;
-  --radius-pill: 999px;
-  --shadow-card: 0 4px 16px rgba(251, 114, 153, 0.12);
-  --shadow-surface: 0 2px 8px rgba(0, 0, 0, 0.03);
-  --control-h: 34px;
-  --row-h: 44px;
+  /* --- 旧令牌别名：未迁移的组件继续可用 --- */
+  --bili-pink: var(--jm-brand);
+  --bili-pink-hover: var(--jm-brand-hover);
+  --bili-pink-active: var(--jm-brand-press);
+  --bili-pink-light: var(--jm-brand-tint);
+  --bili-blue: var(--jm-accent);
+  --bili-blue-hover: #33BDEC;
+  --bili-blue-light: var(--jm-accent-soft);
+  --bg-body: var(--jm-bg);
+  --bg-card: var(--jm-surface);
+  --bg-subtle: var(--jm-sunken);
+  --border-color: var(--jm-line);
+  --text-primary: var(--jm-text);
+  --text-regular: var(--jm-text-2);
+  --text-secondary: var(--jm-text-3);
+  --text-disabled: var(--jm-text-4);
+  --radius-card: var(--jm-r-md);
+  --radius-panel: var(--jm-r-lg);
+  --radius-control: var(--jm-r-sm);
+  --radius-pill: var(--jm-r-pill);
+  --shadow-card: var(--jm-shadow-2);
+  --shadow-surface: var(--jm-shadow-1);
+  --control-h: 40px;
+  --row-h: 52px;
   --card-pad: 12px;
 
-  color: var(--text-primary);
-  background: var(--bg-body);
+  color: var(--jm-text);
+  background: var(--jm-bg);
   font-family:
     'Noto Sans SC',
     'PingFang SC',
@@ -43,8 +103,11 @@
     system-ui,
     -apple-system,
     sans-serif;
+  font-size: var(--jm-fs-body);
+  line-height: 1.5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
 }
 
 * {
@@ -58,10 +121,11 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
-  background: var(--bg-body);
-  color: var(--text-primary);
+  background: var(--jm-bg);
+  color: var(--jm-text);
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
 }
 
 input,
@@ -81,13 +145,22 @@ button {
   -webkit-tap-highlight-color: transparent;
 }
 
-button:focus-visible, a:focus-visible {
-  outline: 2px solid #e796b5;
-  outline-offset: 3px;
+button:focus-visible,
+a:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--jm-brand-ring);
+  outline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
 
 ::-webkit-scrollbar {
@@ -102,16 +175,344 @@ button:focus-visible, a:focus-visible {
 ::-webkit-scrollbar-thumb {
   border: 1px solid transparent;
   border-radius: 999px;
-  background: #e3e5e7;
+  background: var(--jm-line-strong);
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #fb7299;
+  background: var(--jm-brand);
   background-clip: padding-box;
 }
 
 ::selection {
-  color: #18191c;
-  background: rgba(251, 114, 153, 0.28);
+  color: var(--jm-text);
+  background: rgba(251, 114, 153, 0.26);
+}
+
+/* ==========================================================================
+   通用布局与组件原语
+   ========================================================================== */
+
+/* 整页骨架：标题由外壳顶栏承担，页面从内容开始 */
+.jm-page {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--jm-surface);
+}
+
+.jm-page.is-tinted {
+  background: var(--jm-bg);
+}
+
+.jm-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+.jm-gutter {
+  padding-inline: var(--jm-gutter);
+}
+
+.jm-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jm-scroll-x {
+  display: flex;
+  overflow-x: auto;
+  gap: 8px;
+  scrollbar-width: none;
+}
+
+.jm-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+/* 胶囊筛选/类型标签 */
+.jm-chip {
+  display: inline-flex;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 13px;
+  color: var(--jm-text-2);
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.jm-chip:hover {
+  color: var(--jm-text);
+  background: #E9EBEF;
+}
+
+.jm-chip.is-active {
+  color: var(--jm-brand);
+  border-color: rgba(251, 114, 153, 0.28);
+  background: var(--jm-brand-soft);
+}
+
+.jm-chip:active {
+  transform: scale(0.97);
+}
+
+/* 图标按钮：视觉 40，触控 44 */
+.jm-icon-btn {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--jm-text-2);
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-sm);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    transform 120ms ease;
+}
+
+.jm-icon-btn:hover {
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+}
+
+.jm-icon-btn:active {
+  transform: scale(0.94);
+}
+
+.jm-icon-btn.is-active {
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+}
+
+.jm-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (pointer: coarse) {
+  .jm-icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* 按钮 */
+.jm-btn {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 16px;
+  color: var(--jm-text);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-md);
+  background: var(--jm-surface);
+  font-size: var(--jm-fs-body);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 120ms ease,
+    opacity 160ms ease;
+}
+
+.jm-btn:hover {
+  border-color: var(--jm-line-strong);
+  background: var(--jm-sunken);
+}
+
+.jm-btn:active {
+  transform: scale(0.98);
+}
+
+.jm-btn.is-primary {
+  color: #fff;
+  border-color: var(--jm-brand);
+  background: var(--jm-brand);
+  box-shadow: var(--jm-shadow-brand);
+}
+
+.jm-btn.is-primary:hover {
+  border-color: var(--jm-brand-hover);
+  background: var(--jm-brand-hover);
+}
+
+.jm-btn.is-ghost {
+  color: var(--jm-brand);
+  border-color: transparent;
+  background: var(--jm-brand-soft);
+  box-shadow: none;
+}
+
+.jm-btn.is-danger {
+  color: var(--jm-danger);
+  border-color: transparent;
+  background: var(--jm-danger-soft);
+}
+
+.jm-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* 文本链接按钮 */
+.jm-link {
+  padding: 4px 2px;
+  color: var(--jm-text-2);
+  border: 0;
+  background: none;
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.jm-link.is-brand {
+  color: var(--jm-brand);
+}
+
+/* 封面网格：手机上 3 列，平板自动加列 */
+.cover-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 16px 10px;
+}
+
+@media (min-width: 720px) {
+  .cover-grid {
+    grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+    gap: 20px 14px;
+  }
+}
+
+/* 空状态 */
+.jm-empty {
+  display: flex;
+  min-height: 240px;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 36px 28px;
+  text-align: center;
+}
+
+.jm-empty-icon {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 16px;
+  color: var(--jm-brand);
+  place-items: center;
+  border-radius: 20px;
+  background: var(--jm-brand-soft);
+}
+
+.jm-empty-icon.is-muted {
+  color: var(--jm-text-3);
+  background: var(--jm-sunken);
+}
+
+.jm-empty strong {
+  color: var(--jm-text);
+  font-size: var(--jm-fs-title);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.jm-empty p {
+  max-width: 300px;
+  margin: 8px 0 0;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-sm);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.jm-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* 骨架屏 */
+.jm-skeleton {
+  border-radius: var(--jm-r-md);
+  background: linear-gradient(90deg, #EFF1F4 25%, #F7F8FA 37%, #EFF1F4 63%);
+  background-size: 400% 100%;
+  animation: jm-shimmer 1.4s ease infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jm-skeleton {
+    background: #EFF1F4;
+    animation: none;
+  }
+}
+
+@keyframes jm-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+@keyframes jm-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.jm-spin {
+  animation: jm-spin 0.9s linear infinite;
+}
+
+/* 分组卡片 */
+.jm-group {
+  overflow: hidden;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

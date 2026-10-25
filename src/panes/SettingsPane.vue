@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, toRaw, watch } from 'vue'
-import { PhArrowClockwise, PhArrowLeft, PhCaretRight } from '@phosphor-icons/vue'
+import { PhArrowClockwise, PhBookOpenText, PhCaretRight, PhDatabase, PhFolderSimple, PhInfo, PhWifiHigh } from '@phosphor-icons/vue'
+import PageHeader from '../components/PageHeader.vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
 import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode } from '../bindings.ts'
@@ -418,26 +419,24 @@ const readingSummary = computed(() => {
 
 <template>
   <div v-if="store.config" class="settings-page">
-    <header class="settings-hero">
-      <button type="button" class="back-button" aria-label="返回" @click="goBack">
-        <PhArrowLeft :size="18" weight="bold" aria-hidden="true" />
-      </button>
-      <h1>{{ panelTitle }}</h1>
-    </header>
+    <PageHeader :title="panelTitle" :subtitle="openPanel === null ? '调整下载、网络与阅读习惯' : undefined" @back="goBack" />
 
     <div class="settings-scroll">
       <!-- 一级：分类列表 -->
       <template v-if="openPanel === null">
         <div class="group">
           <button type="button" class="nav-row" @click="openPanel = 'storage'">
+            <span class="row-icon is-brand"><PhFolderSimple :size="19" weight="duotone" /></span>
             <div class="nav-copy"><strong>下载与保存</strong><span>{{ store.config.downloadDir }}</span></div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'network'">
+            <span class="row-icon is-accent"><PhWifiHigh :size="19" weight="duotone" /></span>
             <div class="nav-copy"><strong>网络</strong><span>{{ domainStatus ? domainStatus.message : '正在读取线路状态…' }}</span></div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'reading'">
+            <span class="row-icon is-brand"><PhBookOpenText :size="19" weight="duotone" /></span>
             <div class="nav-copy"><strong>阅读</strong><span>{{ readingSummary }}</span></div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
@@ -445,10 +444,12 @@ const readingSummary = computed(() => {
 
         <div class="group">
           <button type="button" class="nav-row" @click="openPanel = 'data'">
+            <span class="row-icon is-neutral"><PhDatabase :size="19" weight="duotone" /></span>
             <div class="nav-copy"><strong>数据</strong><span>备份、缓存与诊断日志</span></div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'about'">
+            <span class="row-icon is-neutral"><PhInfo :size="19" weight="duotone" /></span>
             <div class="nav-copy"><strong>关于</strong><span>{{ appVersion ? 'v' + appVersion : 'JoyManga' }}</span></div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
@@ -646,48 +647,7 @@ const readingSummary = computed(() => {
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  background: #ffffff;
-}
-
-/* 与书库、我的页同一套页头：22px 标题 + 底部细线，整页而不是浮层 */
-.settings-hero {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 14px;
-  border-bottom: 1px solid #f0edf3;
-  background: #ffffff;
-}
-
-.settings-hero h1 {
-  margin: 0;
-  color: #282739;
-  font-size: 22px;
-  font-weight: 650;
-}
-
-.back-button {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  padding: 0;
-  color: #18191c;
-  border: 1px solid #e3e5e7;
-  border-radius: 999px;
-  background: #f1f2f3;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.back-button:hover,
-.back-button:active {
-  color: #ffffff;
-  border-color: #fb7299;
-  background: #fb7299;
+  background: var(--jm-bg);
 }
 
 .settings-scroll {
@@ -696,7 +656,7 @@ const readingSummary = computed(() => {
   overflow-y: auto;
   overscroll-behavior: contain;
   touch-action: pan-y;
-  padding: 12px 14px 24px;
+  padding: 12px var(--jm-gutter) 28px;
 }
 
 /* 分组卡片：同组设置共享一块白底，靠间距分组而不是靠分隔线 */
@@ -706,9 +666,9 @@ const readingSummary = computed(() => {
   gap: 2px;
   margin-bottom: 12px;
   padding: 4px;
-  border: 1px solid #e3e5e7;
-  border-radius: 14px;
-  background: #ffffff;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
 }
 
 .nav-row {
@@ -716,20 +676,20 @@ const readingSummary = computed(() => {
   width: 100%;
   min-height: 56px;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 11px;
   padding: 10px 12px;
-  color: #18191c;
+  color: var(--jm-text);
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--jm-r-md);
   background: transparent;
   text-align: left;
   cursor: pointer;
+  transition: background-color 140ms ease;
 }
 
 .nav-row:hover,
 .nav-row:active {
-  background: #f6f7f8;
+  background: var(--jm-sunken);
 }
 
 .nav-row:disabled {
@@ -743,31 +703,58 @@ const readingSummary = computed(() => {
 
 .nav-row > svg {
   flex-shrink: 0;
-  color: #9499a0;
+  color: var(--jm-text-4);
+}
+
+.row-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--jm-r-sm);
+}
+
+.row-icon.is-brand {
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+}
+
+.row-icon.is-accent {
+  color: var(--jm-accent);
+  background: var(--jm-accent-soft);
+}
+
+.row-icon.is-neutral {
+  color: var(--jm-text-2);
+  background: var(--jm-sunken);
 }
 
 .nav-copy {
   display: flex;
   min-width: 0;
+  flex: 1;
   flex-direction: column;
   gap: 3px;
 }
 
 .nav-copy strong {
-  font-size: 15px;
-  font-weight: 600;
+  color: var(--jm-text);
+  font-size: var(--jm-fs-body);
+  font-weight: 650;
 }
 
 .nav-copy span {
   overflow: hidden;
-  color: #9499a0;
-  font-size: 13px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .chevron {
+  flex: 0 0 auto;
   transition: transform 160ms ease;
 }
 
@@ -784,14 +771,14 @@ const readingSummary = computed(() => {
 }
 
 .field-label {
-  color: #61666d;
-  font-size: 13px;
-  font-weight: 550;
+  color: var(--jm-text-2);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
 }
 
 .field-hint {
-  color: #9499a0;
-  font-size: 12px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
   line-height: 1.5;
 }
 
@@ -819,7 +806,8 @@ const readingSummary = computed(() => {
   justify-content: space-between;
   gap: 12px;
   padding: 8px 12px;
-  font-size: 15px;
+  color: var(--jm-text);
+  font-size: var(--jm-fs-body);
 }
 
 .row-copy {
@@ -830,20 +818,20 @@ const readingSummary = computed(() => {
 }
 
 .row-copy strong {
-  font-size: 15px;
+  font-size: var(--jm-fs-body);
   font-weight: 600;
 }
 
 .row-copy span {
-  color: #9499a0;
-  font-size: 13px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
 }
 
 .row-value {
   min-width: 0;
   overflow: hidden;
-  color: #9499a0;
-  font-size: 13px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
   line-height: 1.5;
   text-align: right;
   text-overflow: ellipsis;
@@ -851,8 +839,8 @@ const readingSummary = computed(() => {
 
 .note {
   margin: 4px 12px 8px;
-  color: #9499a0;
-  font-size: 13px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
@@ -868,7 +856,7 @@ const readingSummary = computed(() => {
   width: 44px;
   height: 44px;
   flex: 0 0 auto;
-  border-radius: 12px;
+  border-radius: var(--jm-r-md);
 }
 
 .brand-copy {
@@ -879,12 +867,13 @@ const readingSummary = computed(() => {
 
 .brand-copy strong {
   font-size: 17px;
-  font-weight: 700;
+  font-weight: 750;
+  letter-spacing: -0.015em;
 }
 
 .brand-copy span {
-  color: #9499a0;
-  font-size: 12px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
 }
 
 .update-cell {
@@ -896,19 +885,19 @@ const readingSummary = computed(() => {
 }
 
 .update-new {
-  color: #b73963;
-  font-size: 13px;
-  font-weight: 550;
+  color: var(--jm-brand);
+  font-size: var(--jm-fs-xs);
+  font-weight: 650;
 }
 
 .update-ok {
-  color: #217346;
-  font-size: 13px;
+  color: var(--jm-success);
+  font-size: var(--jm-fs-xs);
 }
 
 .update-error {
-  color: #b42318;
-  font-size: 13px;
+  color: var(--jm-danger);
+  font-size: var(--jm-fs-xs);
 }
 
 .probe-list {
@@ -918,9 +907,9 @@ const readingSummary = computed(() => {
 
 .probe {
   padding: 12px 14px;
-  border: 1px solid #e3e5e7;
-  border-radius: 10px;
-  background: #f6f7f8;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-md);
+  background: var(--jm-sunken);
 }
 
 .probe > div {
@@ -928,29 +917,23 @@ const readingSummary = computed(() => {
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 8px;
-  font-size: 14px;
+  font-size: var(--jm-fs-sm);
 }
 
 .probe p {
   margin: 6px 0 0;
-  color: #61666d;
-  font-size: 13px;
+  color: var(--jm-text-2);
+  font-size: var(--jm-fs-xs);
   line-height: 1.6;
   overflow-wrap: anywhere;
 }
 
 .probe[data-state='Passed'] span {
-  color: #217346;
+  color: var(--jm-success);
 }
 
 .probe[data-state='Failed'] span {
-  color: #b42318;
-}
-
-.nav-row:focus-visible,
-.back-button:focus-visible {
-  outline: 2px solid #fb7299;
-  outline-offset: -2px;
+  color: var(--jm-danger);
 }
 
 /* 触控尺寸：控件统一 46dp。
