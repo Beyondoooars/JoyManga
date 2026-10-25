@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import { commands, DownloadAllFavoritesEvent, events } from '../bindings.ts'
-import { MessageReactive, useMessage } from 'naive-ui'
+import { commands, type DownloadAllFavoritesEvent, events } from '../bindings.ts'
+import { type MessageReactive, useMessage } from 'naive-ui'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
+import { PhDownloadSimple } from '@phosphor-icons/vue'
 
 const props = withDefaults(defineProps<{ folderId?: number }>(), { folderId: 0 })
 
@@ -105,9 +106,45 @@ async function run() {
     running.value = false
   }
 }
-
 </script>
 
 <template>
-  <n-button size="small" :loading="running" :disabled="running" @click="run">{{ folderId === 0 ? '下载全部收藏' : '下载当前收藏夹' }}</n-button>
+  <button
+    type="button"
+    class="download-all"
+    :disabled="running"
+    :title="folderId === 0 ? '把全部收藏加入下载队列' : '把当前收藏夹加入下载队列'"
+    @click="run">
+    <PhDownloadSimple :size="16" weight="bold" :class="{ 'jm-spin': running }" />
+    <span>{{ folderId === 0 ? '全部下载' : '下载本夹' }}</span>
+  </button>
 </template>
+
+<style scoped>
+.download-all {
+  display: inline-flex;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 13px;
+  color: var(--jm-accent);
+  border: 1px solid rgba(0, 174, 236, 0.24);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-accent-soft);
+  font-size: var(--jm-fs-sm);
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+
+.download-all:hover:not(:disabled) {
+  background: rgba(0, 174, 236, 0.16);
+}
+
+.download-all:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+</style>

@@ -4,7 +4,7 @@ import { SelectionArea, SelectionEvent } from '@viselect/vue'
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 import { ChapterInfo, commands, DownloadTaskState, type CbzMode, type Config } from '../bindings.ts'
 import { useStore } from '../store.ts'
-import { PhArrowClockwise, PhArrowLeft, PhBookOpen, PhFolderOpen } from '@phosphor-icons/vue'
+import { PhArrowClockwise, PhArrowLeft, PhBookOpen, PhDownloadSimple, PhFolderOpen } from '@phosphor-icons/vue'
 import IconButton from '../components/IconButton.vue'
 import { useMessage } from 'naive-ui'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
@@ -398,73 +398,41 @@ function isDownloading(state: State) {
     </div>
 
     <template v-else>
-      <!-- Top Navigation & Control Header -->
-      <div class="chapter-top-bar">
-        <button
-          type="button"
-          class="back-button"
-          title="返回列表 (快捷键: Esc)"
-          @click="handleBack">
-          <PhArrowLeft :size="18" weight="bold" />
-          <span>返回列表</span>
-          <span class="esc-badge">Esc</span>
+      <!-- 顶栏：返回 + 书名 + 图标操作 -->
+      <header class="chapter-top-bar">
+        <button type="button" class="back-circle" title="返回列表 (Esc)" aria-label="返回列表" @click="handleBack">
+          <PhArrowLeft :size="20" weight="bold" />
         </button>
 
         <div class="comic-header-title">
-          <span class="comic-id-badge">JM{{ store.pickedComic.id }}</span>
-          <span class="comic-name-truncate">{{ store.pickedComic.name }}</span>
+          <strong class="comic-name-truncate">{{ store.pickedComic.name }}</strong>
+          <span class="comic-header-sub">
+            <span class="comic-id-badge">JM{{ store.pickedComic.id }}</span>
+            <span v-if="!isMobile" class="esc-badge">Esc 返回</span>
+          </span>
         </div>
 
         <div class="chapter-top-actions">
-          <FavoriteButton :comic-id="store.pickedComic.id" :initial-state="store.pickedComic.is_favorite" :initial-epoch="store.pickedComicFavoriteEpoch" />
-          <n-tag
-            v-if="store.isArchiving(store.pickedComic.id)"
-            type="warning"
-            size="small"
-            round
-            class="archiving-tag">
-            正在整合 CBZ…
-          </n-tag>
-          <n-button
-            v-if="hasDownloadedChapter"
-            size="small"
-            type="primary"
-            class="read-action-btn"
-            :disabled="store.isArchiving(store.pickedComic.id)"
-            @click="openFirstDownloadedChapterReader">
-            <template #icon>
-              <PhBookOpen :size="16" weight="bold" />
-            </template>
-            开始阅读
-          </n-button>
-
-          <n-button
-            size="small"
-            type="primary"
-            class="download-action"
-            :loading="downloadingSelected"
-            :disabled="checkedIds.length === 0"
-            @click="downloadChapters">
-            下载勾选 ({{ checkedIds.length }})
-          </n-button>
-
-          <n-button size="small" class="refresh-action" :loading="refreshing" @click="refreshChapters">
-            <template v-if="!isMobile" #default>刷新</template>
-            <template v-else #icon><PhArrowClockwise :size="16" weight="bold" /></template>
-            <span class="sr-only">刷新章节</span>
-          </n-button>
-
+          <FavoriteButton
+            variant="icon"
+            :comic-id="store.pickedComic.id"
+            :initial-state="store.pickedComic.is_favorite"
+            :initial-epoch="store.pickedComicFavoriteEpoch" />
+          <IconButton title="刷新章节" aria-label="刷新章节" :disabled="refreshing" @click="refreshChapters">
+            <PhArrowClockwise :size="19" :class="{ 'jm-spin': refreshing }" />
+          </IconButton>
           <IconButton
             v-if="store.pickedComic.isDownloaded"
             title="打开下载目录"
+            aria-label="打开下载目录"
             @click="showComicDownloadDirInFileManager">
-            <PhFolderOpen :size="20" />
+            <PhFolderOpen :size="19" />
           </IconButton>
         </div>
-      </div>
+      </header>
 
-      <!-- Comic Meta Hero Info Card -->
-      <div class="comic-meta-card">
+      <!-- 作品信息卡 -->
+      <section class="comic-meta-card">
         <img
           class="comic-meta-cover"
           :src="store.pickedComic.localCoverData || `https://${store.imageDomain}/media/albums/${store.pickedComic.id}_3x4.jpg`"
@@ -473,60 +441,73 @@ function isDownloading(state: State) {
         <div class="comic-meta-info">
           <h2 class="comic-meta-name">{{ store.pickedComic.name }}</h2>
 
-          <div class="meta-row">
-            <span class="meta-label">作者：</span>
-            <div class="tags-container">
-              <n-tag
-                v-for="a in (Array.isArray(store.pickedComic.author) ? store.pickedComic.author : [store.pickedComic.author])"
-                :key="a"
-                size="small"
-                type="error"
-                round
-                class="clickable-tag"
-                @click="store.searchKeyword(a)">
-                {{ a }}
-              </n-tag>
-            </div>
-          </div>
-
-          <div v-if="store.pickedComic.tags && store.pickedComic.tags.length > 0" class="meta-row">
-            <span class="meta-label">标签：</span>
-            <div class="tags-container max-h-16 overflow-y-auto">
-              <n-tag
-                v-for="t in (Array.isArray(store.pickedComic.tags) ? store.pickedComic.tags : [store.pickedComic.tags])"
-                :key="t"
-                size="small"
-                round
-                class="clickable-tag tag-pill"
-                @click="store.searchKeyword(t)">
-                {{ t }}
-              </n-tag>
-            </div>
+          <div class="meta-tags">
+            <button
+              v-for="a in (Array.isArray(store.pickedComic.author) ? store.pickedComic.author : [store.pickedComic.author])"
+              :key="a"
+              type="button"
+              class="tag-chip is-author"
+              @click="store.searchKeyword(a)">
+              {{ a }}
+            </button>
+            <button
+              v-for="t in (store.pickedComic.tags && store.pickedComic.tags.length > 0 ? (Array.isArray(store.pickedComic.tags) ? store.pickedComic.tags : [store.pickedComic.tags]) : [])"
+              :key="t"
+              type="button"
+              class="tag-chip"
+              @click="store.searchKeyword(t)">
+              {{ t }}
+            </button>
           </div>
 
           <div class="meta-stats-row">
             <span class="stats-item">共 <strong>{{ chapterInfos.length }}</strong> 话</span>
-            <span class="dot-divider">•</span>
-            <span class="stats-item">已下载 <strong>{{ chapterInfos.filter(c => c.isDownloaded).length }}</strong> 话</span>
-            <span class="dot-divider">•</span>
-            <span class="stats-item">已选 <strong class="text-[#fb7299]">{{ checkedIds.length }}</strong> 话</span>
-            <span v-if="!isMobile" class="dot-divider">•</span>
-            <span v-if="!isMobile" class="hint-text">框选批量勾选 · 右键全选 · 双击阅读</span>
-            <div class="chapter-quick-actions ml-auto flex items-center gap-2">
-              <n-button
-                size="tiny"
-                type="primary"
-                secondary
-                @click="toggleSelectAllUndownloaded">
-                {{ checkedIds.length >= notDownloadedCount && notDownloadedCount > 0 ? '取消全选' : '全选未下载' }}
-              </n-button>
-            </div>
+            <span class="dot-divider" aria-hidden="true">·</span>
+            <span class="stats-item">已下载 <strong>{{ chapterInfos.filter(c => c.isDownloaded).length }}</strong></span>
+            <span class="dot-divider" aria-hidden="true">·</span>
+            <span class="stats-item is-brand">已选 <strong>{{ checkedIds.length }}</strong></span>
+            <n-tag v-if="store.isArchiving(store.pickedComic.id)" type="warning" size="small" round class="archiving-tag">
+              正在整合 CBZ…
+            </n-tag>
+          </div>
+
+          <div class="meta-actions">
+            <button
+              v-if="hasDownloadedChapter"
+              type="button"
+              class="jm-btn is-primary meta-action"
+              :disabled="store.isArchiving(store.pickedComic.id)"
+              @click="openFirstDownloadedChapterReader">
+              <PhBookOpen :size="17" weight="bold" />
+              开始阅读
+            </button>
+            <button
+              type="button"
+              class="jm-btn is-download meta-action"
+              :disabled="checkedIds.length === 0 || downloadingSelected"
+              @click="downloadChapters">
+              <PhDownloadSimple :size="17" weight="bold" />
+              {{ downloadingSelected ? '正在加入…' : `下载勾选 ${checkedIds.length > 0 ? `(${checkedIds.length})` : ''}` }}
+            </button>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- Chapter Selection List：虚拟滚动，几百话的漫画也只渲染可视区域 -->
-      <div class="chapters-section">
+      <!-- 章节列表：虚拟滚动，几百话的漫画也只渲染可视区域 -->
+      <section class="chapters-section">
+        <header class="chapters-head">
+          <div class="chapters-title">
+            <strong>章节</strong>
+            <span>{{ chapterInfos.length }} 话</span>
+          </div>
+          <div class="chapters-tools">
+            <span v-if="!isMobile" class="hint-text">框选批量勾选 · 右键更多</span>
+            <button type="button" class="select-all-chip" @click="toggleSelectAllUndownloaded">
+              {{ checkedIds.length >= notDownloadedCount && notDownloadedCount > 0 ? '取消全选' : '全选未下载' }}
+            </button>
+          </div>
+        </header>
+
         <SelectionArea
           ref="selectionAreaRef"
           class="selection-container custom-scrollbar"
@@ -545,19 +526,23 @@ function isDownloading(state: State) {
                   :data-key="item.chapterId"
                   class="selectable chapter-item"
                   :value="item.chapterId"
-                  :label="item.chapterTitle"
                   :disabled="item.isDownloaded === true || isDownloading(item.state)"
                   :class="{
                     selected: selectedIds.has(item.chapterId),
                     downloaded: item.isDownloaded,
                     downloading: !item.isDownloaded && isDownloading(item.state),
                   }"
-                  @dblclick="handleChapterDoubleClick(item.chapterId, item.isDownloaded)" />
+                  @dblclick="handleChapterDoubleClick(item.chapterId, item.isDownloaded)">
+                  <span class="chapter-name">{{ item.chapterTitle }}</span>
+                  <span v-if="item.isDownloaded" class="chapter-state is-done">已下载</span>
+                  <span v-else-if="isDownloading(item.state)" class="chapter-state is-active">{{ item.state === 'Downloading' ? '下载中' : item.state === 'Paused' ? '已暂停' : '排队中' }}</span>
+                  <span v-else-if="item.state === 'Failed'" class="chapter-state is-failed">失败</span>
+                </n-checkbox>
               </template>
             </n-virtual-list>
           </n-checkbox-group>
         </SelectionArea>
-      </div>
+      </section>
 
       <n-dropdown
         placement="bottom-start"
@@ -610,227 +595,328 @@ function isDownloading(state: State) {
 </template>
 
 <style scoped>
-/* 与书库/发现页一致：根节点保持白底，灰底与卡片边界交给内部区块自己表示。
-   原先这里自绘 #f6f7f8 灰底 + 10px 内边距，去掉内容区边框后会形成「白框套灰块」，
-   和顶栏看起来仍是断开的。 */
 .chapter-pane-container {
   display: flex;
-  flex-direction: column;
   height: 100%;
-  gap: 12px;
+  flex-direction: column;
   overflow: hidden;
-  background: #ffffff;
-  padding: 12px 14px;
+  background: var(--jm-bg);
 }
 
 .empty-chapter {
   display: flex;
+  height: 100%;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
-  background: #ffffff;
-  border: 1px solid #e3e5e7;
-  border-radius: var(--radius-panel);
+  gap: 14px;
+  background: var(--jm-surface);
 }
 
+/* 顶栏：与一级页同一套 52px 高度 + 安全区 */
 .chapter-top-bar {
   display: flex;
-  /* 桌面单行、窄屏自动换行：操作区永不越出视口 */
-  flex-wrap: wrap;
+  height: calc(var(--jm-header-h) + var(--safe-top));
+  flex: 0 0 auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 18px;
-  background: #ffffff;
-  border: 1px solid #e3e5e7;
-  border-radius: var(--radius-panel);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
-  flex-shrink: 0;
+  gap: 10px;
+  padding: var(--safe-top) var(--jm-gutter) 0;
+  border-bottom: 1px solid var(--jm-line);
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: saturate(180%) blur(12px);
 }
 
-.back-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  background: #f1f2f3;
-  border: 1px solid #e3e5e7;
-  color: #18191c;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
+.back-circle {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  color: var(--jm-text);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
   cursor: pointer;
-  transition: all 0.2s;
-  flex-shrink: 0;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    transform 120ms ease;
 }
 
-.back-button:hover {
-  background: #fb7299;
-  border-color: #fb7299;
-  color: #ffffff;
-  box-shadow: 0 3px 10px rgba(251, 114, 153, 0.3);
+.back-circle:hover {
+  color: var(--jm-brand);
+  border-color: rgba(251, 114, 153, 0.35);
+  background: var(--jm-brand-soft);
 }
 
-.esc-badge {
-  font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.08);
-  color: #61666d;
-  font-family: monospace;
+.back-circle:active {
+  transform: scale(0.94);
 }
 
 .comic-header-title {
   display: flex;
-  align-items: center;
-  gap: 8px;
   min-width: 0;
   flex: 1;
-}
-
-.comic-id-badge {
-  padding: 2px 7px;
-  background: rgba(251, 114, 153, 0.1);
-  border: 1px solid rgba(251, 114, 153, 0.3);
-  color: #fb7299;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .comic-name-truncate {
-  color: #18191c;
-  font-size: 14px;
-  font-weight: 700;
-  white-space: nowrap;
   overflow: hidden;
+  color: var(--jm-text);
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.comic-header-sub {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.comic-id-badge {
+  color: var(--jm-brand);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.esc-badge {
+  color: var(--jm-text-4);
+  font-size: 9.5px;
 }
 
 .chapter-top-actions {
   display: flex;
-  flex-wrap: wrap;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
-  min-width: 0;
-  margin-left: auto;
+  gap: 4px;
 }
 
-.read-action-btn {
-  font-weight: 700;
-  box-shadow: 0 2px 8px rgba(251, 114, 153, 0.3);
-}
-
+/* 作品信息卡 */
 .comic-meta-card {
   display: flex;
-  gap: 16px;
-  padding: 16px 20px;
-  background: #ffffff;
-  border: 1px solid #e3e5e7;
-  border-radius: var(--radius-panel);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  gap: 14px;
+  margin: 12px var(--jm-gutter) 0;
+  padding: 14px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+  box-shadow: var(--jm-shadow-1);
 }
 
 .comic-meta-cover {
-  width: 90px;
-  aspect-ratio: 3/4;
+  width: 82px;
+  flex: 0 0 auto;
+  aspect-ratio: 3 / 4;
+  border-radius: var(--jm-r-md);
+  box-shadow: var(--jm-shadow-2);
   object-fit: cover;
-  border-radius: 10px;
-  border: 1px solid #e3e5e7;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-  flex-shrink: 0;
 }
 
 .comic-meta-info {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
   min-width: 0;
   flex: 1;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .comic-meta-name {
+  display: -webkit-box;
   margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  color: #18191c;
+  overflow: hidden;
+  color: var(--jm-text);
+  font-size: 15.5px;
+  font-weight: 750;
+  letter-spacing: -0.015em;
   line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.meta-row {
+.meta-tags {
   display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.meta-label {
-  font-size: 12px;
-  color: #9499a0;
-  flex-shrink: 0;
-}
-
-.tags-container {
-  display: flex;
+  max-height: 54px;
   flex-wrap: wrap;
   gap: 5px;
+  overflow: hidden;
 }
 
-.clickable-tag {
+.tag-chip {
+  height: 24px;
+  padding: 0 9px;
+  color: var(--jm-text-2);
+  border: 0;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: 11px;
+  font-weight: 550;
+  white-space: nowrap;
   cursor: pointer;
-  transition: opacity 0.2s;
 }
 
-.clickable-tag:hover {
-  opacity: 0.8;
-}
-
-.tag-pill {
-  background: #f1f2f3;
-  color: #61666d;
-  border: 1px solid #e3e5e7;
+.tag-chip.is-author {
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
 }
 
 .meta-stats-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: #61666d;
-  margin-top: 4px;
+  gap: 5px;
+  color: var(--jm-text-3);
+  font-size: 11.5px;
 }
 
 .stats-item strong {
-  color: #fb7299;
+  color: var(--jm-text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stats-item.is-brand strong {
+  color: var(--jm-brand);
 }
 
 .dot-divider {
-  opacity: 0.4;
+  color: var(--jm-text-4);
+}
+
+.archiving-tag {
+  margin-left: 2px;
+}
+
+.meta-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+}
+
+/* 开始阅读 = 主操作（粉），下载 = 信息/传输（蓝） */
+.meta-action {
+  display: inline-flex;
+  height: 38px;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: var(--jm-r-md);
+  font-size: var(--jm-fs-sm);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    transform 120ms ease;
+}
+
+.meta-action:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.meta-action.is-primary {
+  color: #fff;
+  background: var(--jm-brand);
+  box-shadow: 0 3px 12px rgba(251, 114, 153, 0.3);
+}
+
+.meta-action.is-primary:disabled {
+  color: var(--jm-text-4);
+  background: var(--jm-sunken);
+  box-shadow: none;
+  cursor: default;
+}
+
+.meta-action.is-download {
+  color: var(--jm-accent);
+  background: var(--jm-accent-soft);
+}
+
+.meta-action.is-download:disabled {
+  color: var(--jm-text-4);
+  background: var(--jm-sunken);
+  cursor: default;
+}
+
+/* 章节列表 */
+.chapters-section {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  margin: 12px var(--jm-gutter) 0;
+  padding: 12px 10px 4px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg) var(--jm-r-lg) 0 0;
+  background: var(--jm-surface);
+}
+
+.chapters-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 4px 10px;
+}
+
+.chapters-title {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.chapters-title strong {
+  color: var(--jm-text);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.chapters-title span {
+  color: var(--jm-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chapters-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .hint-text {
-  font-size: 11px;
-  color: #9499a0;
-  margin-left: auto;
+  color: var(--jm-text-4);
+  font-size: 10px;
 }
 
-.chapters-section {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: #ffffff;
-  border: 1px solid #e3e5e7;
-  border-radius: var(--radius-panel);
-  padding: 14px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
+.select-all-chip {
+  height: 28px;
+  padding: 0 11px;
+  color: var(--jm-brand);
+  border: 1px solid rgba(251, 114, 153, 0.28);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-brand-soft);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .selection-container {
+  min-height: 0;
   flex: 1;
   overflow-y: auto;
+  padding-bottom: var(--safe-bottom);
   user-select: none;
 }
 
@@ -843,53 +929,97 @@ function isDownloading(state: State) {
   height: 100%;
 }
 
+/* 行高与 CHAPTER_ROW_HEIGHT 保持一致 */
 .chapter-item {
+  display: flex;
   height: 40px;
-  padding: 8px 12px;
-  background: #f6f7f8;
-  border: 1px solid #e3e5e7;
-  border-radius: 10px;
-  transition: all 0.2s;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-sm);
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
 }
 
 .chapter-item:hover {
-  background: #ffffff !important;
-  border-color: #fb7299;
-  box-shadow: 0 2px 8px rgba(251, 114, 153, 0.15);
+  border-color: var(--jm-line);
+  background: var(--jm-sunken) !important;
 }
 
 .selection-container .selected {
-  background-color: rgba(251, 114, 153, 0.15) !important;
-  border-color: #fb7299 !important;
+  border-color: rgba(251, 114, 153, 0.4) !important;
+  background-color: var(--jm-brand-soft) !important;
 }
 
+/* 已下载用蓝色（信息/内容），避免与「选中」的粉色混淆 */
 .selection-container .downloaded {
-  background-color: rgba(0, 174, 236, 0.1) !important;
-  border-color: #00aeec !important;
+  background-color: var(--jm-accent-soft) !important;
 }
 
 .selection-container .downloading {
-  background-color: rgba(251, 114, 153, 0.12) !important;
-  border-color: #fb7299 !important;
+  background-color: rgba(0, 174, 236, 0.07) !important;
+}
+
+.chapter-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--jm-text);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chapter-state {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: var(--jm-r-pill);
+  font-size: 9.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.chapter-state.is-done {
+  color: var(--jm-accent);
+  background: var(--jm-accent-soft);
+}
+
+.chapter-state.is-active {
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+}
+
+.chapter-state.is-failed {
+  color: var(--jm-danger);
+  background: var(--jm-danger-soft);
+}
+
+:deep(.n-checkbox) {
+  width: 100%;
 }
 
 :deep(.n-checkbox__label) {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 12px;
-  color: #18191c;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 0 !important;
+}
+
+:deep(.n-checkbox-box-wrapper) {
+  flex: 0 0 auto;
 }
 
 :global(.selection-area) {
-  background-color: rgba(251, 114, 153, 0.2) !important;
-  border: 1px solid #fb7299 !important;
+  background-color: rgba(251, 114, 153, 0.14) !important;
+  border: 1px solid var(--jm-brand) !important;
+  border-radius: 2px;
 }
 
-.archiving-tag {
-  font-weight: 600;
-}
-
+/* 整理方式弹窗 */
 .cbz-mode-options {
   display: flex;
   flex-direction: column;
@@ -897,35 +1027,37 @@ function isDownloading(state: State) {
 }
 
 .cbz-mode-option {
-  text-align: left;
   padding: 12px 14px;
-  border-radius: var(--radius-card);
-  border: 1px solid #e3e5e7;
-  background: #f6f7f8;
+  text-align: left;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-md);
+  background: var(--jm-surface);
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease;
 }
 
 .cbz-mode-option:hover {
-  border-color: #fb7299;
+  border-color: rgba(251, 114, 153, 0.4);
 }
 
 .cbz-mode-option.active {
-  border-color: #fb7299;
-  background: rgba(251, 114, 153, 0.08);
-  box-shadow: 0 2px 10px rgba(251, 114, 153, 0.15);
+  border-color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+  box-shadow: 0 2px 10px rgba(251, 114, 153, 0.12);
 }
 
 .cbz-mode-title {
+  color: var(--jm-text);
+  font-size: var(--jm-fs-sm);
   font-weight: 700;
-  color: #18191c;
-  font-size: 13px;
 }
 
 .cbz-mode-desc {
   margin-top: 4px;
-  font-size: 12px;
-  color: #61666d;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
   line-height: 1.5;
 }
 
@@ -939,117 +1071,29 @@ function isDownloading(state: State) {
   gap: 8px;
 }
 
-@media (max-width: 768px) {
-  .chapter-top-bar {
-    padding: 8px 12px;
-    gap: 8px;
-  }
-
-  /* 窄屏：顶栏切成两行。第一行返回 + 收藏/刷新/目录，第二行两个主操作等宽 */
-  .chapter-top-bar {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    grid-template-areas:
-      'back meta'
-      'actions actions';
-    align-items: center;
-    row-gap: 8px;
-  }
-
-  .back-button { grid-area: back; min-height: 44px; }
-
-  .comic-header-title {
-    grid-area: meta;
-    justify-content: flex-end;
-    overflow: hidden;
-  }
-
-  .chapter-top-actions {
-    grid-area: actions;
-    display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    margin-left: 0;
-  }
-
-  /* 第一行：收藏、刷新、打开目录（三个图标，各占一格、左对齐） */
-  .chapter-top-actions :deep(.favorite-button) {
-    grid-column: 1;
-    grid-row: 1;
-    justify-self: start;
+@media (pointer: coarse) {
+  .back-circle {
     width: 44px;
-    min-width: 44px;
-    min-height: 44px;
-    padding: 0;
-    justify-content: center;
+    height: 44px;
   }
-
-  .chapter-top-actions :deep(.favorite-button span) {
-    display: none;
-  }
-
-  .chapter-top-actions :deep(.refresh-action) {
-    grid-column: 2;
-    grid-row: 1;
-    justify-self: start;
-    width: 44px;
-    min-width: 44px;
-    min-height: 44px;
-    padding: 0;
-  }
-
-  .chapter-top-actions :deep(.icon-button) {
-    grid-column: 3;
-    grid-row: 1;
-    justify-self: start;
-  }
-
-  .chapter-top-actions :deep(.archiving-tag) {
-    grid-column: 4 / 7;
-    grid-row: 1;
-    justify-self: end;
-  }
-
-  /* 第二行：两个主操作各占半行，文案完整可读 */
-  .chapter-top-actions :deep(.read-action-btn) {
-    grid-column: 1 / 4;
-    grid-row: 2;
-  }
-
-  .chapter-top-actions :deep(.download-action) {
-    grid-column: 4 / 7;
-    grid-row: 2;
-  }
-
-  .chapter-top-actions :deep(.n-button) {
-    min-height: 44px;
-    width: 100%;
-  }
-
-  .chapter-top-actions :deep(.n-button__content) {
-    white-space: nowrap;
-  }
-
-  .esc-badge {
-    display: none;
-  }
-
 }
 
 @media (max-width: 640px) {
-  .comic-header-title {
-    display: none;
-  }
-
   .comic-meta-card {
     padding: 12px;
     gap: 12px;
   }
 
   .comic-meta-cover {
-    width: 72px;
+    width: 70px;
+  }
+
+  .comic-meta-name {
+    font-size: 14.5px;
+  }
+
+  .chapters-section {
+    margin-top: 10px;
   }
 }
 </style>

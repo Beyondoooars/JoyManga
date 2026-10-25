@@ -1,367 +1,439 @@
 <script setup lang="ts">
-import { Comic, commands } from '../../../bindings.ts'
+import { type Comic, commands } from '../../../bindings.ts'
 import { useStore } from '../../../store.ts'
-import { PhArchive, PhBookOpen, PhCopy, PhFolderOpen, PhImage } from '@phosphor-icons/vue'
-import { computed, ref } from 'vue'
-import { useMessage } from 'naive-ui'
-import IconButton from '../../../components/IconButton.vue'
-import { getErrorMessage } from '../../../utils/errors.ts'
-import { useIsMobile } from '../../../composables/useIsMobile.ts'
+import { PhArchive, PhCheck, PhDotsThree, PhFolderOpen, PhImage } from '@phosphor-icons/vue'
+import { computed, h, onBeforeUnmount, ref } from 'vue'
+import { NDropdown, useMessage } from 'naive-ui'
 import { isMergeableComic, localChapters } from '../../../utils/mergeableComics.ts'
+import { useIsMobile } from '../../../composables/useIsMobile.ts'
+import { formatCommandError, getErrorMessage } from '../../../utils/errors.ts'
 
 const store = useStore()
 const message = useMessage()
-const { isMobile } = useIsMobile()
-const merging = ref(false)
 const coverFailed = ref(false)
 const progress = computed(() => store.readingState.progress[String(props.comic.id)])
 const downloadedChapters = computed(() => localChapters(props.comic).length)
+const percent = computed(() => {
+  const value = progress.value
+  if (!value || value.totalPages <= 0) return 0
+  return Math.min(100, Math.max(1, Math.round((value.page / value.totalPages) * 100)))
+})
+const archiving = computed(() => store.isArchiving(props.comic.id))
 
 const props = defineProps<{
   comic: Comic
   checked: boolean
+  selectionMode: boolean
 }>()
 
 const emit = defineEmits<{
   'toggle-check': [comic: Comic]
-  'card-contextmenu': [comic: Comic]
+  'long-press': [comic: Comic]
 }>()
 
 function pickComic() {
-  if (props.comic.id < 0) { openReader(); return }
+  if (props.comic.id < 0) {
+    openReader()
+    return
+  }
   store.showComic(props.comic)
 }
 
-// 卡片内的按钮/复选框按 Enter 时事件会冒泡到这里，不能同时触发“打开阅读器”
-function onCardEnter(event: KeyboardEvent) {
-  if (event.target !== event.currentTarget) return
-  openReader()
-}
-
 function openReader() {
-  if (store.isArchiving(props.comic.id)) {
+  if (archiving.value) {
     message.warning('正在整合 CBZ，完成后即可阅读')
     return
   }
   store.continueReading(props.comic)
 }
 
+function onCoverClick() {
+  if (props.selectionMode) {
+    emit('toggle-check', props.comic)
+    return
+  }
+  openReader()
+}
+
+// 长按进入选择：移动端没有右键，长按是进入批量操作的唯一入口。
+// 按住期间一旦移动就视为滚动，取消计时，避免滑动列表时误选。
+let pressTimer: ReturnType<typeof setTimeout> | undefined
+let pressStart: { x: number; y: number } | undefined
+let longPressed = false
+
+function clearPress() {
+  if (pressTimer !== undefined) {
+    clearTimeout(pressTimer)
+    pressTimer = undefined
+  }
+  pressStart = undefined
+}
+
+function startPress(event: PointerEvent) {
+  if (event.button !== 0) return
+  clearPress()
+  longPressed = false
+  pressStart = { x: event.clientX, y: event.clientY }
+  pressTimer = setTimeout(() => {
+    pressTimer = undefined
+    longPressed = true
+    if (navigator.vibrate) navigator.vibrate(12)
+    emit('long-press', props.comic)
+  }, 480)
+}
+
+function movePress(event: PointerEvent) {
+  if (pressStart === undefined) return
+  if (Math.abs(event.clientX - pressStart.x) > 10 || Math.abs(event.clientY - pressStart.y) > 10) clearPress()
+}
+
+function endPress() {
+  clearPress()
+}
+
+// ── 更多菜单：桌面端没有长按习惯，键盘也无法长按；封面墙省掉了原来的整行按钮，
+// 用右上角一个 ⋯ 把「打开目录 / 整理 / 选择」收进去。
+const { isMobile } = useIsMobile()
+const menuOpen = ref(false)
+const menuX = ref(0)
+const menuY = ref(0)
+const merging = ref(false)
+
+const menuOptions = computed(() => [
+  { label: isMobile.value ? '复制下载目录' : '打开下载目录', key: 'dir', icon: () => h(PhFolderOpen, { size: 16 }) },
+  ...(isMergeableComic(props.comic)
+    ? [{ label: archiving.value ? '正在整理…' : '整理为整本 CBZ', key: 'merge', disabled: archiving.value || merging.value, icon: () => h(PhArchive, { size: 16 }) }]
+    : []),
+  { label: '选择', key: 'select', icon: () => h(PhCheck, { size: 16 }) },
+])
+
+function openMenu(event: MouseEvent) {
+  event.stopPropagation()
+  // bottom-end：x 是菜单右边缘的锚点，贴着 ⋯ 按钮右侧展开
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  menuX.value = rect.right + 4
+  menuY.value = rect.bottom + 6
+  menuOpen.value = true
+}
+
+async function handleMenu(key: string) {
+  menuOpen.value = false
+  if (key === 'select') {
+    emit('long-press', props.comic)
+    return
+  }
+  if (key === 'merge') {
+    await handleMergeCbz()
+    return
+  }
+  await showComicDownloadDirInFileManager()
+}
+
 async function showComicDownloadDirInFileManager() {
-  if (store.config === undefined) {
-    return
-  }
-
-  const comicDownloadDir = props.comic.comicDownloadDir
-
-  if (comicDownloadDir === undefined || comicDownloadDir === null) {
-    console.error('comicDownloadDir的值为undefined或null')
-    return
-  }
-
+  const dir = props.comic.comicDownloadDir
+  if (!dir) return
   if (isMobile.value) {
     try {
-      await navigator.clipboard.writeText(comicDownloadDir)
+      await navigator.clipboard.writeText(dir)
       message.success('已复制到剪贴板')
     } catch {
       message.error('复制失败，请重试')
     }
     return
   }
-
-  const result = await commands.showPathInFileManager(comicDownloadDir)
-  if (result.status === 'error') {
-    console.error(result.error)
-  }
+  const result = await commands.showPathInFileManager(dir)
+  if (result.status === 'error') message.error(getErrorMessage(result.error))
 }
 
 async function handleMergeCbz() {
-  if (merging.value || !isMergeableComic(props.comic) || store.isArchiving(props.comic.id)) return
+  if (merging.value || !isMergeableComic(props.comic) || archiving.value) return
   merging.value = true
   try {
     const result = await commands.promoteComicArchive(props.comic.id, 'merge')
-    if (result.status === 'error') {
-      message.error(`整理为整本失败：${result.error.err_message}`)
-    } else {
-      message.success(`已开始整理《${props.comic.name}》；完成后分话文件自动清理`)
-    }
-  } catch (err) {
-    message.error(`整理为整本失败：${getErrorMessage(err)}`)
+    if (result.status === 'error') message.error(`整理失败：${formatCommandError(result.error)}`)
+    else message.success('已开始整理；完成后分话文件自动清理')
+  } catch (error) {
+    message.error(`整理失败：${getErrorMessage(error)}`)
   } finally {
     merging.value = false
   }
 }
+
+// 长按已经进入选择时，抬起后紧跟的 click 不应再触发阅读/取消选择
+function onClickCapture(event: MouseEvent) {
+  if (!longPressed) return
+  longPressed = false
+  event.preventDefault()
+  event.stopPropagation()
+}
+
+onBeforeUnmount(clearPress)
 </script>
 
 <template>
-  <div
-    class="downloaded-comic-card"
-    tabindex="0"
-    role="button"
-    :aria-label="`打开《${comic.name}》`"
-    @contextmenu="emit('card-contextmenu', comic)"
-    @keydown.enter.prevent="onCardEnter">
-    <n-checkbox
-      size="large"
-      :aria-label="`选择 ${comic.name}`"
-      class="select-checkbox"
-      :checked="checked"
-      @click="emit('toggle-check', comic)" />
-    <button class="cover-button" :aria-label="`阅读 ${comic.name}`" @click="openReader">
-    <img v-if="!coverFailed && (comic.localCoverData || comic.id > 0)"
-      class="comic-cover"
-      :src="comic.localCoverData || `https://${store.imageDomain}/media/albums/${comic.id}_3x4.jpg`"
-      :alt="comic.name"
-      :draggable="false"
-      loading="lazy"
-      @error="coverFailed = true"
-      referrerpolicy="no-referrer" />
-    <div v-else class="cover-placeholder"><PhImage :size="26" /><span>{{ comic.name.slice(0, 8) }}</span></div>
+  <article class="library-tile" :class="{ 'is-selected': checked }">
+    <button
+      type="button"
+      class="tile-cover"
+      :aria-label="selectionMode ? `选择《${comic.name}》` : archiving ? `《${comic.name}》正在整合` : `阅读《${comic.name}》`"
+      @click.capture="onClickCapture"
+      @click="onCoverClick"
+      @pointerdown="startPress"
+      @pointermove="movePress"
+      @pointerup="endPress"
+      @pointerleave="endPress"
+      @pointercancel="endPress">
+      <img
+        v-if="!coverFailed && (comic.localCoverData || comic.id > 0)"
+        class="tile-img"
+        :src="comic.localCoverData || `https://${store.imageDomain}/media/albums/${comic.id}_3x4.jpg`"
+        :alt="comic.name"
+        :draggable="false"
+        loading="lazy"
+        referrerpolicy="no-referrer"
+        @error="coverFailed = true" />
+      <span v-else class="tile-placeholder">
+        <PhImage :size="24" weight="duotone" />
+      </span>
+
+      <span v-if="selectionMode" class="tile-check" :class="{ 'is-on': checked }" aria-hidden="true">
+        <PhCheck v-if="checked" :size="13" weight="bold" />
+      </span>
+
+      <span v-if="comic.id < 0" class="tile-origin">导入</span>
+      <span v-if="archiving" class="tile-archiving">整合中</span>
+
+      <span v-if="progress" class="tile-progress" aria-hidden="true">
+        <span :style="{ width: `${percent}%` }"></span>
+      </span>
     </button>
-    <div class="comic-details">
-      <div class="title-row">
-        <span class="origin-badge">{{ comic.id < 0 ? '导入' : '离线' }}</span>
-        <span
-          class="comic-title"
-          @click="pickComic">
-          {{ comic.name }}
-        </span>
-      </div>
-      <div class="author-row">
-        <span>作者：</span>
-        <span
-          v-for="a in (Array.isArray(comic.author) ? comic.author : [comic.author])"
-          :key="a"
-          class="author-name"
-          @click="comic.id > 0 && store.searchKeyword(a)">
-          {{ a }}
-        </span>
-      </div>
-      <div class="chapter-summary">
-        {{ downloadedChapters }} 话<span v-if="progress"> · 第 {{ progress.page }} 页</span>
-        <span v-if="store.isArchiving(comic.id)" class="archiving-badge">正在整合 CBZ…</span>
-      </div>
-      <div v-if="progress" class="reading-progress"><span :style="{ width: `${Math.min(100, progress.page / progress.totalPages * 100)}%` }"></span></div>
-      <div class="card-bottom-actions">
-        <IconButton
-          :title="isMobile ? '复制下载目录到剪贴板' : '打开下载目录'"
-          :aria-label="isMobile ? '复制下载目录' : '打开下载目录'"
-          @click="showComicDownloadDirInFileManager">
-          <PhCopy v-if="isMobile" :size="20" />
-          <PhFolderOpen v-else :size="22" />
-        </IconButton>
 
-        <button
-          v-if="isMergeableComic(comic)"
-          type="button"
-          class="merge-button"
-          :aria-label="`整理《${comic.name}》已下载的 ${downloadedChapters} 话为整本 CBZ`"
-          :disabled="merging || store.isArchiving(comic.id)"
-          @click="handleMergeCbz">
-          <PhArchive :size="16" aria-hidden="true" />{{ merging ? '正在发起…' : store.isArchiving(comic.id) ? '整合中…' : '整理为整本' }}
-        </button>
-
-        <button class="read-button" :disabled="store.isArchiving(comic.id)" @click="openReader"><PhBookOpen :size="15" />{{ progress ? '继续阅读' : '开始阅读' }}</button>
+    <div class="tile-foot">
+      <div class="tile-copy">
+        <button type="button" class="tile-title" :title="comic.name" @click="pickComic">{{ comic.name }}</button>
+        <div class="tile-meta">
+          <span>{{ downloadedChapters }} 话</span>
+          <span v-if="progress" class="tile-read">· {{ percent }}%</span>
+        </div>
       </div>
+      <button v-if="!selectionMode" type="button" class="tile-more" aria-label="更多操作" title="更多操作" @click="openMenu">
+        <PhDotsThree :size="17" weight="bold" />
+      </button>
     </div>
-  </div>
+
+    <n-dropdown
+      :show="menuOpen"
+      :options="menuOptions"
+      placement="bottom-end"
+      :x="menuX"
+      :y="menuY"
+      @select="handleMenu"
+      @clickoutside="menuOpen = false" />
+  </article>
 </template>
 
 <style scoped>
-.merge-button { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 8px 10px; border: 1px solid #e3e5e7; border-radius: 8px; background: #fff; color: #b73963; font-size: 12px; cursor: pointer; }
-.merge-button:hover { border-color: #b73963; background: #fff0f6; }
-.merge-button:focus-visible { outline: 2px solid #b73963; outline-offset: 2px; }
-.merge-button:disabled { opacity: .55; cursor: wait; }
-@media (max-width: 600px) { .merge-button { min-height: 44px; } }
-.cover-button { padding: 0; border: 0; background: none; cursor: pointer; margin-right: 14px; flex-shrink: 0; border-radius: 9px; overflow: hidden; }
-.cover-button .comic-cover { margin: 0; display: block; }
-.cover-placeholder { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; width: 96px; height: 128px; color: #b8a1ba; background: linear-gradient(145deg, #f5ecf6, #f5f3fb); border-radius: 8px; }
-.cover-placeholder span { color: #957d97; font-size: 11px; max-width: 80px; text-align: center; }
-.origin-badge { flex-shrink: 0; font-size: 9px; color: #b67b91; background: #fcedf3; padding: 2px 5px; border-radius: 4px; margin-top: 2px; }
-.chapter-summary { color: #aaa0ae; font-size: 10px; margin-bottom: 9px; }
-.archiving-badge { margin-left: 6px; color: #d97706; background: #fef3c7; padding: 1px 6px; border-radius: 999px; font-weight: 600; }
-.reading-progress { height: 3px; background: #f5edf2; border-radius: 10px; margin: 0 0 9px; overflow: hidden; }
-.reading-progress span { height: 100%; display: block; background: linear-gradient(90deg, #f8b2c9, #d984ae); border-radius: inherit; }
-.read-button { display: flex; align-items: center; gap: 5px; padding: 6px 9px; font-size: 10px; color: #b8597c; background: #fff0f6; border: 0; border-radius: 7px; cursor: pointer; white-space: nowrap; }
-/* 触屏：主操作需可点、可读 —— 高度 44dp、字号不低于辅助级 11px */
-@media (max-width: 600px) {
-  .read-button { min-height: 44px; padding: 8px 14px; font-size: 12px; border-radius: 8px; }
-  .read-button svg { width: 17px; height: 17px; }
-}
-.downloaded-comic-card {
-  position: relative;
+.library-tile {
   display: flex;
-  background-color: #ffffff;
-  border: 1px solid #efebf1;
-  border-radius: var(--radius-card);
-  padding: var(--card-pad);
-  transition: all 0.2s ease;
-}
-
-.downloaded-comic-card:hover {
-  border-color: #fb7299;
-  box-shadow: var(--shadow-card);
-}
-
-.downloaded-comic-card:focus-visible {
-  outline: 2px solid #fb7299;
-  outline-offset: 2px;
-}
-
-.select-checkbox {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 2;
-}
-
-/* 触屏：18px 的勾选框实际可点区域扩到 44dp（视觉尺寸不变） */
-@media (max-width: 600px) {
-  .select-checkbox {
-    top: 2px;
-    left: 2px;
-    padding: 13px;
-    box-sizing: content-box;
-  }
-}
-
-.comic-cover {
-  width: 96px;
-  height: 128px;
-  object-fit: cover;
-  margin-right: 14px;
-  border-radius: 8px;
-  background-color: #f1f2f3;
-  flex-shrink: 0;
-}
-
-.comic-details {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
   min-width: 0;
+  flex-direction: column;
+  gap: 5px;
 }
 
-/* 触屏双列：封面在上、信息在下，卡片约 200dp 高，一屏能放下 3 行 */
-@media (max-width: 760px) {
-  .downloaded-comic-card {
-    flex-direction: column;
-    padding: 8px;
-    gap: 6px;
-  }
-
-  /* 双列宽度有限，卡片内操作改成紧凑图标按钮（44dp 靠内边距保住） */
-  .read-button,
-  .merge-button {
-    min-height: 36px;
-    padding: 6px 8px;
-    font-size: 11px;
-  }
-
-  .read-button svg { width: 15px; height: 15px; }
-
-  .card-bottom-actions :deep(.icon-button) {
-    min-width: 36px;
-    min-height: 36px;
-  }
-
-  .cover-button {
-    width: 100%;
-    margin-right: 0;
-    aspect-ratio: 3 / 4;
-    /* 双列时封面不能把整屏吃掉：限制高度，保证一屏能看到两行以上 */
-    max-height: 132px;
-  }
-
-  .cover-button .comic-cover {
-    width: 100%;
-    height: 100%;
-    margin-right: 0;
-    object-fit: cover;
-  }
-
-  /* 没有封面时撑满同一块区域，否则会缩在左上角被图片层压住 */
-  .cover-placeholder { width: 100%; height: 100%; }
-
-  .comic-title { font-size: 13px; -webkit-line-clamp: 1; }
-  /* 双列卡片里作者与缓存话数信息量低、又各占一行：并成一行小字 */
-  .card-details {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    column-gap: 6px;
-  }
-  .author-row { margin: 0; font-size: 11px; }
-  .chapter-summary { margin-bottom: 0; font-size: 10px; }
-  .origin-badge { font-size: 9px; margin-top: 0; }
-  .reading-progress { margin: 3px 0 4px; }
-  .card-bottom-actions { gap: 2px; margin-top: 2px; }
-}
-
-.title-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.bili-up-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  font-weight: 700;
-  color: #00aeec;
-  border: 1px solid rgba(0, 174, 236, 0.4);
-  background-color: rgba(0, 174, 236, 0.08);
-  border-radius: 4px;
-  padding: 1px 4px;
-  line-height: 1.2;
-  flex-shrink: 0;
-  margin-top: 3px;
-}
-
-.comic-title {
-  font-weight: 700;
-  font-size: 15px;
-  color: #18191c;
-  line-height: 1.4;
-  cursor: pointer;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+.tile-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
   overflow: hidden;
-  transition: color 0.2s;
-}
-
-.comic-title:hover {
-  color: #fb7299;
-}
-
-.author-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  margin: 6px 0 8px;
-  color: #9499a0;
-}
-
-.author-name {
-  color: #61666d;
+  aspect-ratio: 3 / 4;
+  border: 1.5px solid transparent;
+  border-radius: var(--jm-r-md);
+  background: var(--jm-sunken);
   cursor: pointer;
-  transition: color 0.2s;
+  transition:
+    border-color 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: pan-y;
 }
 
-.author-name:hover {
-  color: #fb7299;
-  text-decoration: underline;
+.tile-cover:active {
+  transform: scale(0.985);
 }
 
-.card-bottom-actions {
+.library-tile.is-selected .tile-cover {
+  border-color: var(--jm-brand);
+  box-shadow: 0 0 0 2px rgba(251, 114, 153, 0.16);
+}
+
+.tile-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  user-select: none;
+}
+
+.tile-placeholder {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  color: var(--jm-text-4);
+  place-items: center;
+  background: linear-gradient(145deg, #f7f8fa, #eef0f3);
+}
+
+.tile-check {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  display: grid;
+  width: 21px;
+  height: 21px;
+  color: transparent;
+  place-items: center;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  border-radius: var(--jm-r-pill);
+  background: rgba(23, 24, 28, 0.28);
+  backdrop-filter: blur(4px);
+}
+
+.tile-check.is-on {
+  color: #fff;
+  border-color: var(--jm-brand);
+  background: var(--jm-brand);
+}
+
+.tile-origin,
+.tile-archiving {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  padding: 1px 6px;
+  color: #fff;
+  border-radius: var(--jm-r-pill);
+  font-size: 9px;
+  font-weight: 700;
+  backdrop-filter: blur(4px);
+}
+
+.tile-origin {
+  background: rgba(0, 174, 236, 0.82);
+}
+
+.tile-archiving {
+  background: rgba(217, 131, 0, 0.9);
+}
+
+/* 阅读进度：贴着封面底边，粉色只在有进度时出现 */
+.tile-progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: rgba(23, 24, 28, 0.28);
+}
+
+.tile-progress span {
+  display: block;
+  height: 100%;
+  border-radius: 0 2px 2px 0;
+  background: var(--jm-brand);
+}
+
+.tile-foot {
   display: flex;
-  flex-wrap: wrap;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.tile-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* 更多操作：24px 视觉、44px 触控热区，只在触屏上放大 */
+.tile-more {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  margin: 1px -5px 0 0;
+  place-items: center;
+  color: var(--jm-text-4);
+  border: 0;
+  border-radius: var(--jm-r-sm);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease;
+}
+
+.tile-more:hover {
+  color: var(--jm-text-2);
+  background: var(--jm-sunken);
+}
+
+.tile-more:focus-visible {
+  outline: 2px solid var(--jm-brand);
+  outline-offset: -2px;
+}
+
+.tile-title {
+  display: -webkit-box;
+  padding: 0 1px;
+  overflow: hidden;
+  color: var(--jm-text);
+  border: 0;
+  background: none;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.library-tile.is-selected .tile-title {
+  color: var(--jm-brand);
+}
+
+.tile-meta {
+  display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: auto;
+  gap: 3px;
+  padding: 0 1px;
+  overflow: hidden;
+  color: var(--jm-text-3);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.tile-read {
+  color: var(--jm-brand);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+@media (pointer: coarse) {
+  .tile-check {
+    width: 24px;
+    height: 24px;
+  }
+
+  .tile-more {
+    width: 36px;
+    height: 36px;
+    margin: -5px -7px -5px 0;
+  }
 }
 </style>

@@ -1,14 +1,26 @@
 <script setup lang="ts">
-import { ref, computed, watch, onActivated, onBeforeUnmount, onDeactivated } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import { commands } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import FloatLabelInput from '../components/FloatLabelInput.vue'
-import FavoritePane from './FavoritePane.vue'
 import DailyCheckInCard from '../components/DailyCheckInCard.vue'
 import { useStore } from '../store.ts'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
 import { compactNumber, expProgress } from '../utils/dailyCheckIn.ts'
-import { PhCoin, PhSignOut, PhTrendUp, PhUser } from '@phosphor-icons/vue'
+import {
+  PhBookmarkSimple,
+  PhBookOpen,
+  PhBooks,
+  PhCaretRight,
+  PhCoin,
+  PhDownloadSimple,
+  PhGearSix,
+  PhHeart,
+  PhSignIn,
+  PhSignOut,
+  PhTrendUp,
+  PhUser,
+} from '@phosphor-icons/vue'
 
 const store = useStore()
 const message = useMessage()
@@ -16,18 +28,57 @@ const message = useMessage()
 /** 金币与等级经验都挂在用户资料上，签到成功后后端会重新拉取资料并经会话事件推回来 */
 const exp = computed(() => expProgress(store.userProfile))
 
+const readingCount = computed(() => Object.keys(store.readingState.progress).length)
+const bookmarkCount = computed(() => store.readingState.bookmarks.length)
+
+const pendingTransfers = computed(() => {
+  let count = 0
+  for (const progress of store.progresses.values()) {
+    if (progress.state !== 'Completed' && progress.state !== 'Cancelled') count++
+  }
+  return count
+})
+
+const quickLinks = computed(() => {
+  const links = [
+    { key: 'library', label: '书库', icon: PhBooks, tint: 'brand' as const, badge: store.downloadedComics.length, action: () => goToLibrary() },
+    { key: 'transfers', label: '传输', icon: PhDownloadSimple, tint: 'accent' as const, badge: pendingTransfers.value, action: () => store.openTransfers() },
+    { key: 'settings', label: '设置', icon: PhGearSix, tint: 'neutral' as const, badge: 0, action: () => store.openSettings() },
+  ]
+  if (store.userProfile !== undefined) {
+    links.unshift({ key: 'favorite', label: '收藏', icon: PhHeart, tint: 'brand' as const, badge: store.userProfile.album_favorites, action: () => { store.currentTabName = 'favorite' } })
+  }
+  return links
+})
+
+function goToLibrary() {
+  store.downloadedSubTab = 'library'
+  store.currentTabName = 'downloaded'
+}
+
+// 书库列表平时由书库页加载：直接从「我的」进来时它还是空的，本地统计会显示 0。
+// 未加载过就补一次，失败不提示——统计不是本页的主内容。
+function ensureLibraryLoaded() {
+  if (store.downloadedComicsLoaded && !store.downloadedComicsStale) return
+  void store.refreshDownloadedComics().catch((error) => console.error('加载本地书库失败', error))
+}
+
 // 资料只在登录时写入 store，金币/经验会随时间变化：每次回到本页静默刷新一次。
 // 失败不提示——签到卡自己会显示拉取失败，这里再弹一次只是噪音。
 let activatedOnce = false
 onActivated(() => {
+  ensureLibraryLoaded()
   if (!activatedOnce) {
     activatedOnce = true
     return
   }
   if (store.userProfile === undefined) return
-  void commands.getUserProfile().then((result) => {
-    if (result.status === 'error') console.error(result.error)
-  }).catch(console.error)
+  void commands
+    .getUserProfile()
+    .then((result) => {
+      if (result.status === 'error') console.error(result.error)
+    })
+    .catch(console.error)
 })
 
 const username = ref<string>(store.config?.username ?? '')
@@ -35,7 +86,7 @@ const password = ref<string>(store.config?.password ?? '')
 const remember = ref<boolean>(username.value !== '' && password.value !== '')
 const loggingIn = ref(false)
 const loggingOut = ref(false)
-// 收藏区提示会话失效（或用户主动重新登录）时，即使仍有本地资料也改显示登录表单
+// 会话失效或用户主动重新登录时，改显示登录表单
 const showLoginForm = ref(false)
 let disposed = false
 onBeforeUnmount(() => {
@@ -162,70 +213,118 @@ async function clearUsernameAndPasswordInConfig() {
 </script>
 
 <template>
-  <div class="account-page">
-    <!-- 已登录：账号信息 + 在线收藏 -->
+  <div class="profile-page jm-scroll">
+    <!-- 已登录：资料卡 + 快捷入口 + 签到 + 阅读数据 -->
     <template v-if="store.userProfile !== undefined && !showLoginForm">
-      <div class="user-profile-bar">
-        <n-avatar
-          round
-          :size="48"
-          :src="store.userProfile.photo"
-          fallback-src="https://cdn-msp.18comic.vip/templates/frontend/airav/img/title-png/more-ms-jm.webp?v=2"
-          class="user-avatar" />
-        <div class="user-info">
-          <div class="user-name-row">
-            <span class="user-name">{{ store.userProfile.username }}</span>
-            <span v-if="store.userProfile.level_name || store.userProfile.level" class="vip-badge">
-              {{ store.userProfile.level_name || `Lv.${store.userProfile.level}` }}
-            </span>
-          </div>
-          <div class="user-sub">
-            <span>UID: {{ store.userProfile.uid }}</span>
-            <span class="dot-sep">•</span>
-            <span class="text-neutral-500">云端收藏</span>
-          </div>
-          <div class="user-stats">
-            <span class="user-stat" title="金币">
-              <PhCoin :size="14" weight="duotone" class="stat-icon coin" />
-              {{ compactNumber(store.userProfile.coin) }}
-            </span>
-            <span class="user-stat" :title="`经验 ${exp.current}${exp.target > 0 ? ` / ${exp.target}` : ''}`">
-              <PhTrendUp :size="14" weight="duotone" class="stat-icon exp" />
-              {{ exp.current }}
-              <span v-if="exp.target > 0" class="stat-target">/ {{ exp.target }}</span>
-            </span>
-            <span v-if="exp.target > 0" class="user-exp-bar" role="progressbar" :aria-valuenow="exp.percent" aria-valuemin="0" aria-valuemax="100">
-              <span class="user-exp-fill" :style="{ width: `${exp.percent}%` }"></span>
-            </span>
+      <section class="profile-hero">
+        <div class="hero-top">
+          <n-avatar
+            round
+            :size="58"
+            :src="store.userProfile.photo"
+            fallback-src="https://cdn-msp.18comic.vip/templates/frontend/airav/img/title-png/more-ms-jm.webp?v=2"
+            class="hero-avatar" />
+          <div class="hero-identity">
+            <div class="name-row">
+              <strong class="hero-name">{{ store.userProfile.username }}</strong>
+              <span v-if="store.userProfile.level_name || store.userProfile.level" class="level-badge">
+                {{ store.userProfile.level_name || `Lv.${store.userProfile.level}` }}
+              </span>
+            </div>
+            <span class="hero-uid">UID {{ store.userProfile.uid }} · 云端已同步</span>
           </div>
         </div>
+
+        <div class="hero-stats">
+          <div class="hero-stat">
+            <span class="stat-value">
+              <PhCoin :size="15" weight="duotone" class="stat-coin" />
+              {{ compactNumber(store.userProfile.coin) }}
+            </span>
+            <span class="stat-label">金币</span>
+          </div>
+          <span class="stat-divider" aria-hidden="true"></span>
+          <div class="hero-stat">
+            <span class="stat-value">
+              <PhTrendUp :size="15" weight="duotone" class="stat-exp" />
+              {{ exp.current }}
+            </span>
+            <span class="stat-label">经验{{ exp.target > 0 ? ` / ${exp.target}` : '' }}</span>
+          </div>
+          <span class="stat-divider" aria-hidden="true"></span>
+          <div class="hero-stat">
+            <span class="stat-value">
+              <PhHeart :size="15" weight="duotone" class="stat-heart" />
+              {{ compactNumber(store.userProfile.album_favorites) }}
+            </span>
+            <span class="stat-label">云端收藏</span>
+          </div>
+        </div>
+
+        <div class="exp-track" role="progressbar" :aria-valuenow="exp.percent" aria-valuemin="0" aria-valuemax="100" aria-label="等级经验">
+          <span class="exp-fill" :style="{ width: `${exp.percent}%` }"></span>
+        </div>
+      </section>
+
+      <div class="quick-grid">
         <button
+          v-for="link in quickLinks"
+          :key="link.key"
           type="button"
-          class="logout-btn"
-          title="退出登录"
-          :disabled="loggingIn || loggingOut"
-          @click="handleLogout">
-          <PhSignOut :size="16" />
-          <span>退出登录</span>
+          class="quick-tile"
+          @click="link.action()">
+          <span class="quick-icon" :class="`is-${link.tint}`"><component :is="link.icon" :size="22" weight="duotone" /></span>
+          <span class="quick-label">{{ link.label }}</span>
+          <span v-if="link.badge > 0" class="quick-badge">{{ link.badge > 999 ? '999+' : link.badge }}</span>
         </button>
       </div>
 
       <DailyCheckInCard />
 
-      <div class="favorites-content">
-        <FavoritePane @open-login="showLoginForm = true" />
-      </div>
+      <!-- 本地阅读数据 -->
+      <section class="local-card">
+        <header class="local-head">
+          <h3>我的阅读</h3>
+          <button type="button" class="jm-link is-brand" @click="goToLibrary">去书库 ›</button>
+        </header>
+        <div class="local-stats">
+          <button type="button" class="local-stat" @click="goToLibrary">
+            <PhBookOpen :size="19" weight="duotone" />
+            <strong>{{ readingCount }}</strong>
+            <span>在读</span>
+          </button>
+          <button type="button" class="local-stat" @click="goToLibrary">
+            <PhBooks :size="19" weight="duotone" />
+            <strong>{{ store.downloadedComics.length }}</strong>
+            <span>已下载</span>
+          </button>
+          <button type="button" class="local-stat" @click="goToLibrary">
+            <PhBookmarkSimple :size="19" weight="duotone" />
+            <strong>{{ bookmarkCount }}</strong>
+            <span>书签</span>
+          </button>
+        </div>
+      </section>
+
+      <button type="button" class="logout-row" :disabled="loggingIn || loggingOut" @click="handleLogout">
+        <PhSignOut :size="18" />
+        <span>退出登录</span>
+        <span class="logout-note">同时清除记住的账密</span>
+      </button>
     </template>
 
-    <!-- 未登录（或会话失效需重新登录）：页内登录表单 -->
-    <div v-else class="login-form-wrapper">
-      <div class="login-card">
-        <div class="login-headline">
-          <div class="login-icon-box"><PhUser :size="22" weight="bold" /></div>
-          <h2>登录 JoyManga 账号</h2>
-          <p class="login-tip">登录后可同步收藏夹，并一键收藏。账号信息只保存在本机。</p>
-        </div>
+    <!-- 未登录：欢迎卡 + 登录表单 + 本地入口 -->
+    <template v-else>
+      <section class="guest-hero">
+        <span class="guest-mark" aria-hidden="true">
+          <PhUser :size="26" weight="duotone" />
+        </span>
+        <strong>登录 JoyManga</strong>
+        <p>登录后同步云端收藏，在「发现」里一键收藏喜欢的漫画。</p>
         <p v-if="store.userProfile !== undefined" class="relogin-tip">当前会话已失效，重新登录后可继续使用在线收藏。</p>
+      </section>
+
+      <section class="login-card">
         <div class="form-fields">
           <FloatLabelInput label="用户名" v-model:value="username" @keydown.enter="onLogin" />
           <FloatLabelInput label="密码" v-model:value="password" type="password" @keydown.enter="onLogin" />
@@ -237,242 +336,451 @@ async function clearUsernameAndPasswordInConfig() {
               <n-checkbox v-model:checked="remember">记住我</n-checkbox>
             </template>
           </n-tooltip>
-          <button type="button" class="clear-cred-btn" @click="clearUsernameAndPasswordInConfig">
-            清除保存的账密
-          </button>
+          <button type="button" class="clear-cred-btn" @click="clearUsernameAndPasswordInConfig">清除保存的账密</button>
         </div>
-        <n-button
-          type="primary"
-          class="submit-login-btn"
-          :loading="loggingIn"
-          :disabled="loggingIn"
-          @click="onLogin">
+        <n-button type="primary" class="submit-login-btn" :loading="loggingIn" :disabled="loggingIn" @click="onLogin">
+          <template #icon><PhSignIn :size="18" weight="bold" /></template>
           立即登录
         </n-button>
-        <n-button v-if="loggingIn" size="small" @click="cancelLogin">取消登录</n-button>
-        <n-button
-          v-if="store.userProfile !== undefined"
-          size="small"
-          quaternary
-          @click="showLoginForm = false">
-          返回账号页
-        </n-button>
+        <n-button v-if="loggingIn" size="small" quaternary @click="cancelLogin">取消登录</n-button>
+        <n-button v-if="store.userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">返回我的</n-button>
+        <p class="privacy-note">账号信息只保存在本机；退出登录会一并清除记住的账密。</p>
+      </section>
+
+      <div class="quick-grid is-guest">
+        <button
+          v-for="link in quickLinks"
+          :key="link.key"
+          type="button"
+          class="quick-tile"
+          @click="link.action()">
+          <span class="quick-icon" :class="`is-${link.tint}`"><component :is="link.icon" :size="22" weight="duotone" /></span>
+          <span class="quick-label">{{ link.label }}</span>
+          <span v-if="link.badge > 0" class="quick-badge">{{ link.badge > 999 ? '999+' : link.badge }}</span>
+        </button>
       </div>
-    </div>
+
+      <section class="local-card">
+        <header class="local-head">
+          <h3>本地阅读</h3>
+          <button type="button" class="jm-link is-brand" @click="goToLibrary">去书库 ›</button>
+        </header>
+        <div class="local-stats">
+          <button type="button" class="local-stat" @click="goToLibrary">
+            <PhBookOpen :size="19" weight="duotone" />
+            <strong>{{ readingCount }}</strong>
+            <span>在读</span>
+          </button>
+          <button type="button" class="local-stat" @click="goToLibrary">
+            <PhBooks :size="19" weight="duotone" />
+            <strong>{{ store.downloadedComics.length }}</strong>
+            <span>已下载</span>
+          </button>
+          <button type="button" class="local-stat" @click="goToLibrary">
+            <PhBookmarkSimple :size="19" weight="duotone" />
+            <strong>{{ bookmarkCount }}</strong>
+            <span>书签</span>
+          </button>
+        </div>
+      </section>
+
+      <button type="button" class="settings-row" @click="store.openSettings()">
+        <PhGearSix :size="18" />
+        <span>设置</span>
+        <PhCaretRight :size="16" class="row-chevron" />
+      </button>
+    </template>
   </div>
 </template>
 
 <style scoped>
-.account-page {
+.profile-page {
   display: flex;
-  height: 100%;
-  min-height: 0;
   flex-direction: column;
-  background: #fff;
+  gap: 12px;
+  padding-bottom: 28px;
+  background: var(--jm-bg);
 }
 
-.user-profile-bar {
+/* 资料卡 */
+.profile-hero {
   display: flex;
-  flex: 0 0 auto;
-  align-items: center;
+  flex-direction: column;
   gap: 14px;
-  padding: 16px 20px;
-  border-bottom: 1px solid #f1f2f3;
+  margin: 12px var(--jm-gutter) 0;
+  padding: 16px;
+  border: 1px solid rgba(251, 114, 153, 0.2);
+  border-radius: var(--jm-r-xl);
+  background:
+    radial-gradient(120% 90% at 100% 0%, rgba(0, 174, 236, 0.1) 0%, transparent 58%),
+    linear-gradient(135deg, var(--jm-brand-soft) 0%, var(--jm-surface) 62%);
+  box-shadow: var(--jm-shadow-1);
 }
 
-.user-avatar {
-  flex-shrink: 0;
-  border: 2px solid #fb7299;
-  box-shadow: 0 2px 8px rgba(251, 114, 153, 0.25);
+.hero-top {
+  display: flex;
+  align-items: center;
+  gap: 13px;
 }
 
-.user-info {
+.hero-avatar {
+  flex: 0 0 auto;
+  border: 2px solid var(--jm-surface);
+  box-shadow: 0 0 0 2px var(--jm-brand-ring), var(--jm-shadow-1);
+}
+
+.hero-identity {
   display: flex;
   min-width: 0;
   flex: 1;
   flex-direction: column;
-  gap: 5px;
+  gap: 4px;
 }
 
-.user-name-row {
+.name-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
   min-width: 0;
+  align-items: center;
+  gap: 7px;
 }
 
-.user-name {
+.hero-name {
   overflow: hidden;
-  color: #18191c;
-  font-size: 16px;
-  font-weight: 700;
+  max-width: 64%;
+  color: var(--jm-text);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.vip-badge {
-  flex-shrink: 0;
+.level-badge {
+  flex: 0 0 auto;
   padding: 2px 8px;
   color: #fff;
-  border-radius: 6px;
-  background: linear-gradient(135deg, #fb7299 0%, #ff85ad 100%);
-  box-shadow: 0 2px 6px rgba(251, 114, 153, 0.35);
-  font-size: 11px;
+  border-radius: var(--jm-r-pill);
+  background: linear-gradient(135deg, var(--jm-brand) 0%, var(--jm-brand-hover) 100%);
+  box-shadow: 0 2px 6px var(--jm-brand-ring);
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
-.user-sub {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.hero-uid {
   overflow: hidden;
-  color: #9499a0;
-  font-size: 12px;
+  color: var(--jm-text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.dot-sep {
-  opacity: 0.5;
-}
-
-.user-stats {
+.hero-stats {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 4px 12px;
-  min-width: 0;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--jm-r-lg);
+  background: rgba(255, 255, 255, 0.76);
 }
 
-.user-stat {
+.hero-stat {
   display: flex;
-  flex-shrink: 0;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.stat-value {
+  display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #61666d;
-  font-size: 12px;
+  color: var(--jm-text);
+  font-size: 16px;
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  line-height: 1.15;
 }
 
-.stat-icon.coin {
-  color: #f5a623;
+.stat-coin {
+  color: var(--jm-coin);
 }
 
-.stat-icon.exp {
-  color: #00aeec;
+.stat-exp {
+  color: var(--jm-accent);
 }
 
-.stat-target {
-  color: #9499a0;
-  font-weight: 400;
+.stat-heart {
+  color: var(--jm-brand);
 }
 
-.user-exp-bar {
-  flex: 0 1 96px;
-  height: 5px;
-  min-width: 48px;
+.stat-label {
   overflow: hidden;
-  border-radius: 999px;
-  background: #f1f2f3;
+  max-width: 100%;
+  color: var(--jm-text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.user-exp-fill {
+.stat-divider {
+  width: 1px;
+  height: 24px;
+  flex: 0 0 auto;
+  background: var(--jm-line);
+}
+
+.exp-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: var(--jm-r-pill);
+  background: rgba(23, 24, 28, 0.07);
+}
+
+.exp-fill {
   display: block;
   height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #00aeec 0%, #fb7299 100%);
-  transition: width 0.3s;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--jm-accent) 0%, var(--jm-brand) 100%);
+  transition: width 320ms ease;
 }
 
-.logout-btn {
+/* 快捷入口 */
+.quick-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 var(--jm-gutter);
+}
+
+.quick-grid.is-guest {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.quick-tile {
+  position: relative;
   display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  color: #61666d;
-  border: 1px solid #e3e5e7;
-  border-radius: 8px;
-  background: #fff;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.logout-btn:hover {
-  color: #fb7299;
-  border-color: #fb7299;
-  background: #fff0f5;
-}
-
-.favorites-content {
-  flex: 1;
-  min-height: 0;
-}
-
-.login-form-wrapper {
-  display: flex;
-  flex: 1;
+  min-height: 88px;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  overflow-y: auto;
-  padding: 32px 20px;
+  gap: 7px;
+  padding: 12px 4px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease;
+}
+
+.quick-tile:active {
+  transform: scale(0.97);
+}
+
+.quick-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--jm-r-md);
+}
+
+.quick-icon.is-brand {
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+}
+
+.quick-icon.is-accent {
+  color: var(--jm-accent);
+  background: var(--jm-accent-soft);
+}
+
+.quick-icon.is-neutral {
+  color: var(--jm-text-2);
+  background: var(--jm-sunken);
+}
+
+.quick-label {
+  color: var(--jm-text);
+  font-size: var(--jm-fs-sm);
+  font-weight: 650;
+}
+
+.quick-badge {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  min-width: 18px;
+  padding: 1px 5px;
+  color: var(--jm-text-3);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* 阅读数据卡 */
+.local-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0 var(--jm-gutter);
+  padding: 14px 16px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+}
+
+.local-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.local-head h3 {
+  margin: 0;
+  color: var(--jm-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.local-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.local-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 12px;
+  color: var(--jm-text-2);
+  border: 0;
+  border-radius: var(--jm-r-md);
+  background: var(--jm-sunken);
+  cursor: pointer;
+}
+
+.local-stat strong {
+  color: var(--jm-text);
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.local-stat span {
+  color: var(--jm-text-3);
+  font-size: 10.5px;
+}
+
+/* 行式入口 */
+.logout-row,
+.settings-row {
+  display: flex;
+  min-height: 50px;
+  align-items: center;
+  gap: 9px;
+  margin: 0 var(--jm-gutter);
+  padding: 0 16px;
+  color: var(--jm-text-2);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+  font-size: var(--jm-fs-body);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.logout-row {
+  color: var(--jm-danger);
+}
+
+.logout-row:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.logout-note {
+  margin-left: auto;
+  color: var(--jm-text-4);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.row-chevron {
+  margin-left: auto;
+  color: var(--jm-text-4);
+}
+
+/* 未登录 */
+.guest-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 30px 24px 18px;
+  text-align: center;
+}
+
+.guest-mark {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  color: var(--jm-brand);
+  place-items: center;
+  border-radius: 20px;
+  background: linear-gradient(140deg, var(--jm-brand-soft), var(--jm-brand-tint));
+  box-shadow: 0 0 0 6px rgba(251, 114, 153, 0.08);
+}
+
+.guest-hero strong {
+  margin-top: 4px;
+  color: var(--jm-text);
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.guest-hero p {
+  max-width: 300px;
+  margin: 0;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-sm);
+  line-height: 1.6;
+}
+
+.guest-hero .relogin-tip {
+  margin-top: 4px;
+  padding: 8px 12px;
+  color: var(--jm-warning);
+  border-radius: var(--jm-r-md);
+  background: var(--jm-warning-soft);
+  font-size: var(--jm-fs-xs);
 }
 
 .login-card {
   display: flex;
-  width: 100%;
-  max-width: 400px;
   flex-direction: column;
-  gap: 18px;
-}
-
-.login-headline {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  text-align: center;
-}
-
-.login-headline h2 {
-  margin: 0;
-  color: #18191c;
-  font-size: 17px;
-  font-weight: 700;
-}
-
-.login-icon-box {
-  display: flex;
-  width: 44px;
-  height: 44px;
-  align-items: center;
-  justify-content: center;
-  color: #fb7299;
-  border-radius: 12px;
-  background: rgba(251, 114, 153, 0.12);
-}
-
-.login-tip {
-  margin: 0;
-  color: #61666d;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.relogin-tip {
-  margin: 0;
-  padding: 10px 12px;
-  color: #a8552a;
-  border: 1px solid #f3d9c4;
-  border-radius: 8px;
-  background: #fdf3ea;
-  font-size: 12px;
-  line-height: 1.6;
+  gap: 14px;
+  margin: 0 var(--jm-gutter);
+  padding: 16px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
 }
 
 .form-fields {
@@ -485,65 +793,36 @@ async function clearUsernameAndPasswordInConfig() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: var(--jm-fs-xs);
 }
 
 .clear-cred-btn {
-  color: #9499a0;
+  color: var(--jm-text-3);
   border: none;
   background: none;
-  font-size: 12px;
+  font-size: var(--jm-fs-xs);
   text-decoration: underline;
   cursor: pointer;
-  transition: color 0.15s;
 }
 
 .clear-cred-btn:hover {
-  color: #fb7299;
+  color: var(--jm-brand);
 }
 
 .submit-login-btn {
   width: 100%;
-  height: 42px;
-  border-radius: 8px;
-  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.35);
+  height: 46px;
+  border-radius: var(--jm-r-md);
+  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.3);
   font-size: 15px;
   font-weight: 700;
 }
 
-@media (max-width: 760px) {
-  .user-profile-bar {
-    padding: 14px;
-    gap: 12px;
-  }
-
-  /* 窄屏下退出按钮只留图标，把宽度让给金币/经验 */
-  .logout-btn span {
-    display: none;
-  }
-
-  .logout-btn {
-    padding: 8px;
-  }
-
-  .user-exp-bar {
-    flex-basis: 72px;
-  }
-}
-
-/* 320~360dp：头像与资料行留给文字的空间更紧张，收一号 */
-@media (max-width: 360px) {
-  .user-profile-bar {
-    padding: 12px 10px;
-    gap: 10px;
-  }
-
-  .user-name {
-    font-size: 15px;
-  }
-
-  .user-sub {
-    font-size: 11px;
-  }
+.privacy-note {
+  margin: 0;
+  color: var(--jm-text-4);
+  font-size: 10.5px;
+  line-height: 1.5;
+  text-align: center;
 }
 </style>

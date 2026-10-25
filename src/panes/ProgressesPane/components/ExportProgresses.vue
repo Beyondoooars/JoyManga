@@ -1,7 +1,7 @@
 <script setup lang="tsx">
 import { computed, ref, watchEffect } from 'vue'
 import { NIcon, DropdownOption } from 'naive-ui'
-import { PhChecks, PhTrash } from '@phosphor-icons/vue'
+import { PhChecks, PhExport, PhTrash } from '@phosphor-icons/vue'
 import { SelectionArea, SelectionEvent } from '@viselect/vue'
 import ExportProgress from './ExportProgress.vue'
 import { useStore } from '../../../store.ts'
@@ -112,27 +112,34 @@ function handleProgressContextMenu(p: ProgressData) {
 
 <template>
   <SelectionArea
-    class="h-full flex flex-col selection-container px-2"
+    class="export-container"
     :options="{ selectables: '.selectable', features: { deselectOnBlur: true } }"
     @contextmenu="showDropdown"
     @move="updateSelectedIds"
     @start="unselectAll">
-    <div v-if="progresses.size === 0" class="export-empty">
-      <div><PhExport :size="27" weight="duotone" /></div>
+    <div v-if="progresses.size === 0" class="jm-empty export-empty">
+      <div class="jm-empty-icon is-muted"><PhExport :size="28" weight="duotone" /></div>
       <strong>暂无导出任务</strong>
-      <span>从本地库存导出 CBZ</span>
-    </div>
-    <div v-else class="flex">
-      <span class="export-hint">拖动框选 · 右键操作</span>
+      <p>在书库勾选漫画后点「导出」，进度会显示在这里。</p>
     </div>
 
-    <ExportProgress
-      v-for="[uuid, p] in progresses"
-      :key="uuid"
-      :data-key="uuid"
-      :class="['selectable ', selectedIds.has(uuid) ? 'selected shadow-md' : 'hover:bg-gray-1']"
-      :p="p"
-      :handle-context-menu="handleProgressContextMenu" />
+    <template v-else>
+      <div class="export-head">
+        <span>{{ progresses.size }} 个导出任务</span>
+        <span class="export-hint">拖动框选 · 右键操作</span>
+      </div>
+
+      <div class="export-list">
+        <ExportProgress
+          v-for="[uuid, p] in progresses"
+          :key="uuid"
+          :data-key="uuid"
+          class="selectable"
+          :class="{ 'is-selected': selectedIds.has(uuid) }"
+          :p="p"
+          :handle-context-menu="handleProgressContextMenu" />
+      </div>
+    </template>
 
     <n-dropdown
       placement="bottom-start"
@@ -146,55 +153,46 @@ function handleProgressContextMenu(p: ProgressData) {
 </template>
 
 <style scoped>
-.selection-container {
-  @apply select-none overflow-auto;
-}
-
-.selection-container .selected {
-  background-color: rgba(251, 114, 153, 0.12) !important;
-  border-color: #fb7299 !important;
+.export-container {
+  height: 100%;
+  overflow-y: auto;
+  padding: 12px var(--jm-gutter) calc(24px + var(--safe-bottom));
+  user-select: none;
 }
 
 .export-empty {
+  min-height: 260px;
+}
+
+.export-head {
   display: flex;
-  min-height: 230px;
-  flex: 1;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  color: #aaa59d;
-  text-align: center;
-}
-
-.export-empty div {
-  display: grid;
-  width: 58px;
-  height: 58px;
-  margin-bottom: 14px;
-  color: #fb7299;
-  place-items: center;
-  border-radius: 17px;
-  background: rgba(251, 114, 153, 0.1);
-}
-
-.export-empty strong {
-  color: #4d4a45;
-  font-size: 13px;
-}
-
-.export-empty span,
-.export-hint {
-  margin-top: 5px;
-  color: #aaa59d;
-  font-size: 9px;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
 }
 
 .export-hint {
-  margin: 2px 3px 8px auto;
+  color: var(--jm-text-4);
+  font-size: 9.5px;
+}
+
+.export-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 :global(.selection-area) {
-  background-color: rgba(251, 114, 153, 0.18) !important;
-  border: 1px solid #fb7299 !important;
+  background-color: rgba(251, 114, 153, 0.14) !important;
+  border: 1px solid var(--jm-brand) !important;
+  border-radius: 2px;
+}
+
+.selectable.is-selected :deep(.export-card) {
+  border-color: var(--jm-brand);
+  background: var(--jm-brand-soft);
 }
 </style>
