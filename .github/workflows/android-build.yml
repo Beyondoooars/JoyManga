@@ -26,7 +26,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # 版本号提交与打标签需要完整历史；main 上始终基于最新提交，
           # 避免连续推送时两个构建各自从旧提交递增出同一个版本号。
@@ -34,7 +34,7 @@ jobs:
           ref: ${{ github.ref == 'refs/heads/main' && 'main' || github.ref }}
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'zulu'
           java-version: '17'
@@ -67,7 +67,7 @@ jobs:
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: lts/*
 
@@ -80,7 +80,7 @@ jobs:
         run: node scripts/bump-version.mjs "$BUMP"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           run_install: false
 
@@ -154,7 +154,7 @@ jobs:
           cp "${apks[0]}" artifacts/joymanga-arm64-v8a.apk
 
       - name: Upload APK Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: joymanga-android-arm64-v8a-apk
           path: artifacts/joymanga-arm64-v8a.apk
@@ -193,7 +193,7 @@ jobs:
       # agent 分支只产出构建产物，不发布。
       - name: Publish release
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
