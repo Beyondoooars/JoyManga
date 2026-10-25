@@ -1,4 +1,4 @@
-import type { DailyCheckInState, GetUserProfileRespData } from '../bindings.ts'
+import type { DailyCheckInRecordDay, DailyCheckInState, GetUserProfileRespData } from '../bindings.ts'
 
 /** 面板里 `record[].date` 是「当月第几天」，补零与否都出现过；统一成不补零的写法再比较。 */
 function normalizeDay(date: string): string {
@@ -41,6 +41,48 @@ export function isSignedToday(state: DailyCheckInState | undefined, now: Date = 
 export function monthlyCheckInText(state: DailyCheckInState | undefined): string {
   if (!state || state.elapsedDays <= 0) return ''
   return `本月已签 ${state.signedDays}/${state.elapsedDays} 天`
+}
+
+/** 日历表头，周一开始——与国内日历习惯一致 */
+export const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'] as const
+
+/**
+ * 把接口按周分组的 `record` 摆回标准月历。
+ *
+ * 接口分的「周」并不一定是整周（当月 1 号在周中时，第一组只有几天），
+ * 直接铺进网格会让日期错位到错误的星期列。这里按 `date` 推出每个日期
+ * 当月真实的星期，补齐月初的空位，保证 1 号落在它该在的那一列。
+ */
+export function buildCalendarWeeks(
+  state: DailyCheckInState | undefined,
+  now: Date = new Date(),
+): Array<Array<DailyCheckInRecordDay | null>> {
+  if (!state || state.record.length === 0) return []
+  const byDay = new Map<number, DailyCheckInRecordDay>()
+  for (const week of state.record) {
+    for (const day of week) {
+      const value = Number.parseInt(day.date, 10)
+      if (Number.isSafeInteger(value) && value >= 1 && value <= 31) byDay.set(value, day)
+    }
+  }
+  if (byDay.size === 0) return []
+
+  const maxDay = Math.max(...byDay.keys())
+  const firstWeekday = (new Date(now.getFullYear(), now.getMonth(), 1).getDay() + 6) % 7
+  const weeks: Array<Array<DailyCheckInRecordDay | null>> = []
+  let current: Array<DailyCheckInRecordDay | null> = new Array(firstWeekday).fill(null)
+  for (let day = 1; day <= maxDay; day++) {
+    current.push(byDay.get(day) ?? null)
+    if (current.length === 7) {
+      weeks.push(current)
+      current = []
+    }
+  }
+  if (current.length > 0) {
+    while (current.length < 7) current.push(null)
+    weeks.push(current)
+  }
+  return weeks
 }
 
 export interface ExpProgress {

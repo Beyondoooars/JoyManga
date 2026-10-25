@@ -5,7 +5,13 @@ import { commands } from '../bindings.ts'
 import type { DailyCheckInRecordDay, DailyCheckInState } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
-import { isSignedToday, isTodayDate, monthlyCheckInText } from '../utils/dailyCheckIn.ts'
+import {
+  WEEKDAY_LABELS,
+  buildCalendarWeeks,
+  isSignedToday,
+  isTodayDate,
+  monthlyCheckInText,
+} from '../utils/dailyCheckIn.ts'
 import { PhArrowClockwise, PhCheck, PhCoin, PhGift, PhTrendUp } from '@phosphor-icons/vue'
 
 const store = useStore()
@@ -24,6 +30,8 @@ const uid = computed(() => store.userProfile?.uid)
 const sessionKey = computed(() => (uid.value === undefined ? '' : `${uid.value}\u0000${store.sessionEpoch}`))
 const signedToday = computed(() => isSignedToday(state.value))
 const progressText = computed(() => monthlyCheckInText(state.value))
+/** 接口的「周」分组不一定整周，铺进网格前按真实星期重新对齐 */
+const calendarWeeks = computed(() => buildCalendarWeeks(state.value))
 /** 接口给的是 "33.33%" 之类的字符串，原样喂给进度条宽度前先夹到 0–100 */
 const bonusProgress = computed(() => {
   const raw = Number.parseFloat((state.value?.currentProgress ?? '').replace('%', ''))
@@ -149,19 +157,23 @@ function dayClass(day: DailyCheckInRecordDay) {
     </p>
 
     <template v-else-if="state">
-      <ul v-if="state.record.length > 0" class="check-in-calendar">
-        <template v-for="(week, weekIndex) in state.record" :key="weekIndex">
-          <li v-for="day in week" :key="day.date" class="check-in-day" :class="dayClass(day)" :title="`${day.date} 日`">
-            <template v-if="day.signed === true">
-              <PhCheck :size="13" weight="bold" />
-            </template>
-            <template v-else-if="day.bonus">
-              <PhGift :size="12" weight="duotone" />
-            </template>
-            <template v-else>{{ day.date }}</template>
-          </li>
+      <div v-if="calendarWeeks.length > 0" class="check-in-calendar">
+        <span v-for="label in WEEKDAY_LABELS" :key="label" class="check-in-weekday">{{ label }}</span>
+        <template v-for="(week, weekIndex) in calendarWeeks" :key="weekIndex">
+          <template v-for="(day, dayIndex) in week" :key="day ? day.date : `blank-${weekIndex}-${dayIndex}`">
+            <span v-if="day === null" class="check-in-day is-blank"></span>
+            <span
+              v-else
+              class="check-in-day"
+              :class="dayClass(day)"
+              :title="`${day.date} 日${day.signed === true ? ' · 已签到' : day.bonus ? ' · 奖励日' : ''}`">
+              <PhCheck v-if="day.signed === true" :size="13" weight="bold" />
+              <PhGift v-else-if="day.bonus" :size="12" weight="duotone" />
+              <template v-else>{{ day.date }}</template>
+            </span>
+          </template>
         </template>
-      </ul>
+      </div>
 
       <div v-if="bonusRewardVisible" class="check-in-bonus">
         <div class="check-in-bonus-bar" role="progressbar" :aria-valuenow="Math.round(bonusProgress)" aria-valuemin="0" aria-valuemax="100">
@@ -302,18 +314,26 @@ function dayClass(day: DailyCheckInRecordDay) {
   cursor: pointer;
 }
 
+/* 固定 7 列，与表头「一二三四五六日」逐列对齐 */
 .check-in-calendar {
   display: grid;
-  margin: 0;
-  padding: 0;
-  gap: 6px;
-  grid-template-columns: repeat(auto-fill, minmax(34px, 1fr));
-  list-style: none;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px 4px;
 }
 
+.check-in-weekday {
+  color: #c9ccd0;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  user-select: none;
+}
+
+/* 固定高度而不是 aspect-ratio：后者会让格子随列宽变高，
+   360dp 的小屏上 6 行日历能吃掉半屏，把收藏区挤到屏幕外 */
 .check-in-day {
   display: flex;
-  aspect-ratio: 1;
+  height: 30px;
   align-items: center;
   justify-content: center;
   color: #61666d;
@@ -322,7 +342,14 @@ function dayClass(day: DailyCheckInRecordDay) {
   background: #fff;
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   user-select: none;
+}
+
+/* 月初/月末补位：不画框，避免看着像可签的日期 */
+.check-in-day.is-blank {
+  border-color: transparent;
+  background: transparent;
 }
 
 .check-in-day.is-today {
@@ -395,6 +422,14 @@ function dayClass(day: DailyCheckInRecordDay) {
   padding: 0 20px;
 }
 
+/* 已签到时按钮处于禁用态：naive 默认给 50% 透明度，白字在浅粉底上几乎看不清。
+   改成浅粉底 + 品牌色文字，既表明不可点又保持可读。 */
+.check-in-btn.n-button--disabled {
+  color: #c9547c !important;
+  background: #ffe3ec !important;
+  opacity: 1;
+}
+
 @media (max-width: 760px) {
   .check-in-card {
     margin: 0 14px 4px;
@@ -402,8 +437,41 @@ function dayClass(day: DailyCheckInRecordDay) {
   }
 
   .check-in-calendar {
-    gap: 4px;
-    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 4px 3px;
+  }
+
+  .check-in-day {
+    height: 26px;
+    border-radius: 6px;
+    font-size: 11px;
+  }
+
+  .check-in-card {
+    margin: 0 12px 4px;
+    padding: 10px;
+    gap: 8px;
+  }
+}
+
+/* 320dp 级别的窄屏：7 列只剩 ~34px，再缩一号，避免日期贴边 */
+@media (max-width: 360px) {
+  .check-in-card {
+    margin: 0 8px 4px;
+    padding: 8px;
+  }
+
+  .check-in-calendar {
+    gap: 4px 2px;
+  }
+
+  .check-in-day {
+    height: 24px;
+    border-radius: 5px;
+    font-size: 10px;
+  }
+
+  .check-in-bonus-legend {
+    font-size: 10px;
   }
 }
 </style>

@@ -409,16 +409,12 @@ async function search(keyword: string, page: number, sort: SearchSort) {
   --n-height: 38px !important;
 }
 
-.sort-select :deep(.n-base-selection),
-.sort-select :deep(.n-base-selection-label) {
-  height: 38px;
+/* 高度只能靠 --n-height（内层 label、后缀箭头都按它排版），
+   这里只补外观；再写死 height 会让文字和箭头脱离垂直居中。 */
+.sort-select :deep(.n-base-selection) {
   border-radius: var(--radius-card);
   background: #f1f2f3;
   border: 1px solid #e3e5e7;
-}
-
-.sort-select :deep(.n-base-selection-tags) {
-  min-height: 38px;
 }
 
 .search-button {

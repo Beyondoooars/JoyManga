@@ -8,7 +8,7 @@ import DailyCheckInCard from '../components/DailyCheckInCard.vue'
 import { useStore } from '../store.ts'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
 import { compactNumber, expProgress } from '../utils/dailyCheckIn.ts'
-import { PhCoin, PhHeart, PhSignOut, PhTrendUp, PhUser } from '@phosphor-icons/vue'
+import { PhCoin, PhSignOut, PhTrendUp, PhUser } from '@phosphor-icons/vue'
 
 const store = useStore()
 const message = useMessage()
@@ -212,12 +212,6 @@ async function clearUsernameAndPasswordInConfig() {
 
       <DailyCheckInCard />
 
-      <div class="favorites-header-title">
-        <span class="pink-bar"></span>
-        <PhHeart :size="15" weight="duotone" class="favorites-icon" />
-        <h4>我的在线收藏</h4>
-        <span class="sub-hint">点击任意漫画直接展开章节详情</span>
-      </div>
       <div class="favorites-content">
         <FavoritePane @open-login="showLoginForm = true" />
       </div>
@@ -415,38 +409,6 @@ async function clearUsernameAndPasswordInConfig() {
   background: #fff0f5;
 }
 
-.favorites-header-title {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 20px 10px;
-}
-
-.pink-bar {
-  width: 4px;
-  height: 16px;
-  border-radius: 2px;
-  background-color: #fb7299;
-}
-
-.favorites-icon {
-  color: #fb7299;
-}
-
-.favorites-header-title h4 {
-  margin: 0;
-  color: #18191c;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.sub-hint {
-  margin-left: 4px;
-  color: #9499a0;
-  font-size: 12px;
-}
-
 .favorites-content {
   flex: 1;
   min-height: 0;
@@ -567,13 +529,21 @@ async function clearUsernameAndPasswordInConfig() {
   .user-exp-bar {
     flex-basis: 72px;
   }
+}
 
-  .favorites-header-title {
-    padding: 12px 14px 8px;
+/* 320~360dp：头像与资料行留给文字的空间更紧张，收一号 */
+@media (max-width: 360px) {
+  .user-profile-bar {
+    padding: 12px 10px;
+    gap: 10px;
   }
 
-  .sub-hint {
-    display: none;
+  .user-name {
+    font-size: 15px;
+  }
+
+  .user-sub {
+    font-size: 11px;
   }
 }
 </style>

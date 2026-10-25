@@ -1,6 +1,15 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.joymanga" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <!--
+          Material 的 DayNight 主题默认拿 colorPrimaryDark（紫色）涂状态栏，
+          于是在系统栏上留了一条与界面毫不相干的紫条。界面恒为浅色（见
+          MainActivity 里锁定的 MODE_NIGHT_NO），这里把状态栏改成白色并把
+          系统图标切成深色，让它与白色顶栏连成一整块。
+          windowLightStatusBar 从 API 23 起可用，低于 minSdk 24，可直接放在这里。
+        -->
+        <item name="android:statusBarColor">@android:color/white</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@android:color/white</item>
     </style>
 </resources>
