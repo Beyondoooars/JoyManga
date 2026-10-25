@@ -173,13 +173,19 @@ jobs:
           git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock README.md
           # 显式发布版本号时文件可能本来就是这个值，仍需一次提交作为 tag 的落点
           git commit --allow-empty -m "chore: 发布 v${VERSION} [skip ci]"
+          # 构建过程可能在工作区留下未暂存改动（tauri 会给 gradlew 补可执行位等），
+          # 而 git pull --rebase 要求工作区干净：拉取时必须自动暂存，否则重试一次都跑不完。
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then break; fi
             if [ "$attempt" -eq 3 ]; then
               echo "版本号提交推送失败" >&2
               exit 1
             fi
-            git pull --rebase origin main
+            if ! git -c rebase.autoStash=true pull --rebase origin main; then
+              echo "第 ${attempt} 次同步 origin/main 失败，当前工作区：" >&2
+              git status --short >&2 || true
+              exit 1
+            fi
           done
           echo "SHA=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
