@@ -300,8 +300,10 @@ onUnmounted(() => {
         <!-- Brand Logo -->
         <button class="brand-button" type="button" title="回到发现" @click="navigateToTab('search')">
           <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
-            <rect x="24.2" y="5.4" width="11.6" height="11.6" rx="2.4" transform="rotate(45 30 11.2)" fill="#00AEEC" />
-            <path d="M30 21.5 V30 A9 9 0 0 1 13 30" fill="none" stroke="#FB7299" stroke-width="10" stroke-linecap="round" />
+            <g stroke="#241C2B" stroke-width="3" stroke-linejoin="round">
+              <path d="M3.5 5.5H15C20.5228 5.5 25 9.97715 25 15.5V40.5C25 36.0817 21.4183 32.5 17 32.5H3.5V5.5Z" fill="#FB7299" />
+              <path d="M44.5 5.5H33C27.4772 5.5 23 9.97715 23 15.5V40.5C23 36.0817 26.5817 32.5 31 32.5H44.5V5.5Z" fill="#00AEEC" />
+            </g>
           </svg>
           <span class="brand-title">JoyManga</span>
         </button>

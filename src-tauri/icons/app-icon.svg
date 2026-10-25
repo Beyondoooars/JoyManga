@@ -1,0 +1,10 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- JoyManga 应用图标母版：深墨圆角底 + 展开的漫画书（左页品牌粉、右页青色、白色描边）。
+       图形源自 IconPark（ByteDance，Apache-2.0）的 Office/book-open，按品牌色重绘。
+       改完本文件执行 `pnpm gen:icons` 重新生成全套位图。 -->
+  <rect width="1024" height="1024" rx="228" fill="#241C2B"/>
+  <g transform="translate(512 512) scale(14.9333) translate(-24 -24.5)">
+    <path d="M5 7H16C20.4183 7 24 10.5817 24 15V42C24 38.6863 21.3137 36 18 36H5V7Z" fill="#FB7299" stroke="#FFFFFF" stroke-width="3.4" stroke-linejoin="round"/>
+    <path d="M43 7H32C27.5817 7 24 10.5817 24 15V42C24 38.6863 26.6863 36 30 36H43V7Z" fill="#00AEEC" stroke="#FFFFFF" stroke-width="3.4" stroke-linejoin="round"/>
+  </g>
+</svg>
