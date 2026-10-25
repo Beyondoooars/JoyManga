@@ -183,6 +183,9 @@ pub fn run() {
             crash::set_dir(config_storage.logs_dir());
             // 封面缩略图缓存放在配置目录下，随应用数据一起管理
             cover_cache::set_dir(Some(config_storage.base_dir().join(".covers")));
+            // 页面尺寸缓存同目录策略：导入/旧版书库的解析结果按归档指纹缓存，
+            // 避免每次打开章节都重读一遍文件头
+            page_size::sizes_cache::set_dir(Some(config_storage.base_dir().join(".page-sizes")));
             crate::state_transactions::recover(config_storage.config_path());
             // 提交替换 CBZ 前释放阅读器读句柄（持有替换锁后执行，见 atomic_fs）
             crate::commands::reader_commands::install_commit_hook();

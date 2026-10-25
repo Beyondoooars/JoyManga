@@ -361,6 +361,9 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
             zip_writer
                 .write_all(comic_info_xml.as_bytes())
                 .context("写入`ComicInfo.xml`失败")?;
+            let source_pages = crate::page_size::read_pages_entry(&mut archive);
+            let mut page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
+                std::collections::BTreeMap::new();
             for (page_idx, entry_name) in img_names.iter().enumerate() {
                 let extension = Path::new(entry_name)
                     .extension()
@@ -368,6 +371,14 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
                     .unwrap_or("jpg")
                     .to_lowercase();
                 let target_name = format!("{:04}.{extension}", page_idx + 1);
+                // 整本源归档里的尺寸表键是原条目名，导出后条目改名，表也要跟着改
+                let size = match source_pages.get(entry_name) {
+                    Some(size) => Some(*size),
+                    None => crate::page_size::size_from_archive(&mut archive, entry_name),
+                };
+                if let Some(size) = size {
+                    page_sizes.insert(target_name.clone(), size);
+                }
                 let mut entry = archive
                     .by_name(entry_name)
                     .context(format!("读取原章节图片`{entry_name}`失败"))?;
@@ -379,6 +390,8 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
                 std::io::copy(&mut entry, &mut zip_writer)
                     .context(format!("将图片写入分部CBZ条目`{target_name}`失败"))?;
             }
+            crate::page_size::write_pages_entry(&mut zip_writer, page_sizes)
+                .context("在分部CBZ写入`pages.json`失败")?;
             let zip_file = zip_writer.finish().context(format!(
                 "章节`{chapter_title}`关闭`{}`失败",
                 temp_path.display()
@@ -429,6 +442,8 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
         zip_writer
             .write_all(comic_info_xml.as_bytes())
             .context(format!("章节`{chapter_title}`写入`ComicInfo.xml`失败"))?;
+        let mut page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
+            std::collections::BTreeMap::new();
         for image_path in image_paths {
             let filename = match image_path.file_name() {
                 Some(name) => name.to_string_lossy(),
@@ -436,20 +451,26 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
             };
             // 将文件写入cbz
             crate::zip_limits::ensure_entry_size(&image_path)?;
+            let mut file = std::fs::File::open(&image_path)
+                .context(format!("打开`{}`失败", image_path.display()))?;
+            // 同 package.rs：同一句柄先读文件头记尺寸，复位后整文件复制
+            if let Some(size) = crate::page_size::size_from_opened_file(&mut file) {
+                page_sizes.insert(filename.to_string(), size);
+            }
             zip_writer
                 .start_file(&filename, crate::zip_limits::image_entry_options())
                 .context(format!(
                     "章节`{chapter_title}`在`{}`创建`{filename}`失败",
                     save_path.display()
                 ))?;
-            let mut file = std::fs::File::open(&image_path)
-                .context(format!("打开`{}`失败", image_path.display()))?;
             std::io::copy(&mut file, &mut zip_writer).context(format!(
                 "章节`{chapter_title}`将`{}`写入`{}`失败",
                 image_path.display(),
                 save_path.display()
             ))?;
         }
+        crate::page_size::write_pages_entry(&mut zip_writer, page_sizes)
+            .context("在分部CBZ写入`pages.json`失败")?;
 
         let zip_file = zip_writer.finish().context(format!(
             "章节`{chapter_title}`关闭`{}`失败",
@@ -618,6 +639,11 @@ pub(crate) fn write_merged_cbz_archive(
     // 逐话搬运 pages.json，避免合并后阅读器又要为整本书重读一遍文件头
     let mut merged_page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
         std::collections::BTreeMap::new();
+    // 再合并时多个话指向同一个整本源归档：pages.json 只解压解析一次
+    let mut source_pages_cache: std::collections::HashMap<
+        std::path::PathBuf,
+        std::collections::BTreeMap<String, crate::types::PageSize>,
+    > = std::collections::HashMap::new();
 
     for (chapter_idx, chapter_info) in downloaded_chapter_infos.iter().enumerate() {
         let chapter_download_dir = chapter_info.chapter_download_dir.as_ref().context(format!(
@@ -673,8 +699,16 @@ pub(crate) fn write_merged_cbz_archive(
             img_names.sort_by(|a, b| utils::natural_cmp(a, b));
             total_pages += i64::try_from(img_names.len()).unwrap_or(0);
 
-            // 来源归档自带的尺寸表：改名后照搬，省掉合并后的重读
-            let source_pages = crate::page_size::read_pages_entry(&mut archive);
+            // 来源归档自带的尺寸表：改名后照搬，省掉合并后的重读。
+            // 再合并时同一源归档只解压解析一次；来源没有该页的尺寸时现读文件头
+            // （归档已在手上），旧版书库/导入源合并后也能带上完整尺寸表。
+            let source_pages = match source_pages_cache.entry(chapter_download_dir.to_path_buf()) {
+                std::collections::hash_map::Entry::Occupied(occupied) => occupied.get().clone(),
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    let pages = crate::page_size::read_pages_entry(&mut archive);
+                    vacant.insert(pages).clone()
+                }
+            };
             for (page_idx, entry_name) in img_names.iter().enumerate() {
                 let ext = Path::new(entry_name)
                     .extension()
@@ -686,8 +720,12 @@ pub(crate) fn write_merged_cbz_archive(
                 } else {
                     format!("{chapter_dir_name}/{:04}.{ext}", page_idx + 1)
                 };
-                if let Some(size) = source_pages.get(entry_name) {
-                    merged_page_sizes.insert(target_entry_name.clone(), *size);
+                let size = match source_pages.get(entry_name) {
+                    Some(size) => Some(*size),
+                    None => crate::page_size::size_from_archive(&mut archive, entry_name),
+                };
+                if let Some(size) = size {
+                    merged_page_sizes.insert(target_entry_name.clone(), size);
                 }
 
                 let mut entry = archive
@@ -717,14 +755,15 @@ pub(crate) fn write_merged_cbz_archive(
                 };
 
                 crate::zip_limits::ensure_entry_size(&img_path)?;
-                if let Some(size) = crate::page_size::size_from_path(&img_path) {
+                let mut file = std::fs::File::open(&img_path)
+                    .context(format!("打开图片`{}`失败", img_path.display()))?;
+                // 同 package.rs：同一句柄先读文件头记尺寸，复位后整文件复制
+                if let Some(size) = crate::page_size::size_from_opened_file(&mut file) {
                     merged_page_sizes.insert(target_entry_name.clone(), size);
                 }
                 zip_writer
                     .start_file(&target_entry_name, crate::zip_limits::image_entry_options())
                     .context(format!("在合并CBZ创建条目`{target_entry_name}`失败"))?;
-                let mut file = std::fs::File::open(&img_path)
-                    .context(format!("打开图片`{}`失败", img_path.display()))?;
                 std::io::copy(&mut file, &mut zip_writer)
                     .context(format!("将图片写入合并CBZ条目`{target_entry_name}`失败"))?;
             }
@@ -733,7 +772,7 @@ pub(crate) fn write_merged_cbz_archive(
         on_progress((chapter_idx + 1) as u32);
     }
 
-    crate::page_size::write_pages_entry(&mut zip_writer, &merged_page_sizes)
+    crate::page_size::write_pages_entry(&mut zip_writer, merged_page_sizes)
         .context("在合并CBZ写入`pages.json`失败")?;
 
     // 图片写完后才能确定总页数：在归档尾部补写 ComicInfo.xml（阅读器按名称查找，位置无关）。
@@ -871,57 +910,63 @@ mod tests {
             bytes
         };
 
-        let chapter_cbz = test_dir.join("ch1.cbz");
-        {
-            let mut zip = ZipWriter::new(std::fs::File::create(&chapter_cbz).unwrap());
+        // 两话才有 `[NN] 标题/` 前缀，单话平铺时改名与不改名是同一个键，测不出问题
+        let write_chapter = |file_name: &str, chapter_id: i64, width: u32, height: u32| {
+            let path = test_dir.join(file_name);
+            let mut zip = ZipWriter::new(std::fs::File::create(&path).unwrap());
             let mut pages = std::collections::BTreeMap::new();
             pages.insert(
                 "0001.png".to_string(),
-                crate::types::PageSize {
-                    width: 600,
-                    height: 900,
-                },
+                crate::types::PageSize { width, height },
             );
-            crate::page_size::write_pages_entry(&mut zip, &pages).unwrap();
+            crate::page_size::write_pages_entry(&mut zip, pages).unwrap();
             zip.start_file("0001.png", SimpleFileOptions::default())
                 .unwrap();
-            zip.write_all(&png(600, 900)).unwrap();
+            zip.write_all(&png(width, height)).unwrap();
             zip.finish().unwrap();
-        }
-
-        let chapter = ChapterInfo {
-            chapter_id: 201,
-            chapter_title: "第1话".to_string(),
-            order: 1,
-            is_downloaded: Some(true),
-            chapter_download_dir: Some(chapter_cbz.clone()),
+            ChapterInfo {
+                chapter_id,
+                chapter_title: format!("第{chapter_id}话"),
+                order: chapter_id,
+                is_downloaded: Some(true),
+                chapter_download_dir: Some(path),
+            }
         };
+        let ch1 = write_chapter("ch1.cbz", 1, 600, 900);
+        let ch2 = write_chapter("ch2.cbz", 2, 800, 1200);
+
         let comic = Comic {
             id: 999,
             name: "尺寸书".to_string(),
-            chapter_infos: vec![chapter.clone()],
+            chapter_infos: vec![ch1.clone(), ch2.clone()],
             ..Comic::default()
         };
         let save_path = test_dir.join("尺寸书.cbz");
-        super::write_merged_cbz_archive(&comic, &[&chapter], &save_path, |_| {}).unwrap();
+        super::write_merged_cbz_archive(&comic, &[&ch1, &ch2], &save_path, |_| {}).unwrap();
 
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&save_path).unwrap()).unwrap();
         let entry_names: Vec<String> = (0..archive.len())
             .map(|i| archive.by_index(i).unwrap().name().to_string())
             .collect();
-        // 单话合并时条目平铺，不带 `[NN] ` 前缀
         assert!(
-            entry_names.contains(&"0001.png".to_string()),
+            entry_names.contains(&"[01] 第1话/0001.png".to_string()),
             "{entry_names:?}"
         );
         assert!(entry_names.contains(&crate::page_size::PAGES_ENTRY.to_string()));
 
         let cached = crate::page_size::read_pages_entry(&mut archive);
-        assert_eq!(cached.get("0001.png").map(|size| size.width), Some(600));
-        // 键必须与归档里的条目名完全一致，阅读器才能命中
-        assert!(entry_names.iter().all(|name| !cached.contains_key(name)
-            || *name == "0001.png"
-            || name == crate::page_size::PAGES_ENTRY));
+        // 键必须跟着改名，否则阅读器一个都命中不了
+        assert_eq!(
+            cached.get("[01] 第1话/0001.png").map(|size| size.width),
+            Some(600)
+        );
+        assert_eq!(
+            cached.get("[02] 第2话/0001.png").map(|size| size.height),
+            Some(1200)
+        );
+        // 源归档里的旧键（`0001.png`）不能留在合并结果里：它不对应任何条目，
+        // 还会在两张表合并时盖掉真正的键
+        assert!(!cached.contains_key("0001.png"));
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }

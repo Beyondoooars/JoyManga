@@ -116,9 +116,12 @@ pub fn clear_cache(app: AppHandle) -> CommandResult<()> {
     let storage = app.state::<ConfigStorage>();
     let cache_dir = storage.webview_data_dir();
     clear_webview_caches(cache_dir).map_err(|err| CommandError::from("清理缓存失败", err))?;
-    // 封面缩略图是可重建的派生数据，一并清掉；下次扫描会按需重新生成
+    // 封面缩略图与页面尺寸缓存都是可重建的派生数据，一并清掉；下次扫描/阅读会按需重新生成
     if let Some(cover_dir) = crate::cover_cache::dir() {
         let _ = std::fs::remove_dir_all(&cover_dir);
+    }
+    if let Some(sizes_dir) = crate::page_size::sizes_cache::dir() {
+        let _ = std::fs::remove_dir_all(&sizes_dir);
     }
     if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
         cache.invalidate();
