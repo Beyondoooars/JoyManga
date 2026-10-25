@@ -3,7 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob:; connect-src 'self' ws:;" />
+    <!-- https: 与 http://jmimg.localhost 仅为让封面/书页请求进入 tests/mock-sw.js 由本地生成，不会真正联网 -->
+    <meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob: https: http://jmimg.localhost; connect-src 'self' ws:;" />
     <title>下载器界面测试（模拟数据）</title>
   </head>
   <body>

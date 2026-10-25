@@ -15,6 +15,7 @@ import {
   PhClock,
   PhWarningCircle,
   PhTray,
+  PhArrowClockwise,
 } from '@phosphor-icons/vue'
 
 import { useDropdown } from '../../../composables/useDropdown.ts'
@@ -340,128 +341,88 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
   }
 }
 
-function stateToColorClass(state: DownloadTaskState) {
-  if (state === 'Downloading') {
-    return 'text-blue-500'
-  } else if (state === 'Pending') {
-    return 'text-gray-500'
-  } else if (state === 'Paused') {
-    return 'text-yellow-500'
-  } else if (state === 'Failed') {
-    return 'text-red-500'
-  } else if (state === 'Completed') {
-    return 'text-green-500'
-  } else if (state === 'Cancelled') {
-    return 'text-stone-500'
-  }
-
-  return ''
-}
 </script>
 
 <template>
   <SelectionArea
     ref="selectionAreaRef"
-    class="h-full flex flex-col selection-container px-2"
+    class="selection-container"
     :options="{ selectables: '.selectable', features: { deselectOnBlur: true } }"
     @contextmenu="showDropdown"
     @move="updateSelectedIds"
     @start="unselectAll">
-    <div v-if="uncompletedProgresses.length === 0" class="progress-empty">
-      <div><PhTray :size="27" weight="duotone" /></div>
+    <div v-if="uncompletedProgresses.length === 0" class="jm-empty transfer-empty">
+      <div class="jm-empty-icon is-muted"><PhTray :size="28" weight="duotone" /></div>
       <strong>队列空空如也</strong>
-      <span>从左侧选择漫画章节开始下载</span>
+      <p>在漫画详情页勾选章节，就会出现在这里。</p>
     </div>
-    <div v-else class="flex flex-col gap-1 mb-2">
-      <div class="flex items-center gap-1.5 flex-wrap">
-        <n-button
-          v-if="hasActiveTasks"
-          size="tiny"
-          secondary
-          type="warning"
-          :disabled="batchOperating"
-          @click="pauseAll">
+
+    <template v-else>
+      <div class="transfer-toolbar">
+        <button v-if="hasActiveTasks" type="button" class="batch-btn" :disabled="batchOperating" @click="pauseAll">
+          <PhPause :size="13" weight="bold" />
           全部暂停
-        </n-button>
-        <n-button
-          v-if="hasPausedTasks"
-          size="tiny"
-          secondary
-          type="primary"
-          :disabled="batchOperating"
-          @click="resumeAll">
+        </button>
+        <button v-if="hasPausedTasks" type="button" class="batch-btn is-accent" :disabled="batchOperating" @click="resumeAll">
+          <PhCaretRight :size="13" weight="bold" />
           全部继续
-        </n-button>
-        <n-button
-          v-if="hasFailedTasks"
-          size="tiny"
-          secondary
-          type="error"
-          :disabled="batchOperating"
-          @click="retryAllFailed">
+        </button>
+        <button v-if="hasFailedTasks" type="button" class="batch-btn is-danger" :disabled="batchOperating" @click="retryAllFailed">
+          <PhArrowClockwise :size="13" weight="bold" />
           重试失败
-        </n-button>
-        <n-button
-          size="tiny"
-          secondary
-          :disabled="batchOperating"
-          class="ml-auto"
-          @click="cancelAll">
-          全部取消
-        </n-button>
+        </button>
+        <button type="button" class="batch-btn is-neutral" :disabled="batchOperating" @click="cancelAll">全部取消</button>
+        <span class="transfer-hint">拖动框选 · 右键操作 · 双击暂停/继续</span>
       </div>
-      <span class="progress-hint">拖动框选 · 右键操作 · 双击暂停/继续</span>
-    </div>
-    <div class="h-full select-none">
-      <div
-        v-for="[chapterId, { state, comic, chapterInfo, percentage, indicator, errorMessage }] in uncompletedProgresses"
-        :key="chapterId"
-        ref="selectableRefs"
-        :data-key="chapterId"
-        :class="[
-          'selectable p-3 mb-2 rounded-lg',
-          selectedIds.has(chapterId) ? 'selected shadow-md' : 'hover:bg-gray-1',
-        ]"
-        @dblclick="() => handleProgressDoubleClick(state, chapterId)"
-        @contextmenu="() => handleProgressContextMenu(chapterId)">
-        <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
-          <div class="text-ellipsis whitespace-nowrap overflow-hidden" :title="comic.name">
-            {{ comic.name }}
+
+      <div class="task-list">
+        <div
+          v-for="[chapterId, { state, comic, chapterInfo, percentage, indicator, errorMessage }] in uncompletedProgresses"
+          :key="chapterId"
+          ref="selectableRefs"
+          :data-key="chapterId"
+          class="selectable task-card"
+          :class="{ 'is-selected': selectedIds.has(chapterId), 'is-failed': state === 'Failed' }"
+          @dblclick="() => handleProgressDoubleClick(state, chapterId)"
+          @contextmenu="() => handleProgressContextMenu(chapterId)">
+          <div class="task-head">
+            <span class="task-state-icon" :data-state="state">
+              <PhCloudArrowDown v-if="state === 'Downloading'" :size="14" weight="bold" />
+              <PhClock v-else-if="state === 'Pending'" :size="14" weight="bold" />
+              <PhPause v-else-if="state === 'Paused'" :size="14" weight="bold" />
+              <PhWarningCircle v-else-if="state === 'Failed'" :size="14" weight="bold" />
+            </span>
+            <div class="task-titles">
+              <strong :title="comic.name">{{ comic.name }}</strong>
+              <span :title="chapterInfo.chapterTitle">{{ chapterInfo.chapterTitle }}</span>
+            </div>
+            <span class="task-indicator">{{ indicator }}</span>
           </div>
-          <div class="text-ellipsis whitespace-nowrap overflow-hidden" :title="chapterInfo.chapterTitle">
-            {{ chapterInfo.chapterTitle }}
-          </div>
-        </div>
-        <div class="flex">
-          <n-icon :class="[stateToColorClass(state), 'mr-2']" :size="20">
-            <PhCloudArrowDown v-if="state === 'Downloading'" />
-            <PhClock v-else-if="state === 'Pending'" />
-            <PhPause v-else-if="state === 'Paused'" />
-            <PhWarningCircle v-else-if="state === 'Failed'" />
-          </n-icon>
-          <div v-if="isNaN(percentage)" class="ml-auto">{{ indicator }}</div>
+
           <n-progress
-            v-else
-            :class="stateToColorClass(state)"
+            v-if="!isNaN(percentage)"
+            class="task-progress"
             :status="stateToStatus(state)"
             :percentage="percentage"
-            :processing="state === 'Downloading'">
-            {{ indicator }}
-          </n-progress>
-        </div>
-        <div v-if="state === 'Failed'" class="task-error" @dblclick.stop @mousedown.stop>
-          <div role="status">{{ errorMessage || '下载失败，请重试或查看日志' }}</div>
-          <div class="flex gap-2 mt-2">
-            <n-button size="tiny" :loading="pendingActions.has(chapterId)" @click.stop="handleProgressDoubleClick(state, chapterId)">
-              重试 / 补全
-            </n-button>
-            <n-button size="tiny" :disabled="pendingActions.has(chapterId)" @click.stop="removeFailedTask(chapterId)">
-              移除任务
-            </n-button>
+            :processing="state === 'Downloading'"
+            :show-indicator="false"
+            :height="4" />
+
+          <div v-if="state === 'Failed'" class="task-error" @dblclick.stop @mousedown.stop>
+            <div role="status">{{ errorMessage || '下载失败，请重试或查看日志' }}</div>
+            <div class="task-error-actions">
+              <button type="button" class="tiny-btn" :disabled="pendingActions.has(chapterId)" @click.stop="handleProgressDoubleClick(state, chapterId)">
+                {{ pendingActions.has(chapterId) ? '正在重试…' : '重试 / 补全' }}
+              </button>
+              <button type="button" class="tiny-btn is-ghost" :disabled="pendingActions.has(chapterId)" @click.stop="removeFailedTask(chapterId)">
+                移除任务
+              </button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </template>
+
     <n-dropdown
       placement="bottom-start"
       trigger="manual"
@@ -474,10 +435,178 @@ function stateToColorClass(state: DownloadTaskState) {
 </template>
 
 <style scoped>
+.selection-container {
+  height: 100%;
+  overflow-y: auto;
+  padding: 12px var(--jm-gutter) calc(24px + var(--safe-bottom));
+  user-select: none;
+}
+
+.transfer-empty {
+  min-height: 260px;
+}
+
+.transfer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.batch-btn {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  color: var(--jm-brand);
+  border: 1px solid rgba(251, 114, 153, 0.26);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-brand-soft);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.batch-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.batch-btn.is-accent {
+  color: var(--jm-accent);
+  border-color: rgba(0, 174, 236, 0.26);
+  background: var(--jm-accent-soft);
+}
+
+.batch-btn.is-danger {
+  color: var(--jm-danger);
+  border-color: rgba(222, 59, 59, 0.22);
+  background: var(--jm-danger-soft);
+}
+
+.batch-btn.is-neutral {
+  color: var(--jm-text-2);
+  border-color: var(--jm-line);
+  background: var(--jm-surface);
+}
+
+.transfer-hint {
+  margin-left: auto;
+  color: var(--jm-text-4);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-card {
+  padding: 11px 12px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-md);
+  background: var(--jm-surface);
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+
+.task-card.is-selected {
+  border-color: var(--jm-brand);
+  background: var(--jm-brand-soft);
+}
+
+.task-card.is-failed {
+  border-color: rgba(222, 59, 59, 0.24);
+}
+
+.task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-state-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--jm-r-sm);
+}
+
+.task-state-icon[data-state='Downloading'] {
+  color: var(--jm-accent);
+  background: var(--jm-accent-soft);
+}
+
+.task-state-icon[data-state='Pending'] {
+  color: var(--jm-text-3);
+  background: var(--jm-sunken);
+}
+
+.task-state-icon[data-state='Paused'] {
+  color: var(--jm-warning);
+  background: var(--jm-warning-soft);
+}
+
+.task-state-icon[data-state='Failed'] {
+  color: var(--jm-danger);
+  background: var(--jm-danger-soft);
+}
+
+.task-titles {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.task-titles strong {
+  overflow: hidden;
+  color: var(--jm-text);
+  font-size: 12.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-titles span {
+  overflow: hidden;
+  color: var(--jm-text-3);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-indicator {
+  flex: 0 0 auto;
+  color: var(--jm-text-3);
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-progress {
+  margin-top: 9px;
+}
+
+.task-progress :deep(.n-progress-graph-line) {
+  border-radius: var(--jm-r-pill);
+}
+
 .task-error {
-  margin-top: 8px;
-  color: #b42318;
-  font-size: 12px;
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px dashed rgba(222, 59, 59, 0.2);
+  color: var(--jm-danger);
+  font-size: var(--jm-fs-xs);
   user-select: text;
 }
 
@@ -488,57 +617,37 @@ function stateToColorClass(state: DownloadTaskState) {
   white-space: pre-wrap;
 }
 
-.selection-container {
-  @apply select-none overflow-auto;
-}
-
-.selection-container .selected {
-  background-color: rgba(251, 114, 153, 0.12) !important;
-  border-color: #fb7299 !important;
-}
-
-.progress-empty {
+.task-error-actions {
   display: flex;
-  min-height: 230px;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: #8b877f;
-  text-align: center;
+  gap: 7px;
+  margin-top: 8px;
 }
 
-.progress-empty div {
-  display: grid;
-  width: 58px;
-  height: 58px;
-  margin-bottom: 14px;
-  color: #fb7299;
-  place-items: center;
-  border-radius: 17px;
-  background: rgba(251, 114, 153, 0.1);
+.tiny-btn {
+  height: 30px;
+  padding: 0 12px;
+  color: var(--jm-danger);
+  border: 1px solid rgba(222, 59, 59, 0.24);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-surface);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
 }
 
-.progress-empty strong {
-  color: #4d4a45;
-  font-size: 13px;
+.tiny-btn.is-ghost {
+  color: var(--jm-text-2);
+  border-color: var(--jm-line);
 }
 
-.progress-empty span,
-.progress-hint {
-  margin-top: 5px;
-  color: #aaa59d;
-  font-size: 9px;
-}
-
-.progress-hint {
-  display: block;
-  margin: 2px 0 8px auto;
-  padding: 0 3px;
+.tiny-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 :global(.selection-area) {
-  background-color: rgba(251, 114, 153, 0.18) !important;
-  border: 1px solid #fb7299 !important;
+  background-color: rgba(251, 114, 153, 0.14) !important;
+  border: 1px solid var(--jm-brand) !important;
+  border-radius: 2px;
 }
 </style>

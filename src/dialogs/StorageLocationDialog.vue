@@ -177,7 +177,7 @@ async function createFolder() {
             <template #icon><PhFolderPlus :size="16" aria-hidden="true" /></template>
             新建文件夹
           </n-button>
-          <n-button type="primary" color="#b73963" text-color="#ffffff" :loading="selecting" :disabled="loading" @click="chooseCurrent">选择此目录</n-button>
+          <n-button type="primary" :loading="selecting" :disabled="loading" @click="chooseCurrent">选择此目录</n-button>
         </div>
       </footer>
     </section>
@@ -185,30 +185,30 @@ async function createFolder() {
 </template>
 
 <style scoped>
-.storage-shell { --storage-text: var(--text-primary, #18191c); --storage-muted: #5e6672; --storage-border: var(--border-color, #e3e5e7); width: min(560px, calc(100vw - 40px)); height: min(640px, calc(100vh - 48px)); height: min(640px, calc(100dvh - 48px)); min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--storage-text); background: var(--bg-card, #fff); border: 1px solid var(--storage-border); border-radius: var(--radius-panel); box-shadow: 0 16px 56px rgb(0 0 0 / 16%); }
-.storage-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid var(--storage-border); }
+.storage-shell { width: min(560px, calc(100vw - 40px)); height: min(640px, calc(100vh - 48px)); height: min(640px, calc(100dvh - 48px)); min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--jm-text); background: var(--jm-surface); border: 1px solid var(--jm-line); border-radius: var(--jm-r-xl); box-shadow: 0 16px 56px rgb(23 24 28 / 16%); }
+.storage-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 16px 24px; border-bottom: 1px solid var(--jm-line); }
 .storage-header h2 { margin: 0; font-size: 20px; font-weight: 650; }
-.storage-close { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--storage-muted); cursor: pointer; }
-.storage-close:hover { background: var(--bg-subtle); color: var(--storage-text); }
-.storage-close:focus-visible { outline: 2px solid var(--bili-pink-active); outline-offset: -2px; }
+.storage-close { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--jm-text-2); cursor: pointer; }
+.storage-close:hover { background: var(--jm-sunken); color: var(--jm-text); }
+.storage-close:focus-visible { outline: 2px solid var(--jm-brand); outline-offset: -2px; }
 .storage-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; scrollbar-gutter: stable; padding: 16px 24px; }
 .storage-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.storage-back { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 40px; padding: 0 14px; border: 1px solid var(--storage-border); border-radius: 10px; background: transparent; color: var(--storage-text); cursor: pointer; font-size: 14px; font-weight: 550; }
-.storage-back:disabled { color: var(--storage-muted); opacity: 0.5; cursor: default; }
-.storage-back:not(:disabled):hover { background: var(--bg-subtle); }
-.storage-back:focus-visible { outline: 2px solid var(--bili-pink-active); outline-offset: -2px; }
-.storage-path { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--storage-muted); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.storage-back { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 40px; padding: 0 14px; border: 1px solid var(--jm-line); border-radius: 10px; background: transparent; color: var(--jm-text); cursor: pointer; font-size: 14px; font-weight: 550; }
+.storage-back:disabled { color: var(--jm-text-3); opacity: 0.5; cursor: default; }
+.storage-back:not(:disabled):hover { background: var(--jm-sunken); }
+.storage-back:focus-visible { outline: 2px solid var(--jm-brand); outline-offset: -2px; }
+.storage-path { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--jm-text-2); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .storage-jump { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 16px; }
 .storage-jump :deep(.n-input) { min-height: 42px; }
 .storage-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.storage-entry { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: var(--storage-text); cursor: pointer; font-size: 14px; text-align: left; }
+.storage-entry { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: var(--jm-text); cursor: pointer; font-size: 14px; text-align: left; }
 .storage-entry span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.storage-entry svg { flex: 0 0 auto; color: var(--bili-pink-active); }
-.storage-entry:not(:disabled):hover { background: var(--bg-subtle); }
+.storage-entry svg { flex: 0 0 auto; color: var(--jm-brand); }
+.storage-entry:not(:disabled):hover { background: var(--jm-sunken); }
 .storage-entry:disabled { cursor: default; }
-.storage-entry:focus-visible { outline: 2px solid var(--bili-pink-active); outline-offset: -2px; }
-.storage-empty { margin: 8px 0; color: var(--storage-muted); font-size: 14px; }
-.storage-footer { flex: 0 0 auto; display: grid; gap: 12px; padding: 16px 24px; border-top: 1px solid var(--storage-border); background: var(--bg-card); }
+.storage-entry:focus-visible { outline: 2px solid var(--jm-brand); outline-offset: -2px; }
+.storage-empty { margin: 8px 0; color: var(--jm-text-2); font-size: 14px; }
+.storage-footer { flex: 0 0 auto; display: grid; gap: 12px; padding: 16px 24px; border-top: 1px solid var(--jm-line); background: var(--jm-surface); }
 .storage-create { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
 .storage-create :deep(.n-input) { min-height: 42px; }
 .storage-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }

@@ -4,6 +4,7 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { formatCommandError } from '../../../utils/errors.ts'
 import { commands, events, UpdateDownloadedComicsEvent } from '../../../bindings.ts'
 import { getErrorMessage } from '../../../utils/errors.ts'
+import { PhArrowClockwise } from '@phosphor-icons/vue'
 
 const message = useMessage()
 
@@ -109,12 +110,31 @@ async function run() {
 </script>
 
 <template>
-  <n-button size="small" :loading="running" :disabled="running" @click="run">更新书库</n-button>
+  <button type="button" class="update-library" :disabled="running" title="检查已下载漫画的新章节" @click="run">
+    <PhArrowClockwise :size="14" weight="bold" :class="{ 'jm-spin': running }" />
+    {{ running ? '正在检查…' : '更新书库' }}
+  </button>
 </template>
 
 <style scoped>
-.update-library-button {
-  height: 36px;
-  padding-inline: 11px;
+.update-library {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px;
+  color: var(--jm-text-2);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-surface);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.update-library:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 </style>

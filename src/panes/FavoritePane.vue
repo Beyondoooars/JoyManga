@@ -1,23 +1,19 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { commands, FavoriteSort } from '../bindings.ts'
+import { commands, type FavoriteSort } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
-import { SelectProps } from 'naive-ui'
 import { useStore } from '../store.ts'
 import DownloadAllFavoriteButton from '../components/DownloadAllFavoriteButton.vue'
-import { PhHeart, PhSignIn, PhWarningCircle } from '@phosphor-icons/vue'
+import { PhArrowsClockwise, PhFolderSimple, PhHeart, PhSignIn, PhWarningCircle } from '@phosphor-icons/vue'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
 
 const store = useStore()
-
 const message = useMessage()
 
-const emit = defineEmits<{
-  (e: 'open-login'): void
-}>()
+const emit = defineEmits<{ (e: 'open-login'): void }>()
 
-const sortOptions: SelectProps['options'] = [
+const sortOptions: Array<{ label: string; value: FavoriteSort }> = [
   { label: '收藏时间', value: 'FavoriteTime' },
   { label: '更新时间', value: 'UpdateTime' },
 ]
@@ -27,23 +23,25 @@ const pageSelected = ref<number>(1)
 const folderIdSelected = ref<number>(0)
 const loading = ref(false)
 const errorMessage = ref('')
+const folderMenuOpen = ref(false)
 let favoriteRequestGeneration = 0
 
-const favoritePageCount = computed(() => {
-  if (store.getFavoriteResult === undefined) {
-    return 0
-  }
-  const total = store.getFavoriteResult.total
-  const pageSize = store.getFavoriteResult.count
-  return pageSize > 0 ? Math.ceil(total / pageSize) : 0
-})
-const folderOptions = computed<SelectProps['options']>(() => [
-  { label: '全部', value: 0 },
-  ...(store.getFavoriteResult?.folderList || [])
+const folders = computed(() =>
+  (store.getFavoriteResult?.folderList || [])
     // FID 可能是空串或非数字：parseInt 会得到 NaN，经 IPC 序列化为 null 让整个请求失败
     .map((folder) => ({ label: folder.name, value: Number.parseInt(folder.FID, 10) }))
     .filter((folder) => Number.isSafeInteger(folder.value)),
-])
+)
+
+const activeFolderLabel = computed(
+  () => folders.value.find((folder) => folder.value === folderIdSelected.value)?.label ?? '全部收藏',
+)
+
+const favoritePageCount = computed(() => {
+  if (store.getFavoriteResult === undefined) return 0
+  const { total, count } = store.getFavoriteResult
+  return count > 0 ? Math.ceil(total / count) : 0
+})
 
 watch(
   () => [store.userProfile?.uid, store.sessionEpoch] as const,
@@ -75,8 +73,7 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort) 
     if (generation !== favoriteRequestGeneration || store.userProfile?.uid !== uid || epoch !== store.sessionEpoch) return
     if (result.status === 'error') {
       console.error(result.error)
-      const errText = result.error.err_message || result.error.err_title
-      errorMessage.value = errText
+      errorMessage.value = result.error.err_message || result.error.err_title
       message.error(formatCommandError(result.error))
       return
     }
@@ -90,9 +87,8 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort) 
   } catch (error) {
     if (generation === favoriteRequestGeneration && store.userProfile?.uid === uid) {
       console.error(error)
-      const errText = getErrorMessage(error)
-      errorMessage.value = errText
-      message.error(`获取收藏夹失败：${errText}`)
+      errorMessage.value = getErrorMessage(error)
+      message.error(`获取收藏夹失败：${errorMessage.value}`)
     }
   } finally {
     if (generation === favoriteRequestGeneration) {
@@ -124,188 +120,389 @@ async function syncFavoriteFolder() {
     syncing.value = false
   }
 }
+
+function pickFolder(folderId: number) {
+  folderMenuOpen.value = false
+  if (folderId === folderIdSelected.value) return
+  void getFavourite(folderId, 1, sortSelected.value)
+}
 </script>
 
 <template>
-  <div class="favorite-pane">
-    <div v-if="store.userProfile === undefined" class="favorite-empty">
-      <div class="empty-icon"><PhHeart :size="31" weight="duotone" /></div>
-      <h2>登录后查看收藏</h2>
-      <p>登录后自动同步你的收藏夹。</p>
-      <n-button type="primary" size="small" class="login-prompt-btn" @click="emit('open-login')">
-        立即登录
-      </n-button>
-      <span>
-        <PhSignIn :size="15" />
-        账号信息只保存在本机
-      </span>
+  <div class="favorite-page">
+    <!-- 未登录 -->
+    <div v-if="store.userProfile === undefined" class="jm-empty favorite-guest">
+      <div class="jm-empty-icon"><PhHeart :size="29" weight="duotone" /></div>
+      <strong>登录后查看收藏</strong>
+      <p>登录即可同步你在 JM 的收藏夹，收藏状态会自动保持同步。</p>
+      <div class="jm-empty-actions">
+        <button type="button" class="jm-btn is-primary" @click="emit('open-login')">
+          <PhSignIn :size="17" weight="bold" />
+          立即登录
+        </button>
+      </div>
+      <span class="guest-note">账号信息只保存在本机</span>
     </div>
 
     <template v-else>
-      <div v-if="store.getFavoriteResult !== undefined" class="favorite-toolbar">
-        <n-select
-          :value="folderIdSelected"
-          :options="folderOptions"
-          :show-checkmark="false"
-          :loading="loading"
-          size="small"
-          @update-value="getFavourite($event, 1, sortSelected)" />
-        <n-select
-          :value="sortSelected"
-          :options="sortOptions"
-          :show-checkmark="false"
-          :loading="loading"
-          size="small"
-          @update-value="getFavourite(folderIdSelected, 1, $event)" />
-        <download-all-favorite-button :folder-id="folderIdSelected" />
+      <!-- 工具栏：收藏夹 + 排序 + 同步 -->
+      <div class="favorite-toolbar">
+        <button
+          type="button"
+          class="folder-trigger"
+          :aria-expanded="folderMenuOpen"
+          :aria-label="`收藏夹：${activeFolderLabel}`"
+          @click="folderMenuOpen = !folderMenuOpen">
+          <PhFolderSimple :size="17" weight="duotone" />
+          <span class="jm-truncate">{{ activeFolderLabel }}</span>
+          <span v-if="folders.length > 0" class="folder-count">{{ folders.length }}</span>
+        </button>
+        <button
+          type="button"
+          class="jm-icon-btn"
+          :disabled="loading || syncing"
+          aria-label="同步收藏夹"
+          title="同步收藏夹"
+          @click="syncFavoriteFolder">
+          <PhArrowsClockwise :size="19" :class="{ 'jm-spin': syncing }" />
+        </button>
       </div>
 
-      <div v-if="store.getFavoriteResult !== undefined" class="favorite-actions">
-        <n-button class="ml-auto" size="small" type="primary" secondary :loading="syncing" @click="syncFavoriteFolder">刷新收藏夹</n-button>
+      <div v-if="folderMenuOpen && folders.length > 0" class="folder-sheet">
+        <button
+          type="button"
+          class="folder-option"
+          :class="{ 'is-active': folderIdSelected === 0 }"
+          @click="pickFolder(0)">
+          全部收藏
+        </button>
+        <button
+          v-for="folder in folders"
+          :key="folder.value"
+          type="button"
+          class="folder-option"
+          :class="{ 'is-active': folderIdSelected === folder.value }"
+          @click="pickFolder(folder.value)">
+          {{ folder.label }}
+        </button>
       </div>
 
-      <div v-if="store.getFavoriteResult !== undefined && store.getFavoriteResult.list.length > 0" class="favorite-list">
-        <ComicCard
-          v-for="comicInFavorite in store.getFavoriteResult.list"
-          :key="comicInFavorite.id"
-          :comic-id="comicInFavorite.id"
-          :comic-favorite="true"
-          :favorite-epoch="store.favoriteResultEpoch"
-          :comic-title="comicInFavorite.name"
-          :comic-author="comicInFavorite.author"
-          :comic-category="comicInFavorite.category"
-          :comic-category-sub="comicInFavorite.categorySub"
-          :comic-downloaded="comicInFavorite.isDownloaded"
-          :comic-download-dir="comicInFavorite.comicDownloadDir" />
-      </div>
-
-      <div v-else-if="store.getFavoriteResult !== undefined && store.getFavoriteResult.list.length === 0" class="favorite-empty">
-        <div class="empty-icon"><PhHeart :size="31" weight="duotone" /></div>
-        <h2>暂无收藏漫画</h2>
-        <p>换个分类，或到 JM 添加收藏。</p>
-      </div>
-
-      <div v-else-if="errorMessage" class="favorite-empty">
-        <div class="empty-icon" style="color: #e03e2d; background: rgba(224, 62, 45, 0.1); border-color: rgba(224, 62, 45, 0.35);">
-          <PhWarningCircle :size="31" weight="duotone" />
+      <div class="favorite-actions">
+        <div class="sort-row" role="group" aria-label="排序方式">
+          <button
+            v-for="option in sortOptions"
+            :key="option.value"
+            type="button"
+            class="sort-chip"
+            :class="{ 'is-active': sortSelected === option.value }"
+            :disabled="loading"
+            @click="getFavourite(folderIdSelected, 1, option.value)">
+            {{ option.label }}
+          </button>
         </div>
-        <h2>加载收藏失败</h2>
-        <p>{{ errorMessage }}</p>
-        <div class="flex items-center gap-2">
-          <n-button type="primary" size="small" :loading="loading" @click="getFavourite(folderIdSelected, pageSelected, sortSelected)">
-            点击重试
-          </n-button>
-          <n-button v-if="errorMessage.includes('登入') || errorMessage.includes('401')" size="small" secondary @click="emit('open-login')">
-            重新登录
-          </n-button>
+        <DownloadAllFavoriteButton :folder-id="folderIdSelected" />
+      </div>
+
+      <div class="jm-scroll favorite-scroll">
+        <div v-if="store.getFavoriteResult === undefined && loading" class="cover-grid">
+          <div v-for="n in 6" :key="n" class="skeleton-card">
+            <div class="jm-skeleton skeleton-cover"></div>
+            <div class="jm-skeleton skeleton-line"></div>
+          </div>
         </div>
-      </div>
 
-      <div v-else class="favorite-loading">
-        <n-spin size="small" />
-        <span>正在同步收藏夹…</span>
-      </div>
+        <div v-else-if="errorMessage" class="jm-empty">
+          <div class="jm-empty-icon is-muted"><PhWarningCircle :size="28" weight="duotone" /></div>
+          <strong>加载收藏失败</strong>
+          <p>{{ errorMessage }}</p>
+          <div class="jm-empty-actions">
+            <button type="button" class="jm-btn" :disabled="loading" @click="getFavourite(folderIdSelected, pageSelected, sortSelected)">
+              重试
+            </button>
+            <button
+              v-if="errorMessage.includes('登入') || errorMessage.includes('401')"
+              type="button"
+              class="jm-btn is-ghost"
+              @click="emit('open-login')">
+              重新登录
+            </button>
+          </div>
+        </div>
 
-      <n-pagination
-        v-if="store.getFavoriteResult !== undefined && favoritePageCount > 1"
-        class="box-border p-2 pt-0 mt-auto"
-        :page-count="favoritePageCount"
-        :page="pageSelected"
-        @update:page="getFavourite(folderIdSelected, $event, sortSelected)" />
+        <div v-else-if="store.getFavoriteResult && store.getFavoriteResult.list.length === 0" class="jm-empty">
+          <div class="jm-empty-icon is-muted"><PhHeart :size="28" weight="duotone" /></div>
+          <strong>这里还没有收藏</strong>
+          <p>在漫画详情页点收藏，或到 JM 添加收藏后回来同步。</p>
+          <div class="jm-empty-actions">
+            <button type="button" class="jm-btn is-ghost" :loading="syncing" @click="syncFavoriteFolder">同步收藏夹</button>
+          </div>
+        </div>
+
+        <template v-else-if="store.getFavoriteResult">
+          <div class="result-head">
+            <strong>{{ activeFolderLabel }}</strong>
+            <span>{{ store.getFavoriteResult.total }} 部</span>
+          </div>
+          <div class="cover-grid">
+            <ComicCard
+              v-for="comic in store.getFavoriteResult.list"
+              :key="comic.id"
+              :comic-id="comic.id"
+              :comic-favorite="true"
+              :favorite-epoch="store.favoriteResultEpoch"
+              :comic-title="comic.name"
+              :comic-author="comic.author"
+              :comic-category="comic.category"
+              :comic-category-sub="comic.categorySub"
+              :comic-downloaded="comic.isDownloaded"
+              :comic-download-dir="comic.comicDownloadDir" />
+          </div>
+
+          <nav v-if="favoritePageCount > 1" class="pager" aria-label="收藏分页">
+            <button
+              type="button"
+              class="pager-btn"
+              :disabled="pageSelected <= 1 || loading"
+              aria-label="上一页"
+              @click="getFavourite(folderIdSelected, pageSelected - 1, sortSelected)">
+              ‹
+            </button>
+            <span class="pager-info">{{ pageSelected }} / {{ favoritePageCount }}</span>
+            <button
+              type="button"
+              class="pager-btn"
+              :disabled="pageSelected >= favoritePageCount || loading"
+              aria-label="下一页"
+              @click="getFavourite(folderIdSelected, pageSelected + 1, sortSelected)">
+              ›
+            </button>
+          </nav>
+        </template>
+      </div>
     </template>
   </div>
 </template>
 
 <style scoped>
-.favorite-pane {
+.favorite-page {
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
+  background: var(--jm-surface);
 }
 
-.favorite-empty,
-.favorite-loading {
+.favorite-guest {
+  background: var(--jm-surface);
+}
+
+.guest-note {
+  margin-top: 14px;
+  color: var(--jm-text-4);
+  font-size: var(--jm-fs-xs);
+}
+
+.favorite-toolbar {
   display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px var(--jm-gutter) 8px;
+  background: var(--jm-surface);
+}
+
+.folder-trigger {
+  display: flex;
+  height: 44px;
+  min-width: 0;
   flex: 1;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 30px;
-  text-align: center;
+  gap: 8px;
+  padding: 0 14px;
+  color: var(--jm-text);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-md);
+  background: var(--jm-surface);
+  font-size: 14px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
 }
 
-.empty-icon {
-  display: grid;
-  width: 72px;
-  height: 72px;
-  margin-bottom: 18px;
-  color: #fb7299;
-  place-items: center;
-  border: 1px solid rgba(251, 114, 153, 0.35);
-  border-radius: 50%;
-  background: rgba(251, 114, 153, 0.1);
-  box-shadow: 0 0 0 8px rgba(251, 114, 153, 0.04);
+.folder-trigger:hover {
+  border-color: var(--jm-line-strong);
 }
 
-.favorite-empty h2 {
-  margin: 0;
-  color: #18191c;
-  font-size: 17px;
-  font-weight: 600;
+.folder-trigger svg {
+  flex: 0 0 auto;
+  color: var(--jm-brand);
 }
 
-.favorite-empty p {
-  max-width: 290px;
-  margin: 8px 0 16px;
-  color: #61666d;
-  font-size: 12px;
-  line-height: 1.65;
+.folder-count {
+  margin-left: auto;
+  padding: 2px 7px;
+  color: var(--jm-text-3);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
-.favorite-empty > span {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: #9499a0;
-  font-size: 11px;
-}
-
-.login-prompt-btn {
-  margin: 4px 0 16px;
-  border-radius: 999px;
-  padding: 0 20px;
-}
-
-.favorite-toolbar,
-.favorite-actions {
+.folder-sheet {
   display: flex;
   flex: 0 0 auto;
   gap: 7px;
-  padding: 14px 14px 0;
+  padding: 0 var(--jm-gutter) 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
 
-.favorite-toolbar :deep(.n-select) {
-  min-width: 0;
+.folder-sheet::-webkit-scrollbar {
+  display: none;
+}
+
+.folder-option {
+  height: 32px;
+  flex: 0 0 auto;
+  padding: 0 13px;
+  color: var(--jm-text-2);
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.folder-option.is-active {
+  color: var(--jm-brand);
+  border-color: rgba(251, 114, 153, 0.28);
+  background: var(--jm-brand-soft);
 }
 
 .favorite-actions {
-  padding-top: 8px;
-}
-
-.favorite-list {
   display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 9px;
-  overflow: auto;
-  padding: 10px 12px 12px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--jm-gutter) 10px;
+  border-bottom: 1px solid var(--jm-line);
+  background: var(--jm-surface);
 }
 
-.favorite-loading {
-  gap: 10px;
-  color: #9499a0;
-  font-size: 12px;
+.sort-row {
+  display: flex;
+  gap: 6px;
+}
+
+.sort-chip {
+  height: 30px;
+  padding: 0 12px;
+  color: var(--jm-text-2);
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sort-chip.is-active {
+  color: var(--jm-brand);
+  border-color: rgba(251, 114, 153, 0.28);
+  background: var(--jm-brand-soft);
+}
+
+.favorite-actions > :last-child {
+  margin-left: auto;
+}
+
+.favorite-scroll {
+  background: var(--jm-bg);
+  padding-bottom: 24px;
+}
+
+.result-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px var(--jm-gutter) 0;
+}
+
+.result-head strong {
+  overflow: hidden;
+  max-width: 70%;
+  color: var(--jm-text);
+  font-size: var(--jm-fs-title);
+  font-weight: 750;
+  letter-spacing: -0.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-head span {
+  color: var(--jm-brand);
+  font-size: var(--jm-fs-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.cover-grid {
+  padding: 12px var(--jm-gutter) 8px;
+}
+
+.skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeleton-cover {
+  aspect-ratio: 3 / 4;
+  border-radius: var(--jm-r-md);
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: 4px;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 10px var(--jm-gutter) 24px;
+}
+
+.pager-btn {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  padding: 0;
+  color: var(--jm-text-2);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-surface);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pager-btn:disabled {
+  color: var(--jm-text-4);
+  cursor: default;
+}
+
+.pager-info {
+  min-width: 58px;
+  color: var(--jm-text-2);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 </style>

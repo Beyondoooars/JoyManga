@@ -1,21 +1,28 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { commands, SearchSort } from '../bindings.ts'
+import { commands, type SearchSort } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
-import FloatLabelInput from '../components/FloatLabelInput.vue'
 import WeeklyPane from './WeeklyPane.vue'
-import { PhClockCounterClockwise, PhFire, PhHashStraight, PhMagnifyingGlass, PhSparkle } from '@phosphor-icons/vue'
-import { SelectProps } from 'naive-ui'
+import ContinueReadingRow from '../components/ContinueReadingRow.vue'
+import {
+  PhArrowLeft,
+  PhArrowRight,
+  PhClockCounterClockwise,
+  PhMagnifyingGlass,
+  PhSparkle,
+  PhX,
+} from '@phosphor-icons/vue'
 import { useStore } from '../store.ts'
 import { getErrorMessage } from '../utils/errors.ts'
 
 const store = useStore()
-const activeSubTab = ref<'weekly' | 'search'>(store.searchResult !== undefined ? 'search' : 'weekly')
-
 const message = useMessage()
 
-const sortOptions: SelectProps['options'] = [
+type DiscoverView = 'weekly' | 'search'
+const view = ref<DiscoverView>(store.searchResult !== undefined ? 'search' : 'weekly')
+
+const sortOptions: Array<{ label: string; value: SearchSort }> = [
   { label: '最新', value: 'Latest' },
   { label: '最多点击', value: 'View' },
   { label: '最多图片', value: 'Picture' },
@@ -23,7 +30,7 @@ const sortOptions: SelectProps['options'] = [
 ]
 
 const searchInput = ref<string>(store.searchResult?.searchQuery ?? '')
-const searching = ref<boolean>(false)
+const searching = ref(false)
 const sortSelected = ref<SearchSort>('Latest')
 const searchPage = ref<number>(1)
 const committedKeyword = ref(store.searchResult?.searchQuery ?? '')
@@ -32,6 +39,7 @@ let searchGeneration = 0
 
 const SEARCH_HISTORY_KEY = 'joymanga_search_history'
 const searchHistory = ref<string[]>([])
+const historyOpen = ref(false)
 
 function loadHistory() {
   try {
@@ -51,8 +59,8 @@ function loadHistory() {
 function saveHistory(keyword: string) {
   const filtered = searchHistory.value.filter((k) => k !== keyword)
   filtered.unshift(keyword)
-  if (filtered.length > 15) {
-    filtered.length = 15
+  if (filtered.length > 12) {
+    filtered.length = 12
   }
   searchHistory.value = filtered
   try {
@@ -83,22 +91,15 @@ function clearHistory() {
 
 function handleHistoryClick(kw: string) {
   searchInput.value = kw
-  search(kw, 1, sortSelected.value)
+  historyOpen.value = false
+  void search(kw, 1, sortSelected.value)
 }
 
-const isInputFocused = ref(false)
 const matchingHistory = computed(() => {
   const kw = searchInput.value.trim().toLowerCase()
   if (!kw) return searchHistory.value
   return searchHistory.value.filter((h) => h.toLowerCase().includes(kw))
 })
-const showHistoryDropdown = computed(() => isInputFocused.value && matchingHistory.value.length > 0)
-
-function handleBlur() {
-  setTimeout(() => {
-    isInputFocused.value = false
-  }, 220)
-}
 
 loadHistory()
 
@@ -107,20 +108,17 @@ watch(
   (val) => {
     if (val) {
       searchInput.value = val
-      search(val, 1, sortSelected.value)
+      void search(val, 1, sortSelected.value)
       store.pendingSearchKeyword = ''
     }
   },
   { immediate: true },
 )
 
+const PAGE_SIZE = 80
 const searchPageCount = computed(() => {
-  const PAGE_SIZE = 80
-  if (store.searchResult === undefined) {
-    return 0
-  }
-  const total = store.searchResult.total
-  return Math.ceil(total / PAGE_SIZE)
+  if (store.searchResult === undefined) return 0
+  return Math.ceil(store.searchResult.total / PAGE_SIZE)
 })
 
 watch(() => store.sessionEpoch, () => {
@@ -137,7 +135,8 @@ async function search(keyword: string, page: number, sort: SearchSort) {
   }
 
   saveHistory(keyword)
-  activeSubTab.value = 'search'
+  view.value = 'search'
+  historyOpen.value = false
 
   const generation = ++searchGeneration
   const epoch = store.sessionEpoch
@@ -152,9 +151,9 @@ async function search(keyword: string, page: number, sort: SearchSort) {
       message.error(`${result.error.err_title}：${result.error.err_message}`)
       return
     }
-    const searchResultVariant = result.data
-    if ('SearchResult' in searchResultVariant) {
-      const respData = searchResultVariant.SearchResult
+    const variant = result.data
+    if ('SearchResult' in variant) {
+      const respData = variant.SearchResult
       store.searchResult = respData
       store.searchResultEpoch = epoch
       for (const comic of respData.content) store.recordFavorite(comic.id, comic.isFavorite, epoch, observedRevision)
@@ -164,11 +163,9 @@ async function search(keyword: string, page: number, sort: SearchSort) {
       sortSelected.value = sort
       if (respData.content.length === 0) {
         message.warning('没有找到结果，换个关键词试试')
-        return
       }
-    } else if ('Comic' in searchResultVariant) {
-      const comic = searchResultVariant.Comic
-      store.showComic(comic, true)
+    } else if ('Comic' in variant) {
+      store.showComic(variant.Comic, true)
     }
   } catch (error) {
     if (generation === searchGeneration) {
@@ -181,430 +178,527 @@ async function search(keyword: string, page: number, sort: SearchSort) {
     }
   }
 }
+
+function clearSearch() {
+  searchGeneration++
+  searching.value = false
+  searchInput.value = ''
+  store.searchResult = undefined
+  committedKeyword.value = ''
+  view.value = 'weekly'
+}
+
+function changeSort(sort: SearchSort) {
+  sortSelected.value = sort
+  if (committedKeyword.value) void search(committedKeyword.value, 1, sort)
+}
 </script>
 
 <template>
-  <div class="search-pane">
-    <div class="search-toolbar">
-      <div class="search-controls">
-        <div class="search-input-wrapper relative flex-1 min-w-0">
-          <FloatLabelInput
-            class="search-query w-full"
-            label="搜索关键词或 JM 号"
-            size="small"
-            :theme-overrides="{ borderRadius: '999px', borderHover: '1px solid #fb7299', borderFocus: '1px solid #fb7299' }"
-            v-model:value="searchInput"
-            clearable
-            @focus="isInputFocused = true"
-            @blur="handleBlur"
-            @keydown.enter="search(searchInput.trim(), 1, sortSelected)" />
+  <div class="discover-page">
+    <!-- 搜索区：常驻顶部，输入时浮出历史 -->
+    <div class="search-zone">
+      <div class="search-field">
+        <PhMagnifyingGlass :size="19" class="search-icon" weight="bold" aria-hidden="true" />
+        <input
+          v-model="searchInput"
+          class="search-input"
+          type="search"
+          inputmode="search"
+          enterkeyhint="search"
+          placeholder="搜索漫画、作者或 JM 编号"
+          aria-label="搜索漫画、作者或 JM 编号"
+          @focus="historyOpen = true"
+          @blur="historyOpen = false"
+          @keydown.enter="search(searchInput, 1, sortSelected)" />
+        <button
+          v-if="searchInput || store.searchResult"
+          type="button"
+          class="search-clear"
+          aria-label="清空搜索"
+          @click="clearSearch">
+          <PhX :size="16" weight="bold" />
+        </button>
+      </div>
 
-          <!-- 仅在输入/聚焦时呈现浮层历史，支持快捷搜索与单条清除 -->
-          <div
-            v-if="showHistoryDropdown"
-            class="history-dropdown absolute top-[calc(100%+6px)] left-0 right-0 z-30 p-3 rounded-2xl bg-white border border-[#e3e5e7] shadow-xl">
-            <div class="flex items-center justify-between pb-2 border-b border-[#f1f2f3] text-[11px] text-[#61666d]">
-              <span class="flex items-center gap-1 font-bold text-[#18191c]">
-                <PhClockCounterClockwise :size="14" class="text-[#fb7299]" />
-                搜索历史建议
-              </span>
+      <div v-if="historyOpen && matchingHistory.length > 0" class="history-panel">
+        <div class="history-head">
+          <span><PhClockCounterClockwise :size="14" weight="bold" /> 最近搜索</span>
+          <button type="button" class="jm-link" @mousedown.prevent="clearHistory">清空</button>
+        </div>
+        <div class="history-chips">
+          <button
+            v-for="hist in matchingHistory"
+            :key="hist"
+            type="button"
+            class="history-chip"
+            @mousedown.prevent="handleHistoryClick(hist)">
+            <span class="jm-truncate">{{ hist }}</span>
+            <span class="history-remove" role="button" aria-label="删除该记录" @mousedown.stop.prevent="removeHistoryItem(hist)">×</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视图切换：搜索中显示"结果 / 每周必看" -->
+    <div class="view-switch">
+      <button
+        type="button"
+        class="switch-item"
+        :class="{ 'is-active': view === 'weekly' }"
+        @click="view = 'weekly'">
+        榜单
+      </button>
+      <button
+        type="button"
+        class="switch-item"
+        :class="{ 'is-active': view === 'search' }"
+        :disabled="store.searchResult === undefined"
+        @click="view = 'search'">
+        搜索结果
+        <span v-if="store.searchResult" class="switch-count">{{ store.searchResult.total }}</span>
+      </button>
+    </div>
+
+    <div class="jm-scroll discover-scroll">
+      <ContinueReadingRow />
+
+      <!-- 每周必看 -->
+      <WeeklyPane v-if="view === 'weekly'" />
+
+      <!-- 搜索结果 -->
+      <template v-else>
+        <div v-if="store.searchResult === undefined" class="jm-empty">
+          <div class="jm-empty-icon"><PhSparkle :size="28" weight="duotone" /></div>
+          <strong>找到下一部想看的漫画</strong>
+          <p>输入标题、作者，或直接粘贴 JM 编号。</p>
+        </div>
+
+        <template v-else-if="store.searchResult.content.length === 0">
+          <div class="jm-empty">
+            <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
+            <strong>没有匹配的结果</strong>
+            <p>「{{ committedKeyword }}」没有找到漫画，试试更短的关键词或换个说法。</p>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="result-head">
+            <div class="result-copy">
+              <strong>「{{ committedKeyword }}」</strong>
+              <span>{{ store.searchResult.total }} 部</span>
+            </div>
+            <div class="sort-row">
               <button
+                v-for="option in sortOptions"
+                :key="option.value"
                 type="button"
-                class="text-[#9499a0] hover:text-[#fb7299] transition text-[11px] cursor-pointer"
-                @mousedown.prevent="clearHistory">
-                清空全部
+                class="sort-chip"
+                :class="{ 'is-active': sortSelected === option.value }"
+                @click="changeSort(option.value)">
+                {{ option.label }}
               </button>
             </div>
-            <div class="flex flex-wrap gap-1.5 pt-2.5 max-h-36 overflow-y-auto no-scrollbar">
-              <span
-                v-for="hist in matchingHistory"
-                :key="hist"
-                class="history-chip"
-                @mousedown.prevent="handleHistoryClick(hist)">
-                <span class="truncate max-w-[150px]">{{ hist }}</span>
-                <span class="remove-chip" @mousedown.stop.prevent="removeHistoryItem(hist)">×</span>
-              </span>
+          </div>
+
+          <div v-if="searching" class="cover-grid is-loading">
+            <div v-for="n in 6" :key="n" class="skeleton-card">
+              <div class="jm-skeleton skeleton-cover"></div>
+              <div class="jm-skeleton skeleton-line"></div>
+              <div class="jm-skeleton skeleton-line is-short"></div>
             </div>
           </div>
-        </div>
+          <div v-else class="cover-grid">
+            <ComicCard
+              v-for="comic in store.searchResult.content"
+              :key="comic.id"
+              :comic-id="comic.id"
+              :comic-favorite="comic.isFavorite"
+              :favorite-epoch="store.searchResultEpoch"
+              :comic-title="comic.name"
+              :comic-author="comic.author"
+              :comic-category="comic.category"
+              :comic-category-sub="comic.categorySub"
+              :comic-downloaded="comic.isDownloaded"
+              :comic-download-dir="comic.comicDownloadDir" />
+          </div>
 
-        <n-select
-          class="sort-select"
-          v-model:value="sortSelected"
-          :options="sortOptions"
-          :show-checkmark="false"
-          size="small"
-          @update-value="search(searchInput.trim(), 1, $event)" />
-        <n-button
-          :loading="searching"
-          type="primary"
-          size="small"
-          class="search-button"
-          aria-label="搜索"
-          @click="search(searchInput.trim(), 1, sortSelected)">
-          <template #icon>
-            <n-icon size="22">
-              <PhMagnifyingGlass />
-            </n-icon>
-          </template>
-        </n-button>
-      </div>
+          <nav v-if="searchPageCount > 1" class="pager" aria-label="搜索结果分页">
+            <button
+              type="button"
+              class="pager-btn"
+              :disabled="searchPage <= 1 || searching"
+              aria-label="上一页"
+              @click="search(committedKeyword, searchPage - 1, committedSort)">
+              <PhArrowLeft :size="17" weight="bold" />
+            </button>
+            <span class="pager-info">{{ searchPage }} / {{ searchPageCount }}</span>
+            <button
+              type="button"
+              class="pager-btn"
+              :disabled="searchPage >= searchPageCount || searching"
+              aria-label="下一页"
+              @click="search(committedKeyword, searchPage + 1, committedSort)">
+              <PhArrowRight :size="17" weight="bold" />
+            </button>
+          </nav>
+        </template>
+      </template>
     </div>
-
-    <!-- Discovery Sub-tabs Switcher -->
-    <div class="discovery-subtabs">
-      <button
-        type="button"
-        class="subtab-pill"
-        :class="{ active: activeSubTab === 'weekly' }"
-        @click="activeSubTab = 'weekly'">
-        <PhFire :size="16" weight="duotone" />
-        <span>每周必看榜单</span>
-      </button>
-      <button
-        type="button"
-        class="subtab-pill"
-        :class="{ active: activeSubTab === 'search' }"
-        @click="activeSubTab = 'search'">
-        <PhMagnifyingGlass :size="15" weight="bold" />
-        <span>
-          {{ store.searchResult ? `搜索结果 (${store.searchResult.total} 部)` : '搜索探索' }}
-        </span>
-      </button>
-    </div>
-
-    <!-- Mode 1: Weekly Ranking -->
-    <div v-if="activeSubTab === 'weekly'" class="weekly-wrapper">
-      <WeeklyPane />
-    </div>
-
-    <!-- Mode 2: Search Exploration & Results -->
-    <template v-else>
-      <div v-if="store.searchResult === undefined" class="search-empty">
-        <div class="search-orbit" aria-hidden="true">
-          <PhMagnifyingGlass :size="31" weight="bold" />
-          <PhSparkle class="sparkle" :size="16" weight="fill" />
-        </div>
-        <h2>找到下一部想看的漫画</h2>
-        <p>输入标题、作者，或粘贴 JM 编号</p>
-        <div class="search-tips">
-          <span>
-            <PhHashStraight :size="14" />
-            支持 JM 号
-          </span>
-          <span>
-            <PhSparkle :size="14" />
-            多种热度排序
-          </span>
-        </div>
-      </div>
-
-      <div v-else class="result-area">
-        <div class="result-summary">
-          <span>找到符合条件的漫画</span>
-          <strong>{{ store.searchResult.total }} 部</strong>
-        </div>
-        <div class="comic-list">
-          <ComicCard
-            v-for="comicInSearch in store.searchResult.content"
-            :key="comicInSearch.id"
-            :comic-id="comicInSearch.id"
-            :comic-favorite="comicInSearch.isFavorite"
-            :favorite-epoch="store.searchResultEpoch"
-            :comic-title="comicInSearch.name"
-            :comic-author="comicInSearch.author"
-            :comic-category="comicInSearch.category"
-            :comic-category-sub="comicInSearch.categorySub"
-            :comic-downloaded="comicInSearch.isDownloaded"
-            :comic-download-dir="comicInSearch.comicDownloadDir" />
-        </div>
-      </div>
-
-      <n-pagination
-        v-if="searchPageCount > 0"
-        class="search-pagination"
-        :page-count="searchPageCount"
-        :page="searchPage"
-        @update:page="search(committedKeyword, $event, committedSort)" />
-    </template>
   </div>
 </template>
 
 <style scoped>
-.search-pane {
+.discover-page {
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  background: #ffffff;
+  background: var(--jm-surface);
 }
 
-.search-toolbar {
-  flex: 0 0 auto;
-  padding: 14px 18px 12px;
-  border-bottom: 1px solid #e3e5e7;
-  background: #ffffff;
-}
-
-.discovery-subtabs {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 18px 8px;
-  background: #ffffff;
-  border-bottom: 1px solid #f1f2f3;
-  flex-shrink: 0;
-}
-
-.subtab-pill {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  border-radius: 999px;
-  background: #f1f2f3;
-  border: 1px solid #e3e5e7;
-  color: #61666d;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.subtab-pill:hover {
-  background: #ffffff;
-  border-color: #fb7299;
-  color: #fb7299;
-}
-
-.subtab-pill.active {
-  background: #fb7299;
-  border-color: #fb7299;
-  color: #ffffff;
-  box-shadow: 0 3px 12px rgba(251, 114, 153, 0.35);
-}
-
-.weekly-wrapper {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.search-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px 42px;
-  gap: 8px;
-  align-items: center;
-}
-
-.search-query {
-  min-width: 0;
-  height: 38px;
-  --n-height: 38px !important;
-}
-
-.sort-select {
-  width: 112px;
-  --n-height: 38px !important;
-}
-
-/* 高度只能靠 --n-height（内层 label、后缀箭头都按它排版），
-   这里只补外观；再写死 height 会让文字和箭头脱离垂直居中。 */
-.sort-select :deep(.n-base-selection) {
-  border-radius: var(--radius-card);
-  background: #f1f2f3;
-  border: 1px solid #e3e5e7;
-}
-
-.search-button {
-  width: 42px;
-  height: 38px;
-  padding: 0;
-  border-radius: var(--radius-card);
-  box-shadow: 0 3px 10px rgba(251, 114, 153, 0.3);
-}
-
-.search-empty {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 32px;
-  text-align: center;
-  background: #ffffff;
-}
-
-.search-orbit {
+.search-zone {
   position: relative;
-  display: grid;
-  width: 76px;
-  height: 76px;
-  margin-bottom: 18px;
-  color: #fb7299;
-  place-items: center;
-  border: 1px solid rgba(251, 114, 153, 0.35);
-  border-radius: 50%;
-  background: rgba(251, 114, 153, 0.08);
-  box-shadow: 0 0 0 10px rgba(251, 114, 153, 0.04);
+  z-index: 12;
+  flex: 0 0 auto;
+  padding: 10px var(--jm-gutter) 8px;
+  background: var(--jm-surface);
 }
 
-.sparkle {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  color: #00aeec;
-}
-
-.search-empty h2 {
-  margin: 0;
-  color: #18191c;
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-.search-empty p {
-  max-width: 320px;
-  margin: 8px 0 18px;
-  color: #61666d;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.search-tips {
+.search-field {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  height: 44px;
+  align-items: center;
   gap: 8px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-md);
+  background: var(--jm-sunken);
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
 }
 
-.search-tips span {
+.search-field:focus-within {
+  border-color: var(--jm-brand);
+  background: var(--jm-surface);
+  box-shadow: 0 0 0 3px rgba(251, 114, 153, 0.14);
+}
+
+.search-icon {
+  flex: 0 0 auto;
+  color: var(--jm-text-3);
+}
+
+.search-field:focus-within .search-icon {
+  color: var(--jm-brand);
+}
+
+.search-input {
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  padding: 0;
+  color: var(--jm-text);
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-size: 14.5px;
+}
+
+.search-input::placeholder {
+  color: var(--jm-text-3);
+}
+
+.search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-clear {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: var(--jm-text-3);
+  border: 0;
+  border-radius: var(--jm-r-pill);
+  background: rgba(23, 24, 28, 0.06);
+  place-items: center;
+  cursor: pointer;
+}
+
+.history-panel {
+  position: absolute;
+  top: calc(100% - 4px);
+  right: var(--jm-gutter);
+  left: var(--jm-gutter);
+  padding: 12px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+  box-shadow: var(--jm-shadow-2);
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+}
+
+.history-head span {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 6px 12px;
-  color: #61666d;
-  border: 1px solid #e3e5e7;
-  border-radius: 999px;
-  background: #f6f7f8;
-  font-size: 11px;
-  transition: all 0.2s;
-}
-
-.search-tips span:hover {
-  background: #ffffff;
-  border-color: #fb7299;
-  color: #fb7299;
-}
-
-.result-area {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  background: #f6f7f8;
-}
-
-.result-summary {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 12px 18px 8px;
-  color: #61666d;
-  font-size: 12px;
   font-weight: 600;
 }
 
-.result-summary strong {
-  padding: 2px 8px;
-  color: #fb7299;
-  border-radius: 999px;
-  background: rgba(251, 114, 153, 0.12);
-  font-size: 11px;
-}
-
-.comic-list {
+.history-chips {
   display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 10px;
-  overflow: auto;
-  padding: 0 16px 16px;
-}
-
-.search-pagination {
-  flex: 0 0 auto;
-  padding: 12px 18px;
-  border-top: 1px solid #e3e5e7;
-  background: #ffffff;
+  max-height: 168px;
+  flex-wrap: wrap;
+  gap: 7px;
+  overflow-y: auto;
 }
 
 .history-chip {
   display: inline-flex;
+  max-width: 100%;
+  height: 30px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px 0 11px;
+  color: var(--jm-text-2);
+  border: 0;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: var(--jm-fs-sm);
+  cursor: pointer;
+}
+
+.history-chip:active {
+  background: var(--jm-brand-soft);
+  color: var(--jm-brand);
+}
+
+.history-remove {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  color: var(--jm-text-4);
+  place-items: center;
+  border-radius: var(--jm-r-pill);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.history-remove:hover {
+  color: var(--jm-brand);
+  background: rgba(251, 114, 153, 0.14);
+}
+
+/* 视图切换：下划线式，克制 */
+.view-switch {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 22px;
+  padding: 0 var(--jm-gutter);
+  border-bottom: 1px solid var(--jm-line);
+  background: var(--jm-surface);
+}
+
+.switch-item {
+  position: relative;
+  display: inline-flex;
+  height: 42px;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: #f1f2f3;
-  border: 1px solid #e3e5e7;
-  color: #18191c;
-  font-size: 11px;
+  padding: 0;
+  color: var(--jm-text-3);
+  border: 0;
+  background: none;
+  font-size: var(--jm-fs-body);
+  font-weight: 600;
   cursor: pointer;
-  transition: all 150ms ease;
+  transition: color 160ms ease;
 }
 
-.history-chip:hover {
-  background: #ffffff;
-  border-color: #fb7299;
-  color: #fb7299;
+.switch-item::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2.5px;
+  border-radius: 2px;
+  background: var(--jm-brand);
+  opacity: 0;
+  transform: scaleX(0.4);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+  content: '';
 }
 
-.remove-chip {
-  display: inline-flex;
+.switch-item.is-active {
+  color: var(--jm-text);
+  font-weight: 700;
+}
+
+.switch-item.is-active::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+.switch-item:disabled {
+  color: var(--jm-text-4);
+  cursor: default;
+}
+
+.switch-count {
+  padding: 1px 7px;
+  color: var(--jm-brand);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-brand-soft);
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.discover-scroll {
+  padding-bottom: 28px;
+  background: var(--jm-bg);
+}
+
+.result-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px var(--jm-gutter) 12px;
+  background: var(--jm-surface);
+}
+
+.result-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.result-copy strong {
+  overflow: hidden;
+  max-width: 70%;
+  color: var(--jm-text);
+  font-size: var(--jm-fs-title);
+  font-weight: 750;
+  letter-spacing: -0.015em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-copy span {
+  color: var(--jm-brand);
+  font-size: var(--jm-fs-sm);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sort-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sort-row::-webkit-scrollbar {
+  display: none;
+}
+
+.sort-chip {
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  color: var(--jm-text-2);
+  border: 1px solid transparent;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sort-chip.is-active {
+  color: var(--jm-brand);
+  border-color: rgba(251, 114, 153, 0.28);
+  background: var(--jm-brand-soft);
+}
+
+.cover-grid {
+  padding: 14px var(--jm-gutter) 8px;
+}
+
+.skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeleton-cover {
+  aspect-ratio: 3 / 4;
+  border-radius: var(--jm-r-md);
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: 4px;
+}
+
+.skeleton-line.is-short {
+  width: 55%;
+}
+
+.pager {
+  display: flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  color: #9499a0;
-  font-size: 13px;
-  line-height: 1;
-  transition: all 120ms ease;
+  gap: 18px;
+  padding: 10px var(--jm-gutter) 24px;
 }
 
-.remove-chip:hover {
-  background: rgba(251, 114, 153, 0.2);
-  color: #fb7299;
+.pager-btn {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  padding: 0;
+  color: var(--jm-text-2);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-surface);
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease;
 }
 
-@media (max-width: 768px) {
-  .search-bar-header {
-    padding: 10px 12px;
-  }
+.pager-btn:hover:not(:disabled) {
+  color: var(--jm-brand);
+  border-color: rgba(251, 114, 153, 0.4);
+}
 
-  .search-controls {
-    grid-template-columns: minmax(0, 1fr) 92px 38px;
-    gap: 6px;
-  }
+.pager-btn:disabled {
+  color: var(--jm-text-4);
+  cursor: default;
+}
 
-  .sort-select {
-    width: 92px;
-  }
-
-  .search-button {
-    width: 38px;
-  }
-
-  .discovery-subtabs {
-    padding: 6px 12px;
-  }
-
-  .comic-list {
-    padding: 0 10px 12px;
-  }
+.pager-info {
+  min-width: 58px;
+  color: var(--jm-text-2);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 </style>

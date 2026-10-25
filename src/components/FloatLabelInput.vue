@@ -70,7 +70,7 @@ defineExpose({ NInputRef })
       <n-el
         tag="span"
         :class="[
-          'float-label bg-transparent px-1 text-[#61666d] transition-all duration-200 ease-in-out',
+          'float-label bg-transparent px-1 transition-all duration-200 ease-in-out',
           floating ? `text-0.75rem ${translateY}` : '',
         ]">
         {{ label }}
@@ -80,8 +80,18 @@ defineExpose({ NInputRef })
 </template>
 
 <style scoped>
-.float-label { background: transparent; pointer-events: none; }
-@media (prefers-reduced-motion: reduce) { .float-label { transition: none !important; } }
+.float-label {
+  background: transparent;
+  color: var(--jm-text-3);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float-label {
+    transition: none !important;
+  }
+}
+
 :deep(.n-input-wrapper) {
   @apply overflow-visible flex items-center;
 }
@@ -94,8 +104,8 @@ defineExpose({ NInputRef })
   @apply relative z-3;
 }
 
-.n-input--focus .float-label,
-.n-input:hover .float-label {
-  color: #b73963;
+:deep(.n-input--focus) .float-label,
+:deep(.n-input:hover) .float-label {
+  color: var(--jm-brand);
 }
 </style>

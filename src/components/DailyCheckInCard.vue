@@ -214,11 +214,11 @@ function dayClass(day: DailyCheckInRecordDay) {
   flex: 0 0 auto;
   flex-direction: column;
   gap: 10px;
-  margin: 0 20px 4px;
+  margin: 0 var(--jm-gutter);
   padding: 14px 16px;
-  border: 1px solid #f1f2f3;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #fff8fa 0%, #ffffff 70%);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
 }
 
 .check-in-head {
@@ -237,13 +237,13 @@ function dayClass(day: DailyCheckInRecordDay) {
 
 .check-in-icon {
   flex-shrink: 0;
-  color: #fb7299;
+  color: var(--jm-brand);
 }
 
 .check-in-title h4 {
   margin: 0;
   overflow: hidden;
-  color: #18191c;
+  color: var(--jm-text);
   font-size: 14px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -252,28 +252,30 @@ function dayClass(day: DailyCheckInRecordDay) {
 
 .check-in-progress {
   flex-shrink: 0;
-  color: #9499a0;
+  color: var(--jm-text-3);
   font-size: 11px;
 }
 
 .check-in-refresh {
   display: flex;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
-  width: 26px;
-  height: 26px;
   align-items: center;
   justify-content: center;
-  color: #9499a0;
+  color: var(--jm-text-3);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--jm-r-sm);
   background: none;
   cursor: pointer;
-  transition: all 0.15s;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease;
 }
 
 .check-in-refresh:hover:not(:disabled) {
-  color: #fb7299;
-  background: #fff0f5;
+  color: var(--jm-brand);
+  background: var(--jm-brand-soft);
 }
 
 .check-in-refresh:disabled {
@@ -299,17 +301,17 @@ function dayClass(day: DailyCheckInRecordDay) {
 
 .check-in-error {
   margin: 0;
-  color: #e03e2d;
-  font-size: 12px;
+  color: var(--jm-danger);
+  font-size: var(--jm-fs-xs);
   line-height: 1.6;
 }
 
 .check-in-retry {
   margin-left: 6px;
-  color: #fb7299;
+  color: var(--jm-brand);
   border: none;
   background: none;
-  font-size: 12px;
+  font-size: var(--jm-fs-xs);
   text-decoration: underline;
   cursor: pointer;
 }
@@ -322,7 +324,7 @@ function dayClass(day: DailyCheckInRecordDay) {
 }
 
 .check-in-weekday {
-  color: #c9ccd0;
+  color: var(--jm-text-4);
   font-size: 10px;
   font-weight: 600;
   text-align: center;
@@ -336,10 +338,10 @@ function dayClass(day: DailyCheckInRecordDay) {
   height: 30px;
   align-items: center;
   justify-content: center;
-  color: #61666d;
-  border: 1px solid #e3e5e7;
-  border-radius: 8px;
-  background: #fff;
+  color: var(--jm-text-2);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-sm);
+  background: var(--jm-surface);
   font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -353,32 +355,32 @@ function dayClass(day: DailyCheckInRecordDay) {
 }
 
 .check-in-day.is-today {
-  border-color: #fb7299;
+  border-color: var(--jm-brand);
   box-shadow: 0 0 0 2px rgba(251, 114, 153, 0.15);
 }
 
 .check-in-day.is-signed {
   color: #fff;
-  border-color: #fb7299;
-  background: linear-gradient(135deg, #fb7299 0%, #ff85ad 100%);
+  border-color: var(--jm-brand);
+  background: var(--jm-brand);
 }
 
 .check-in-day.is-missed {
-  color: #c9ccd0;
+  color: var(--jm-text-4);
   border-style: dashed;
-  background: #f7f8f9;
+  background: var(--jm-sunken);
 }
 
 /* 奖励日：未签到时用礼盒图标和浅粉底提示，签完直接显示对勾 */
 .check-in-day.is-bonus:not(.is-signed):not(.is-missed) {
-  color: #fb7299;
+  color: var(--jm-brand);
   border-color: rgba(251, 114, 153, 0.45);
-  background: #fff0f5;
+  background: var(--jm-brand-soft);
 }
 
 .check-in-day.is-future {
-  color: #c9ccd0;
-  background: #fafbfc;
+  color: var(--jm-text-4);
+  background: var(--jm-sunken);
 }
 
 .check-in-bonus {
@@ -390,14 +392,14 @@ function dayClass(day: DailyCheckInRecordDay) {
 .check-in-bonus-bar {
   height: 6px;
   overflow: hidden;
-  border-radius: 999px;
-  background: #f1f2f3;
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-sunken);
 }
 
 .check-in-bonus-fill {
   height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #fb7299 0%, #00aeec 100%);
+  border-radius: var(--jm-r-pill);
+  background: linear-gradient(90deg, var(--jm-brand) 0%, var(--jm-accent) 100%);
   transition: width 0.3s;
 }
 
@@ -406,7 +408,7 @@ function dayClass(day: DailyCheckInRecordDay) {
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 6px 12px;
-  color: #9499a0;
+  color: var(--jm-text-3);
   font-size: 11px;
 }
 
@@ -418,21 +420,20 @@ function dayClass(day: DailyCheckInRecordDay) {
 
 .check-in-btn {
   align-self: flex-start;
-  border-radius: 999px;
+  border-radius: var(--jm-r-pill);
   padding: 0 20px;
 }
 
 /* 已签到时按钮处于禁用态：naive 默认给 50% 透明度，白字在浅粉底上几乎看不清。
    改成浅粉底 + 品牌色文字，既表明不可点又保持可读。 */
 .check-in-btn.n-button--disabled {
-  color: #c9547c !important;
-  background: #ffe3ec !important;
+  color: var(--jm-brand) !important;
+  background: var(--jm-brand-soft) !important;
   opacity: 1;
 }
 
 @media (max-width: 760px) {
   .check-in-card {
-    margin: 0 14px 4px;
     padding: 12px;
   }
 
@@ -442,22 +443,16 @@ function dayClass(day: DailyCheckInRecordDay) {
 
   .check-in-day {
     height: 26px;
-    border-radius: 6px;
+    border-radius: var(--jm-r-xs);
     font-size: 11px;
-  }
-
-  .check-in-card {
-    margin: 0 12px 4px;
-    padding: 10px;
-    gap: 8px;
   }
 }
 
 /* 320dp 级别的窄屏：7 列只剩 ~34px，再缩一号，避免日期贴边 */
 @media (max-width: 360px) {
   .check-in-card {
-    margin: 0 8px 4px;
-    padding: 8px;
+    padding: 10px;
+    gap: 8px;
   }
 
   .check-in-calendar {
@@ -466,7 +461,7 @@ function dayClass(day: DailyCheckInRecordDay) {
 
   .check-in-day {
     height: 24px;
-    border-radius: 5px;
+    border-radius: var(--jm-r-xs);
     font-size: 10px;
   }
 
