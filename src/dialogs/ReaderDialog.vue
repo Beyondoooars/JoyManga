@@ -123,6 +123,7 @@ function enterScrollMode() {
 }
 
 function leaveScrollMode() {
+  stopScrollSettle(false)
   scrollObserver?.disconnect()
   scrollObserver = undefined
   // 按当前布局补算一次当前页，切回单页时正好落在正在读的那一页
@@ -134,21 +135,100 @@ function leaveScrollMode() {
  * 滚动模式：把指定页对齐到视口顶部。
  *
  * 页高在渲染当帧就由 `pageSizes` 定下来（见模板的 `aspect-ratio`），图片解码
- * 不会再改变布局，所以补丁落地后滚一次就到位。旧实现要 ResizeObserver + 定时
- * 轮询反复把目标页贴回顶部，是因为解码前每页高度都是 0。
+ * 不会再改变布局，所以尺寸齐全时滚一次就到位。
  *
- * 尺寸未知的页（文件损坏、或导入的归档读不出文件头）不预留高度，这些页解码时
- * 仍会推动下方内容；此时位置可能偏离一屏之内，用户自行滚动即可。
+ * 尺寸未知的页（旧书库、导入的归档）没有预留高度，上方某一页解码后会把目标页
+ * 顶下去：只滚一次会停在错误的位置，观察器随即把「当前页」改小、进度被写坏。
+ * 所以定位后有一小段有界的纠偏期：上方有图加载就重新贴回顶部，直到上方每页都有
+ * 确定高度或超时；期间观察器不更新当前页，用户一动手就结束。
  */
+const SCROLL_SETTLE_TIMEOUT_MS = 10_000
+/** 纠偏中的目标页；非 null 时观察器静音、图片加载会重新贴顶 */
+let settleTarget: number | null = null
+let settleDeadline = 0
+let settleTimer: ReturnType<typeof setTimeout> | undefined
+
 function scrollToPage(page: number) {
   const container = scrollViewer.value
   if (!container) return
   const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`)
   if (!target) return
+  // 上一次定位的纠偏还没结束（连点页码、滑块拖动）时以这次的为准
+  stopScrollSettle(false)
   // 不能用 offsetTop：它的参照是 offsetParent（这里是定位的 reader-body），
   // 不是滚动容器；两者一旦有内边距或偏移就会滚错位置。
   const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
   container.scrollTo({ top, behavior: 'auto' })
+  // 上方每页高度都已确定时滚一次就到位，不必开纠偏（也就不会短暂静音观察器）
+  if (!pagesAboveHaveHeight(container, page)) beginScrollSettle(page)
+}
+
+function beginScrollSettle(page: number) {
+  settleTarget = page
+  settleDeadline = Date.now() + SCROLL_SETTLE_TIMEOUT_MS
+  if (settleTimer !== undefined) clearTimeout(settleTimer)
+  // 兜底：图片已进入解码缓存时不会再触发 load，靠定时器结束纠偏
+  settleTimer = setTimeout(() => stopScrollSettle(true), SCROLL_SETTLE_TIMEOUT_MS)
+  requestAnimationFrame(pinScrollTarget)
+}
+
+/** 结束纠偏；resync 为 true 时按真实布局补算一次当前页（纠偏期间观察器静音） */
+function stopScrollSettle(resync: boolean) {
+  if (settleTarget === null) return
+  settleTarget = null
+  if (settleTimer !== undefined) {
+    clearTimeout(settleTimer)
+    settleTimer = undefined
+  }
+  if (!resync) return
+  const container = scrollViewer.value
+  if (container) syncCurrentPageFromLayout(container)
+}
+
+/** 目标页之上是否每页都有确定高度：只有未预留高度的页才需要等图片解码 */
+function pagesAboveHaveHeight(container: HTMLElement, page: number): boolean {
+  for (const el of container.querySelectorAll<HTMLElement>('[data-page]:not(.page-sized)')) {
+    if (Number(el.dataset.page) >= page) continue
+    // 读取失败的页换成了骨架/错误提示，高度不会再变，不阻塞纠偏
+    if (el.querySelector('.image-error')) continue
+    const img = el.querySelector('img')
+    if (!img || !img.complete || img.naturalHeight === 0) return false
+  }
+  return true
+}
+
+function pinScrollTarget() {
+  const container = scrollViewer.value
+  const page = settleTarget
+  if (!container || page === null) return
+  const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`)
+  if (!target) {
+    stopScrollSettle(false)
+    return
+  }
+  const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
+  // 末尾不足一屏时目标页到不了顶部，按实际可滚范围比较，否则会一直判为「没贴住」
+  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
+  const desired = Math.min(Math.max(top, 0), maxTop)
+  if (Math.abs(container.scrollTop - desired) > 1) container.scrollTo({ top: desired, behavior: 'auto' })
+  if (pagesAboveHaveHeight(container, page) || Date.now() >= settleDeadline) stopScrollSettle(true)
+}
+
+/** 滚动模式里某页图片解码完成：它可能把下方的目标页顶下去 */
+function onScrollPageImageLoad(page: number) {
+  if (settleTarget === null || page >= settleTarget) return
+  pinScrollTarget()
+}
+
+/**
+ * 用户自己动手滚动：纠偏立即让位，观察器恢复跟随。
+ *
+ * 这里不按当前布局补算当前页——布局可能仍是「目标页被顶下去」的样子，
+ * 补算会把用户还没读到的上一页写进进度。交给恢复后的观察器，它只报
+ * 用户真正滚动后可见的页。
+ */
+function cancelScrollSettle() {
+  stopScrollSettle(false)
 }
 
 /**
@@ -206,6 +286,8 @@ function observeScrollPages() {
   const pages = container.querySelectorAll<HTMLElement>('[data-page]')
   scrollObserver = new IntersectionObserver(
     (entries) => {
+      // 程序化定位尚未沉降时布局还在变，此时的可见页不代表用户读到哪
+      if (settleTarget !== null) return
       const containerTop = container.getBoundingClientRect().top
       const visible = entries
         .filter((entry) => entry.isIntersecting)
@@ -309,6 +391,8 @@ async function loadChapter(comicId: number, chapterId: number, page = 1) {
   const generation = ++chapterGeneration
   loading.value = true
   error.value = null
+  // 换章时上一章的纠偏目标已不存在，别让它把新章节滚到旧位置
+  stopScrollSettle(false)
   currentPage.value = 1
   imageErrors.value.clear()
   imageRetryToken.value.clear()
@@ -593,6 +677,8 @@ let scrollTouchStart: { x: number; y: number; time: number } | null = null
 let lastScrollTouchTime = 0
 
 function onScrollTouchStart(e: TouchEvent) {
+  // 手指按下就视为用户接管滚动，程序化定位不再回拉
+  cancelScrollSettle()
   lastScrollTouchTime = Date.now()
   // 落在按钮上的触摸交给按钮自己处理（如「重新读取」）：click 上的 .stop 拦不住
   // touch 事件，这里必须主动排除，否则点按钮会顺带把 HUD 也切了。
@@ -650,6 +736,8 @@ function runPageAction(action: PageAction): void {
 function scrollByViewport(direction: 1 | -1) {
   const container = scrollViewer.value
   if (!container) return
+  // 用户主动翻屏（键盘/音量键）：与手势一样结束纠偏，否则会被贴回目标页
+  cancelScrollSettle()
   const atTop = container.scrollTop <= 0
   const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2
   // 已经到底还继续「下一页」时进入下一章，与单页模式的行为一致
@@ -721,6 +809,7 @@ onUnmounted(() => {
   setKeepScreenOn(false)
   // 退出阅读器恢复系统栏
   setImmersiveMode(false)
+  stopScrollSettle(false)
   scrollObserver?.disconnect()
   scrollObserver = undefined
   setVolumeKeyPaging(false)
@@ -838,6 +927,7 @@ onUnmounted(() => {
             v-if="readingMode === 'Scroll'"
             ref="scrollViewer"
             class="scroll-viewer"
+            @wheel.passive="cancelScrollSettle"
             @touchstart.passive="onScrollTouchStart"
             @touchend="onScrollTouchEnd"
             @touchcancel="onScrollTouchCancel"
@@ -860,6 +950,7 @@ onUnmounted(() => {
                 :alt="`第 ${index + 1} 页`"
                 class="reader-img"
                 loading="lazy"
+                @load="onScrollPageImageLoad(index + 1)"
                 @error="markImageError(path)"
                 :draggable="false" />
             </div>

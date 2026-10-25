@@ -163,71 +163,82 @@ pub(crate) fn chapter_reader_data_from_comic(
         .as_ref()
         .ok_or_else(|| CommandError::from("读取章节失败", anyhow!("章节尚未下载完成")))?;
 
-    // 两个分支各自填好尺寸（含 CBZ 与已解压目录），else 分支直接返回错误
-    let mut page_sizes: Vec<Option<crate::types::PageSize>>;
-    let image_paths_str = if chapter_target.is_file() {
-        let file = std::fs::File::open(chapter_target)
-            .context(format!("打开章节CBZ文件`{}`失败", chapter_target.display()))
-            .map_err(|err| CommandError::from("读取章节图片失败", err))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .context(format!("解析章节CBZ文件`{}`失败", chapter_target.display()))
-            .map_err(|err| CommandError::from("读取章节图片失败", err))?;
+    // 两个分支各自产出 (路径列表, 等长尺寸列表)，else 分支直接返回错误。
+    // 尺寸与路径在构造时一一对应，前端按下标取 `pageSizes` 的契约由此保证。
+    let (image_paths_str, page_sizes): (Vec<String>, Vec<Option<crate::types::PageSize>>) =
+        if chapter_target.is_file() {
+            // 与 read_page_bytes 的句柄协议同序：先拿替换锁再开归档，
+            // 提交方「释放句柄 → 重命名」的窗口内不会被这次打开插进
+            //（FUSE 下会重新触发 ETXTBSY / 覆盖写截断）。
+            // 尺寸解析要逐页读文件头，归档打开的时长不可忽略，必须纳入协议。
+            let _replace_guard = crate::atomic_fs::commit_guard();
+            let file = std::fs::File::open(chapter_target)
+                .context(format!("打开章节CBZ文件`{}`失败", chapter_target.display()))
+                .map_err(|err| CommandError::from("读取章节图片失败", err))?;
+            let mut archive = zip::ZipArchive::new(file)
+                .context(format!("解析章节CBZ文件`{}`失败", chapter_target.display()))
+                .map_err(|err| CommandError::from("读取章节图片失败", err))?;
 
-        let mut img_names: Vec<String> = (0..archive.len())
-            .filter_map(|i| {
-                let entry = archive.by_index(i).ok()?;
-                let name = entry.name().to_string();
-                if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_') {
-                    Some(name)
-                } else {
-                    None
-                }
-            })
-            .collect();
+            let mut img_names: Vec<String> = (0..archive.len())
+                .filter_map(|i| {
+                    let entry = archive.by_index(i).ok()?;
+                    let name = entry.name().to_string();
+                    if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_')
+                    {
+                        Some(name)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-        // 独立章节文件直接使用全部页面；整本合并归档按话切片，只显示本章的页面。
-        let is_own_chapter_file =
-            crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)
-                .ok()
-                .flatten()
-                == Some((comic.id, chapter_id));
-        let img_names = if is_own_chapter_file {
-            img_names.sort_by(|a, b| utils::natural_cmp(a, b));
-            img_names
+            // 独立章节文件直接使用全部页面；整本合并归档按话切片，只显示本章的页面。
+            let is_own_chapter_file =
+                crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)
+                    .ok()
+                    .flatten()
+                    == Some((comic.id, chapter_id));
+            let img_names = if is_own_chapter_file {
+                img_names.sort_by(|a, b| utils::natural_cmp(a, b));
+                img_names
+            } else {
+                crate::comic_scanner::select_chapter_pages(&img_names, current_chapter.order)
+                    .ok_or_else(|| {
+                        CommandError::from("读取章节失败", anyhow!("归档中没有该章节的页面"))
+                    })?
+            };
+
+            // 尺寸必须在把 img_names 挪走之前取：优先命中原归档自带的 pages.json，
+            // 其次磁盘指纹缓存（导入/旧版书库免重读），最后现读文件头。
+            // 取不到就是 None，阅读器该页不预留高度。
+            let page_sizes =
+                crate::page_size::resolve_archive_sizes(&mut archive, &img_names, chapter_target);
+
+            let chapter_target_str = chapter_target.to_string_lossy();
+            let image_paths_str = img_names
+                .into_iter()
+                .map(|entry_name| format!("{chapter_target_str}|{entry_name}"))
+                .collect::<Vec<_>>();
+            (image_paths_str, page_sizes)
+        } else if chapter_target.is_dir() {
+            let image_paths = utils::collect_page_images(chapter_target)
+                .map_err(|err| CommandError::from("读取章节图片失败", err))?;
+
+            let page_sizes = image_paths
+                .iter()
+                .map(|path| crate::page_size::size_from_path(path))
+                .collect();
+            let image_paths_str = image_paths
+                .into_iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            (image_paths_str, page_sizes)
         } else {
-            crate::comic_scanner::select_chapter_pages(&img_names, current_chapter.order)
-                .ok_or_else(|| {
-                    CommandError::from("读取章节失败", anyhow!("归档中没有该章节的页面"))
-                })?
+            return Err(CommandError::from(
+                "读取章节失败",
+                anyhow!("章节文件不存在"),
+            ));
         };
-
-        // 尺寸必须在把 img_names 挪走之前取：优先命中原归档自带的 pages.json，
-        // 缺失的页现读文件头。取不到就是 None，阅读器该页不预留高度。
-        page_sizes = crate::page_size::resolve_archive_sizes(&mut archive, &img_names);
-
-        let chapter_target_str = chapter_target.to_string_lossy();
-        img_names
-            .into_iter()
-            .map(|entry_name| format!("{chapter_target_str}|{entry_name}"))
-            .collect::<Vec<_>>()
-    } else if chapter_target.is_dir() {
-        let image_paths = utils::collect_page_images(chapter_target)
-            .map_err(|err| CommandError::from("读取章节图片失败", err))?;
-
-        page_sizes = image_paths
-            .iter()
-            .map(|path| crate::page_size::size_from_path(path))
-            .collect();
-        image_paths
-            .into_iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-    } else {
-        return Err(CommandError::from(
-            "读取章节失败",
-            anyhow!("章节文件不存在"),
-        ));
-    };
 
     let total_images = image_paths_str.len();
     if total_images == 0 {
@@ -236,8 +247,11 @@ pub(crate) fn chapter_reader_data_from_comic(
             anyhow!("章节中没有可阅读的图片"),
         ));
     }
-    // 前端按 `imagePaths` 的下标取 `pageSizes`，两者长度必须一致；分支里漏算时补 None
-    page_sizes.resize(total_images, None);
+    debug_assert_eq!(
+        page_sizes.len(),
+        total_images,
+        "page_sizes 与 image_paths 必须等长（前端按下标一一对应）"
+    );
 
     Ok(ChapterReaderData {
         comic_id: comic.id,

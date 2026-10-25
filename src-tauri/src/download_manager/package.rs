@@ -108,19 +108,20 @@ pub(crate) fn package_chapter_to_cbz(
 
         // 单条目超过 ZIP32 上限会让整章打包失败在半路，先按体积给出可读错误
         crate::zip_limits::ensure_entry_size(&image_path)?;
-        // 顺手记下尺寸：下载期文件就在手上，读一次文件头比阅读时再解压归档便宜得多
-        if let Some(size) = crate::page_size::size_from_path(&image_path) {
+        let mut file = std::fs::File::open(&image_path)
+            .context(format!("打开图片`{}`失败", image_path.display()))?;
+        // 顺手记下尺寸：下载期文件就在手上，读一次文件头比阅读时再解压归档便宜得多。
+        // 同一打开的句柄两用（先读头、复位、再整文件复制），省一对 FUSE 往返。
+        if let Some(size) = crate::page_size::size_from_opened_file(&mut file) {
             page_sizes.insert(entry_name.clone(), size);
         }
         zip_writer
             .start_file(&entry_name, crate::zip_limits::image_entry_options())
             .context(format!("在CBZ创建条目`{entry_name}`失败"))?;
-        let mut file = std::fs::File::open(&image_path)
-            .context(format!("打开图片`{}`失败", image_path.display()))?;
         std::io::copy(&mut file, &mut zip_writer)
             .context(format!("将图片写入CBZ条目`{entry_name}`失败"))?;
     }
-    crate::page_size::write_pages_entry(&mut zip_writer, &page_sizes)
+    crate::page_size::write_pages_entry(&mut zip_writer, page_sizes)
         .context("写入`pages.json`失败")?;
 
     let zip_file = zip_writer.finish().context("关闭CBZ文件失败")?;
