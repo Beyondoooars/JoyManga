@@ -17,7 +17,7 @@ use crate::download_queue::{
 use crate::download_scheduler::DownloadLimiter;
 use crate::events::DownloadTaskEvent;
 use crate::extensions::AppHandleExt;
-use crate::types::Comic;
+use crate::types::{Comic, FailureKind, TaskFailure, TaskStage};
 use crate::DownloadSpeedEvent;
 
 pub(crate) mod download_task;
@@ -142,6 +142,15 @@ impl DownloadManager {
                     .store(entry.snapshot.downloaded_img_count, Ordering::Relaxed);
                 task.total_img_count
                     .store(entry.snapshot.total_img_count, Ordering::Relaxed);
+                // 新 task_id 代表一次新的执行：保留历史尝试次数，但不继承上一次的失败详情，
+                // 否则暂停后恢复的任务会一直显示为失败。
+                task.attempts
+                    .store(entry.snapshot.attempts.max(1), Ordering::Relaxed);
+                *task.stage.write() = if resumed_state == DownloadTaskState::Pending {
+                    TaskStage::Queued
+                } else {
+                    entry.snapshot.stage
+                };
                 self.queue.insert(StoredDownload {
                     snapshot: task.snapshot(),
                     settings: task.settings.clone(),
@@ -152,8 +161,20 @@ impl DownloadManager {
             })();
             if let Err(error) = restore {
                 let mut snapshot = entry.snapshot;
+                let message =
+                    crate::types::truncate_failure_message(&format!("恢复任务失败：{error:#}"));
                 snapshot.state = DownloadTaskState::Failed;
-                snapshot.error_message = Some(format!("恢复任务失败：{error:#}"));
+                snapshot.stage = TaskStage::Queued;
+                snapshot.error_message = Some(message.clone());
+                snapshot.failure = Some(TaskFailure {
+                    kind: FailureKind::Business,
+                    message,
+                    retryable: false,
+                    stage: TaskStage::Queued,
+                    attempts: snapshot.attempts.max(1),
+                    line: None,
+                    at: crate::types::now_millis(),
+                });
                 self.queue.update(snapshot);
             }
         }

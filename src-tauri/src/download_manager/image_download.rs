@@ -12,7 +12,9 @@ use tokio::sync::watch;
 
 use crate::atomic_fs;
 use crate::download_scheduler::DownloadPermit;
+use crate::errors::classify_failure;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
+use crate::types::TaskStage;
 
 use super::download_task::{DownloadTask, TaskFileWrites};
 use super::scramble::stitch_img;
@@ -114,6 +116,7 @@ impl DownloadImgTask {
                 Ok(data) => break data,
                 Err(err) if attempt == 0 && !self.download_task.file_writes.is_cancelled() => {
                     attempt += 1;
+                    self.download_task.attempts.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
                         url,
                         comic_title,
@@ -126,10 +129,12 @@ impl DownloadImgTask {
                     let err_title = format!("下载图片`{url}`失败");
                     let string_chain = err.to_string_chain();
                     tracing::error!(err_title, message = string_chain);
-                    self.download_task.record_image_error(format!(
-                        "第 {} 张图片下载失败：{err:#}",
-                        self.index + 1
-                    ));
+                    let failure = classify_failure(&err, TaskStage::Downloading);
+                    self.download_task.record_image_error(
+                        format!("第 {} 张图片下载失败：{err:#}", self.index + 1),
+                        failure.kind,
+                        image_line(url),
+                    );
                     return;
                 }
             }
@@ -155,10 +160,12 @@ impl DownloadImgTask {
             let err_title = format!("保存图片`{url}`失败");
             let string_chain = err.to_string_chain();
             tracing::error!(err_title, message = string_chain);
-            self.download_task.record_image_error(format!(
-                "第 {} 张图片处理或保存失败：{err:#}",
-                self.index + 1
-            ));
+            let failure = classify_failure(&err, TaskStage::Downloading);
+            self.download_task.record_image_error(
+                format!("第 {} 张图片处理或保存失败：{err:#}", self.index + 1),
+                failure.kind,
+                image_line(url),
+            );
             return;
         }
 
@@ -281,6 +288,15 @@ pub(crate) async fn save_img(
     });
     // 在tokio任务中等待rayon任务的完成，避免阻塞worker threads
     receiver.await?
+}
+
+/// 图片线路只保留主机名，避免带签名的完整 URL 进入失败详情和诊断包。
+fn image_line(url: &str) -> Option<String> {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn is_valid_saved_image(path: &Path) -> bool {

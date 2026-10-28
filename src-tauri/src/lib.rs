@@ -22,6 +22,7 @@ mod config_updates;
 mod cover_cache;
 mod crash;
 mod credential_cipher;
+mod diagnostics;
 mod domain_health;
 mod download_manager;
 mod download_queue;

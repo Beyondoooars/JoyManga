@@ -10,7 +10,7 @@ use crate::{
     atomic_fs,
     config::Config,
     download_manager::DownloadTaskState,
-    types::{ChapterInfo, Comic},
+    types::{ChapterInfo, Comic, FailureCount, TaskFailure, TaskStage},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -24,6 +24,18 @@ pub struct DownloadTaskSnapshot {
     pub downloaded_img_count: u32,
     pub total_img_count: u32,
     pub error_message: Option<String>,
+    /// 当前步骤；旧队列没有该字段时按 `Queued` 处理。
+    #[serde(default)]
+    pub stage: TaskStage,
+    /// 首次失败详情；成功/重试后的新任务会重新置空。
+    #[serde(default)]
+    pub failure: Option<TaskFailure>,
+    /// 已发生的尝试次数（图片重试、恢复尝试）。
+    #[serde(default)]
+    pub attempts: u32,
+    /// 按类型聚合的图片失败数，仅在任务失败或阶段切换时落盘。
+    #[serde(default)]
+    pub image_failures: Vec<FailureCount>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -214,7 +226,11 @@ impl DownloadQueue {
             return None;
         }
         let persist = entry.snapshot.state != snapshot.state
-            || entry.snapshot.error_message != snapshot.error_message;
+            || entry.snapshot.error_message != snapshot.error_message
+            || entry.snapshot.stage != snapshot.stage
+            || entry.snapshot.failure != snapshot.failure
+            || entry.snapshot.attempts != snapshot.attempts
+            || entry.snapshot.image_failures != snapshot.image_failures;
         state.revision += 1;
         snapshot.revision = state.revision;
         state
@@ -278,6 +294,10 @@ mod tests {
                 downloaded_img_count: 2,
                 total_img_count: 5,
                 error_message: None,
+                stage: TaskStage::Queued,
+                failure: None,
+                attempts: 0,
+                image_failures: Vec::new(),
             },
             settings: DownloadSettings {
                 download_dir: PathBuf::from("downloads"),
@@ -377,6 +397,76 @@ mod tests {
         snapshot.state = DownloadTaskState::Cancelled;
         queue.update(snapshot).unwrap();
         assert!(DownloadQueue::load(path).unwrap().entries().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_queue_without_observability_fields_loads_with_defaults() {
+        let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("queue.json");
+        let mut value = serde_json::to_value(QueueFile {
+            version: 1,
+            tasks: vec![entry(1, DownloadTaskState::Paused)],
+        })
+        .unwrap();
+        for task in value["tasks"].as_array_mut().unwrap() {
+            let snapshot = task["snapshot"].as_object_mut().unwrap();
+            snapshot.remove("stage");
+            snapshot.remove("failure");
+            snapshot.remove("attempts");
+            snapshot.remove("imageFailures");
+        }
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let loaded = DownloadQueue::load(path).unwrap().entries();
+        let snapshot = &loaded[0].snapshot;
+        assert_eq!(snapshot.state, DownloadTaskState::Paused);
+        assert_eq!(snapshot.stage, TaskStage::Queued);
+        assert!(snapshot.failure.is_none());
+        assert_eq!(snapshot.attempts, 0);
+        assert!(snapshot.image_failures.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failure_details_survive_restart() {
+        let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
+        let path = root.join("queue.json");
+        let queue = DownloadQueue::load(path.clone()).unwrap();
+        let mut snapshot = queue.insert(entry(1, DownloadTaskState::Pending)).unwrap();
+        snapshot.state = DownloadTaskState::Failed;
+        snapshot.stage = TaskStage::Downloading;
+        snapshot.attempts = 2;
+        snapshot.error_message = Some("第 3 张图片读取超时".into());
+        snapshot.failure = Some(TaskFailure {
+            kind: crate::types::FailureKind::Network,
+            message: "第 3 张图片读取超时".into(),
+            retryable: true,
+            stage: TaskStage::Downloading,
+            attempts: 2,
+            line: Some("cdn.example".into()),
+            at: 1_700_000_000_000,
+        });
+        snapshot.image_failures = vec![FailureCount {
+            kind: crate::types::FailureKind::Network,
+            count: 2,
+        }];
+        queue.update(snapshot).unwrap();
+
+        let loaded = DownloadQueue::load(path).unwrap().entries();
+        let restored = &loaded[0].snapshot;
+        assert_eq!(restored.stage, TaskStage::Downloading);
+        assert_eq!(restored.attempts, 2);
+        assert_eq!(
+            restored
+                .failure
+                .as_ref()
+                .map(|failure| failure.line.clone()),
+            Some(Some("cdn.example".into()))
+        );
+        assert_eq!(restored.image_failures.len(), 1);
+        assert_eq!(restored.image_failures[0].count, 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -501,6 +591,10 @@ mod resumed_state_tests {
                 downloaded_img_count: 0,
                 total_img_count: 1,
                 error_message: None,
+                stage: TaskStage::Queued,
+                failure: None,
+                attempts: 0,
+                image_failures: Vec::new(),
             },
         };
         assert_eq!(

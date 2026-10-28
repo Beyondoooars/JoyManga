@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri_specta::Event;
 
-use crate::{download_manager::DownloadTaskState, types::LogLevel};
+use crate::{
+    download_manager::DownloadTaskState,
+    types::{ArchiveStage, FailureCount, LogLevel, TaskFailure, TaskStage},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct DownloadSpeedEvent {
@@ -21,8 +24,12 @@ pub enum DownloadTaskEvent {
         chapter_id: i64,
         revision: u64,
         state: DownloadTaskState,
+        stage: TaskStage,
         downloaded_img_count: u32,
         total_img_count: u32,
+        failure: Option<TaskFailure>,
+        attempts: u32,
+        image_failures: Vec<FailureCount>,
         error_message: Option<String>,
     },
 }
@@ -127,10 +134,14 @@ pub enum ComicArchiveEvent {
         comic_id: i64,
         comic_title: String,
         mode: crate::types::CbzMode,
+        run_id: u64,
+        total: u32,
     },
     #[serde(rename_all = "camelCase")]
     Progress {
         comic_id: i64,
+        run_id: u64,
+        stage: ArchiveStage,
         current: u32,
         total: u32,
     },
@@ -140,12 +151,15 @@ pub enum ComicArchiveEvent {
         comic_title: String,
         mode: crate::types::CbzMode,
         archive_path: PathBuf,
+        run_id: u64,
     },
     #[serde(rename_all = "camelCase")]
     Error {
         comic_id: i64,
         comic_title: String,
         message: String,
+        run_id: u64,
+        failure: TaskFailure,
     },
 }
 

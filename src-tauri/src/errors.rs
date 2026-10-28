@@ -2,6 +2,7 @@ use serde::Serialize;
 use specta::Type;
 
 use crate::extensions::AnyhowErrorToStringChain;
+use crate::types::{now_millis, truncate_failure_message, FailureKind, TaskFailure, TaskStage};
 
 pub type CommandResult<T> = Result<T, CommandError>;
 
@@ -146,6 +147,155 @@ fn kind_for_io(kind: std::io::ErrorKind) -> CommandErrorKind {
     }
 }
 
+/// 将下载 / 归档链路上的错误归类为可诊断的 `TaskFailure`。
+///
+/// 与 `classify` 的区别：这里保留「上游 5xx」与「网络」的区分，并附带阶段、
+/// 可重试性与线路，供任务快照和诊断包直接使用。
+pub fn classify_failure(error: &anyhow::Error, stage: TaskStage) -> TaskFailure {
+    let kind = failure_kind(error);
+    TaskFailure {
+        kind,
+        message: truncate_failure_message(&format!("{error:#}")),
+        retryable: is_retryable(kind, stage),
+        stage,
+        attempts: 1,
+        line: None,
+        at: now_millis(),
+    }
+}
+
+/// 网络 / 上游错误值得重试；解析错误只在接口阶段（换线路或站点恢复后）可重试，
+/// 图片解码和归档解析失败重试通常只会得到同样结果。
+pub fn is_retryable(kind: FailureKind, stage: TaskStage) -> bool {
+    match kind {
+        FailureKind::Network | FailureKind::Upstream => true,
+        FailureKind::Parse => stage == TaskStage::FetchMeta,
+        FailureKind::Business | FailureKind::Storage | FailureKind::Unknown => false,
+    }
+}
+
+fn failure_kind(error: &anyhow::Error) -> FailureKind {
+    for cause in error.chain() {
+        if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
+            return failure_kind_for_reqwest(err);
+        }
+        if let Some(err) = cause.downcast_ref::<reqwest_middleware::Error>() {
+            return match err {
+                reqwest_middleware::Error::Reqwest(err) => failure_kind_for_reqwest(err),
+                reqwest_middleware::Error::Middleware(_) => FailureKind::Unknown,
+            };
+        }
+        if let Some(err) = cause.downcast_ref::<std::io::Error>() {
+            return failure_kind_for_io(err.kind());
+        }
+        if let Some(err) = cause.downcast_ref::<zip::result::ZipError>() {
+            return match err {
+                zip::result::ZipError::Io(_) => FailureKind::Storage,
+                _ => FailureKind::Parse,
+            };
+        }
+        if cause.downcast_ref::<image::ImageError>().is_some()
+            || cause.downcast_ref::<serde_json::Error>().is_some()
+        {
+            return FailureKind::Parse;
+        }
+    }
+    failure_kind_from_message(&format!("{error:#}"))
+}
+
+fn failure_kind_for_reqwest(err: &reqwest::Error) -> FailureKind {
+    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() {
+        return FailureKind::Network;
+    }
+    if err.is_decode() {
+        return FailureKind::Parse;
+    }
+    err.status()
+        .map_or(FailureKind::Unknown, failure_kind_for_status)
+}
+
+fn failure_kind_for_status(status: reqwest::StatusCode) -> FailureKind {
+    match status.as_u16() {
+        401 | 403 | 404 | 410 => FailureKind::Business,
+        408 | 429 | 500..=599 => FailureKind::Upstream,
+        _ => FailureKind::Unknown,
+    }
+}
+
+fn failure_kind_for_io(kind: std::io::ErrorKind) -> FailureKind {
+    match kind {
+        std::io::ErrorKind::TimedOut
+        | std::io::ErrorKind::ConnectionRefused
+        | std::io::ErrorKind::ConnectionReset
+        | std::io::ErrorKind::ConnectionAborted
+        | std::io::ErrorKind::NotConnected
+        | std::io::ErrorKind::UnexpectedEof => FailureKind::Network,
+        _ => FailureKind::Storage,
+    }
+}
+
+/// 类型匹配不到时的兜底：宁可 Unknown，也不能把存储失败说成网络失败。
+fn failure_kind_from_message(message: &str) -> FailureKind {
+    let lower = message.to_lowercase();
+    if lower.contains("timeout") || lower.contains("超时") {
+        return FailureKind::Network;
+    }
+    if lower.contains("登录")
+        || lower.contains("未登录")
+        || lower.contains("avs")
+        || lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("404")
+        || lower.contains("不存在")
+        || lower.contains("已下架")
+        || lower.contains("not found")
+    {
+        return FailureKind::Business;
+    }
+    if lower.contains("gateway")
+        || lower.contains("cloudflare")
+        || lower.contains("状态码`5")
+        || lower.contains("status 5")
+        || lower.contains("http 5")
+        || lower.contains("429")
+        || lower.contains("限流")
+        || lower.contains("网关")
+    {
+        return FailureKind::Upstream;
+    }
+    if lower.contains("json")
+        || lower.contains("html")
+        || lower.contains("解析")
+        || lower.contains("解码")
+        || lower.contains("格式")
+        || lower.contains("parse")
+        || lower.contains("decode")
+    {
+        return FailureKind::Parse;
+    }
+    if lower.contains("磁盘")
+        || lower.contains("空间")
+        || lower.contains("权限")
+        || lower.contains("存储")
+        || lower.contains("写入")
+        || lower.contains("no space")
+        || lower.contains("permission")
+        || lower.contains("read-only")
+    {
+        return FailureKind::Storage;
+    }
+    if lower.contains("network")
+        || lower.contains("连接")
+        || lower.contains("dns")
+        || lower.contains("代理")
+        || lower.contains("断流")
+        || lower.contains("reset")
+    {
+        return FailureKind::Network;
+    }
+    FailureKind::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +332,59 @@ mod tests {
             CommandErrorKind::NotFound,
         );
         assert_eq!(error.kind, CommandErrorKind::NotFound);
+    }
+
+    #[test]
+    fn failure_classification_prefers_error_types() {
+        let disk = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let failure = classify_failure(&disk, TaskStage::Downloading);
+        assert_eq!(failure.kind, FailureKind::Storage);
+        assert!(!failure.retryable);
+
+        let reset = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        let failure = classify_failure(&reset, TaskStage::Downloading);
+        assert_eq!(failure.kind, FailureKind::Network);
+        assert!(failure.retryable);
+    }
+
+    #[test]
+    fn failure_parse_retryability_depends_on_stage() {
+        let error = anyhow::anyhow!("解析图片列表失败：expected value at line 1");
+        let fetching = classify_failure(&error, TaskStage::FetchMeta);
+        assert_eq!(fetching.kind, FailureKind::Parse);
+        assert!(fetching.retryable);
+
+        let downloading = classify_failure(&error, TaskStage::Downloading);
+        assert_eq!(downloading.kind, FailureKind::Parse);
+        assert!(!downloading.retryable);
+    }
+
+    #[test]
+    fn failure_message_fallback_keeps_storage_and_upstream_apart() {
+        let no_space = anyhow::anyhow!("no space left on device");
+        assert_eq!(
+            classify_failure(&no_space, TaskStage::Archiving).kind,
+            FailureKind::Storage
+        );
+
+        let upstream = anyhow::anyhow!("下载图片失败，预料之外的状态码`503`: gateway");
+        assert_eq!(
+            classify_failure(&upstream, TaskStage::Downloading).kind,
+            FailureKind::Upstream
+        );
+
+        let business = anyhow::anyhow!("章节不存在或已下架");
+        let failure = classify_failure(&business, TaskStage::FetchMeta);
+        assert_eq!(failure.kind, FailureKind::Business);
+        assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn failure_carries_stage_and_timestamp() {
+        let failure =
+            classify_failure(&anyhow::anyhow!("请求超时，请重试"), TaskStage::Downloading);
+        assert_eq!(failure.stage, TaskStage::Downloading);
+        assert!(failure.at > 0);
+        assert_eq!(failure.attempts, 1);
     }
 }
