@@ -1,12 +1,13 @@
-//! 登录凭据的本地加密存储。
+//! 登录凭据（账号与密码）的本地加密存储。
 //!
-//! `config.json` 是明文 JSON，直接写密码会让任何能读到文件的工具（备份、文件管理器、
-//! 云同步）看到明文。这里用 AES-256-GCM 加密后以 `enc:v1:<base64>` 形式落盘：
+//! `config.json` 是明文 JSON，直接写账号或密码会让任何能读到文件的工具（备份、
+//! 文件管理器、云同步）看到明文。这里用 AES-256-GCM 加密后以 `enc:v1:<base64>`
+//! 形式落盘：
 //!
 //! - 密钥由本机稳定标识经 HKDF-SHA256 派生，不落盘，换设备无法解密（预期行为）；
 //! - 每次加密使用新的随机 nonce，相同密码两次加密的密文不同；
 //! - 解密失败（密钥变化、文件被改）返回错误而非静默清空，由调用方决定如何提示；
-//! - 历史明文密码原样读出，保存时自动转为密文。
+//! - 历史明文账号/密码原样读出，保存时自动转为密文。
 //!
 //! 这是**本机静态存储保护**，不是防止拿到本机 root 权限的攻击者：密钥派生材料同样
 //! 在本机。目标是让凭据不再以明文出现在配置、备份与日志里。
@@ -42,6 +43,7 @@ fn machine_salt() -> String {
 fn derive_key(machine: &str) -> anyhow::Result<[u8; 32]> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, machine.as_bytes());
     let material = salt.extract(b"joymanga-credential-v1");
+    // 账号与密码共用同一派生密钥；保留旧 info 字符串，避免已落盘的密码无法解密。
     let info: [&[u8]; 1] = [b"config-password"];
     let okm = material
         .expand(&info, KeyLength)

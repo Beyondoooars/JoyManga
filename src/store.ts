@@ -291,6 +291,9 @@ export const useStore = defineStore('store', () => {
     })
   }
   const userProfile = ref<GetUserProfileRespData>()
+  // 用户手动登录进行中：冷启动自动登录的重试必须让路，否则会用新的登录请求
+  // 顶掉正在进行的会话（后端每次登录都会递增 auth_generation）。
+  const manualLoginInProgress = ref(false)
   const pickedComic = ref<Comic>()
   const currentTabName = ref<CurrentTabName>('search')
   /** 打开「我的」前所在的标签页，返回键/关闭时回到这里 */
@@ -714,6 +717,7 @@ function trimProgressHistory() {
     runConfigMaintenance,
     saveConfigNow,
     userProfile,
+    manualLoginInProgress,
     pickedComic,
     currentTabName,
     chapterDetailShowing,
