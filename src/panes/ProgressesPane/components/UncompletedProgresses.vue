@@ -5,6 +5,7 @@ import { SelectionArea, SelectionEvent } from '@viselect/vue'
 import { commands, DownloadTaskState } from '../../../bindings.ts'
 import { DropdownOption, NIcon, ProgressProps, useDialog, useMessage } from 'naive-ui'
 import { getErrorMessage } from '../../../utils/errors.ts'
+import { describeFailure } from '../../../utils/downloadProgress.ts'
 import { useStore } from '../../../store.ts'
 import {
   PhPause,
@@ -377,7 +378,7 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
 
       <div class="task-list">
         <div
-          v-for="[chapterId, { state, comic, chapterInfo, percentage, indicator, errorMessage }] in uncompletedProgresses"
+          v-for="[chapterId, { state, comic, chapterInfo, percentage, indicator, failure, errorMessage }] in uncompletedProgresses"
           :key="chapterId"
           ref="selectableRefs"
           :data-key="chapterId"
@@ -409,7 +410,8 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
             :height="4" />
 
           <div v-if="state === 'Failed'" class="task-error" @dblclick.stop @mousedown.stop>
-            <div role="status">{{ errorMessage || '下载失败，请重试或查看日志' }}</div>
+            <div v-if="failure" class="task-failure-meta">{{ describeFailure(failure) }}</div>
+            <div role="status">{{ failure?.message || errorMessage || '下载失败，请重试或查看日志' }}</div>
             <div class="task-error-actions">
               <button type="button" class="tiny-btn" :disabled="pendingActions.has(chapterId)" @click.stop="handleProgressDoubleClick(state, chapterId)">
                 {{ pendingActions.has(chapterId) ? '正在重试…' : '重试 / 补全' }}
@@ -610,7 +612,17 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
   user-select: text;
 }
 
-.task-error > div:first-child {
+.task-failure-meta {
+  color: var(--jm-text-2);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.task-failure-meta + div {
+  margin-top: 3px;
+}
+
+.task-error [role='status'] {
   max-height: 96px;
   overflow: auto;
   overflow-wrap: anywhere;

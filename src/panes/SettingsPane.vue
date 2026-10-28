@@ -323,7 +323,7 @@ async function exportLogs() {
     const result = await commands.exportLogs(logs)
     if (result.status === 'error') throw new Error(result.error.err_message)
     // 固定保存在书库下的 logs 目录，不再另存一份到系统下载：位置只有这一个
-    message.success(`诊断日志已保存到 ${result.data.filePath}`)
+    message.success(`诊断包已保存到 ${result.data.filePath}`)
   })
 }
 
@@ -445,7 +445,7 @@ const readingSummary = computed(() => {
         <div class="group">
           <button type="button" class="nav-row" @click="openPanel = 'data'">
             <span class="row-icon is-neutral"><PhDatabase :size="19" weight="duotone" /></span>
-            <div class="nav-copy"><strong>数据</strong><span>备份、缓存与诊断日志</span></div>
+            <div class="nav-copy"><strong>数据</strong><span>备份、缓存与诊断包</span></div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'about'">
@@ -530,7 +530,7 @@ const readingSummary = computed(() => {
               <div class="field"><label class="field-label">主机</label><n-input v-model:value="store.config.proxyHost" placeholder="127.0.0.1" /></div>
               <div class="field"><label class="field-label">端口</label><n-input-number :value="store.config.proxyPort" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
             </div>
-            <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN 后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断日志 会记录当时是否识别到 VPN、用的是哪条线路。</p>
+            <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN 后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断包 会记录当时是否识别到 VPN、用的是哪条线路。</p>
           </div>
         </section>
       </template>
@@ -581,7 +581,7 @@ const readingSummary = computed(() => {
             <n-spin v-else :size="16" />
           </button>
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="exportLogs">
-            <div class="nav-copy"><strong>导出诊断日志</strong><span>固定保存到书库的 logs 目录</span></div>
+            <div class="nav-copy"><strong>导出诊断包</strong><span>日志、任务与脱敏配置，保存到书库 logs</span></div>
             <PhCaretRight v-if="dataBusy !== 'logs'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
@@ -601,7 +601,7 @@ const readingSummary = computed(() => {
               <span class="row-value">{{ logsSizeText }}</span>
               <n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs-clear'" @click="clearLogsAction">清理日志</n-button>
             </div>
-            <p class="note">滚动日志按天保存，保留 7 天、上限 20MB；「清理日志」同时清除已导出的诊断日志。</p>
+            <p class="note">滚动日志按天保存，保留 7 天、上限 20MB；「清理日志」同时清除已导出的诊断包。</p>
             <n-button type="error" secondary :disabled="!!dataBusy" @click="resetSettings">重置设置</n-button>
           </div>
         </section>

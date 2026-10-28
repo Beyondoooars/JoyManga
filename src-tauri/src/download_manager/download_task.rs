@@ -2,6 +2,7 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use parking_lot::{Mutex, RwLock};
@@ -11,9 +12,13 @@ use tokio::sync::watch;
 
 use crate::download_queue::{DownloadSettings, DownloadTaskSnapshot};
 use crate::download_scheduler::{run_bounded, DownloadPermit};
+use crate::errors::{classify_failure, is_retryable};
 use crate::events::DownloadTaskEvent;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
-use crate::types::{ChapterInfo, Comic};
+use crate::types::{
+    now_millis, truncate_failure_message, ChapterInfo, Comic, FailureCount, FailureKind,
+    TaskFailure, TaskStage,
+};
 use crate::utils;
 
 use super::image_download::DownloadImgTask;
@@ -64,6 +69,11 @@ pub(crate) struct DownloadTask {
     pub(crate) downloaded_img_count: Arc<AtomicU32>,
     pub(crate) total_img_count: Arc<AtomicU32>,
     pub(crate) error_message: Arc<RwLock<Option<String>>>,
+    pub(crate) stage: Arc<RwLock<TaskStage>>,
+    pub(crate) failure: Arc<RwLock<Option<TaskFailure>>>,
+    pub(crate) attempts: Arc<AtomicU32>,
+    pub(crate) image_failures: Arc<Mutex<Vec<FailureCount>>>,
+    pub(crate) started_at: Instant,
     pub(crate) event_lock: Arc<Mutex<()>>,
     pub(crate) file_writes: Arc<TaskFileWrites>,
     pub(crate) settings: DownloadSettings,
@@ -96,6 +106,12 @@ impl DownloadTask {
             downloaded_img_count: Arc::new(AtomicU32::new(0)),
             total_img_count: Arc::new(AtomicU32::new(0)),
             error_message: Arc::new(RwLock::new(None)),
+            stage: Arc::new(RwLock::new(TaskStage::Queued)),
+            failure: Arc::new(RwLock::new(None)),
+            // 第一次执行也算一次尝试；图片重试会在此基础上累加。
+            attempts: Arc::new(AtomicU32::new(1)),
+            image_failures: Arc::new(Mutex::new(Vec::new())),
+            started_at: Instant::now(),
             event_lock: Arc::new(Mutex::new(())),
             file_writes: Arc::default(),
             settings,
@@ -147,6 +163,7 @@ impl DownloadTask {
         // 恢复时先显示上次进度，开始执行后按实际有效图片重新计数。
         self.downloaded_img_count.store(0, Ordering::Relaxed);
         self.total_img_count.store(0, Ordering::Relaxed);
+        self.set_stage(TaskStage::FetchMeta);
         let comic_title = &self.comic.name;
         let chapter_title = &self.chapter_info.chapter_title;
         let chapter_id = self.chapter_info.chapter_id;
@@ -159,7 +176,7 @@ impl DownloadTask {
             let string_chain = err.to_string_chain();
             tracing::error!(err_title, message = string_chain);
 
-            self.fail(format!("{err_title}：{err:#}"));
+            self.fail_with_error(err_title, &err);
 
             return;
         }
@@ -178,6 +195,7 @@ impl DownloadTask {
         #[allow(clippy::cast_possible_truncation)]
         self.total_img_count
             .store(urls_with_block_num.len() as u32, Ordering::Relaxed);
+        self.set_stage(TaskStage::Downloading);
         // 创建临时下载目录
         let Some(temp_download_dir) = self.create_temp_download_dir() else {
             return;
@@ -201,7 +219,7 @@ impl DownloadTask {
                     urls_with_block_num.len(),
                 )
             }) {
-                self.fail(format!("复用现有章节图片失败：{error:#}"));
+                self.fail_with_error("复用现有章节图片失败".to_string(), &error);
                 return;
             }
         }
@@ -217,10 +235,11 @@ impl DownloadTask {
         )
         .await
         {
-            self.fail(format!("图片任务异常退出：{error:#}"));
+            self.fail_with_error("图片任务异常退出".to_string(), &error);
             return;
         }
         tracing::trace!(comic_title, chapter_title, "所有图片下载任务完成");
+        self.set_stage(TaskStage::Verifying);
         // 检查此章节的图片是否全部下载成功
         let downloaded_img_count = self.downloaded_img_count.load(Ordering::Relaxed);
         let total_img_count = self.total_img_count.load(Ordering::Relaxed);
@@ -232,12 +251,13 @@ impl DownloadTask {
             tracing::error!(err_title, message = err_msg);
 
             let detail = self.error_message.read().clone().unwrap_or_default();
-            self.fail(format!("{err_msg}。{detail}"));
+            self.fail_recorded(format!("{err_msg}。{detail}"));
 
             return;
         }
 
         // 图片全部下载并反混淆校验完成，打包为CBZ并清理临时散图目录
+        self.set_stage(TaskStage::Archiving);
         if let Err(err) = self.file_writes.run(|| {
             package_chapter_to_cbz(
                 &self.comic,
@@ -251,12 +271,14 @@ impl DownloadTask {
             let string_chain = err.to_string_chain();
             tracing::error!(err_title, message = string_chain);
 
-            self.fail(format!("{err_title}：{err:#}"));
+            self.fail_with_error(err_title, &err);
 
             return;
         }
 
         tracing::info!(comic_title, chapter_title, "章节下载与打包成功");
+        self.clear_recorded_failure();
+        self.set_stage(TaskStage::Done);
 
         // 完成只允许从“下载中”迁移：用户恰好在收尾阶段点了暂停时，
         // 不能被这里覆盖成 Completed（否则前端状态与按钮语义错乱）。
@@ -278,7 +300,7 @@ impl DownloadTask {
                 let string_chain = err.to_string_chain();
                 tracing::error!(err_title, message = string_chain);
 
-                self.fail(format!("{err_title}：{err:#}"));
+                self.fail_with_error(err_title, &err);
 
                 return None;
             }
@@ -295,7 +317,7 @@ impl DownloadTask {
             let string_chain = err.to_string_chain();
             tracing::error!(err_title, message = string_chain);
 
-            self.fail(format!("{err_title}：{err:#}"));
+            self.fail_with_error(err_title, &err);
 
             return None;
         }
@@ -327,7 +349,7 @@ impl DownloadTask {
                 let string_chain = err.to_string_chain();
                 tracing::error!(err_title, message = string_chain);
 
-                self.fail(format!("{err_title}：{err:#}"));
+                self.fail_with_error(err_title, &err);
 
                 return None;
             }
@@ -365,12 +387,15 @@ impl DownloadTask {
             Ok(urls) if !urls.is_empty() => urls,
             Ok(_) => {
                 tracing::error!(comic_title, chapter_title, "接口没有返回任何图片");
-                self.fail("接口没有返回任何图片，请稍后重试".to_string());
+                self.fail_kind(
+                    "接口没有返回任何图片，请稍后重试".to_string(),
+                    FailureKind::Upstream,
+                );
                 return None;
             }
             Err(err) => {
                 tracing::error!(comic_title, chapter_title, error = %err, "解析图片列表失败");
-                self.fail(format!("解析图片列表失败：{err:#}"));
+                self.fail_with_error("解析图片列表失败".to_string(), &err);
                 return None;
             }
         };
@@ -491,23 +516,129 @@ impl DownloadTask {
         }
     }
 
-    pub(crate) fn fail(&self, message: String) {
+    /// 记录当前步骤并立即推送一次状态，保证界面能看到「获取信息 / 下载中 / 校验 / 打包」。
+    pub(crate) fn set_stage(&self, stage: TaskStage) {
+        if *self.stage.read() == stage {
+            return;
+        }
+        *self.stage.write() = stage;
+        tracing::debug!(
+            task_id = %self.task_id,
+            comic_id = self.comic.id,
+            chapter_id = self.chapter_info.chapter_id,
+            stage = ?stage,
+            "task_stage"
+        );
+        self.publish_update();
+    }
+
+    /// 把错误归类为可诊断的失败详情，并保留调用方补充的上下文。
+    pub(crate) fn fail_with_error(&self, context: String, error: &anyhow::Error) {
+        let stage = *self.stage.read();
+        let mut failure = classify_failure(error, stage);
+        failure.message = truncate_failure_message(&format!("{context}：{error:#}"));
+        self.fail_with_failure(failure);
+    }
+
+    /// 已知类别、没有底层错误对象时使用（例如接口返回空列表）。
+    pub(crate) fn fail_kind(&self, message: String, kind: FailureKind) {
+        let stage = *self.stage.read();
+        self.fail_with_failure(TaskFailure {
+            kind,
+            message: truncate_failure_message(&message),
+            retryable: is_retryable(kind, stage),
+            stage,
+            attempts: self.attempts.load(Ordering::Relaxed),
+            line: None,
+            at: now_millis(),
+        });
+    }
+
+    /// 图片全部下载后仍不完整：沿用第一张失败图片的类别与线路。
+    pub(crate) fn fail_recorded(&self, message: String) {
+        let stage = *self.stage.read();
+        let mut failure = self.failure.read().clone().unwrap_or_else(|| TaskFailure {
+            kind: FailureKind::Unknown,
+            message: String::new(),
+            retryable: is_retryable(FailureKind::Unknown, stage),
+            stage,
+            attempts: self.attempts.load(Ordering::Relaxed),
+            line: None,
+            at: now_millis(),
+        });
+        failure.message = truncate_failure_message(&message);
+        self.fail_with_failure(failure);
+    }
+
+    fn fail_with_failure(&self, mut failure: TaskFailure) {
         let _guard = self.event_lock.lock();
         if *self.state_sender.borrow() == DownloadTaskState::Cancelled {
             return;
         }
+        failure.stage = *self.stage.read();
+        failure.attempts = self.attempts.load(Ordering::Relaxed);
+        failure.at = now_millis();
+        failure.message = truncate_failure_message(&failure.message);
         self.file_writes.cancel();
-        *self.error_message.write() = Some(message.chars().take(2048).collect());
+        *self.error_message.write() = Some(failure.message.clone());
+        *self.failure.write() = Some(failure.clone());
         self.state_sender.send_replace(DownloadTaskState::Failed);
+        tracing::error!(
+            task_id = %self.task_id,
+            comic_id = self.comic.id,
+            chapter_id = self.chapter_info.chapter_id,
+            stage = ?failure.stage,
+            kind = ?failure.kind,
+            attempt = failure.attempts,
+            line = failure.line.as_deref().unwrap_or("-"),
+            elapsed_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            err = %failure.message,
+            "task_failed"
+        );
         self.publish_update();
     }
 
-    pub(crate) fn record_image_error(&self, message: String) {
+    pub(crate) fn record_image_error(
+        &self,
+        message: String,
+        kind: FailureKind,
+        line: Option<String>,
+    ) {
         let _guard = self.event_lock.lock();
-        let mut error = self.error_message.write();
-        if error.is_none() {
-            *error = Some(message.chars().take(2048).collect());
+        let message = truncate_failure_message(&message);
+        {
+            let mut error = self.error_message.write();
+            if error.is_none() {
+                *error = Some(message.clone());
+            }
         }
+        {
+            let mut failures = self.image_failures.lock();
+            if let Some(count) = failures.iter_mut().find(|count| count.kind == kind) {
+                count.count += 1;
+            } else {
+                failures.push(FailureCount { kind, count: 1 });
+            }
+        }
+        let mut failure = self.failure.write();
+        if failure.is_none() {
+            let stage = *self.stage.read();
+            *failure = Some(TaskFailure {
+                kind,
+                message,
+                retryable: is_retryable(kind, stage),
+                stage,
+                attempts: self.attempts.load(Ordering::Relaxed),
+                line,
+                at: now_millis(),
+            });
+        }
+    }
+
+    fn clear_recorded_failure(&self) {
+        *self.failure.write() = None;
+        self.image_failures.lock().clear();
+        *self.error_message.write() = None;
     }
 
     pub(crate) fn snapshot(&self) -> DownloadTaskSnapshot {
@@ -520,6 +651,10 @@ impl DownloadTask {
             downloaded_img_count: self.downloaded_img_count.load(Ordering::Relaxed),
             total_img_count: self.total_img_count.load(Ordering::Relaxed),
             error_message: self.error_message.read().clone(),
+            stage: *self.stage.read(),
+            failure: self.failure.read().clone(),
+            attempts: self.attempts.load(Ordering::Relaxed),
+            image_failures: self.image_failures.lock().clone(),
         }
     }
 
@@ -529,8 +664,12 @@ impl DownloadTask {
                 chapter_id: snapshot.chapter_info.chapter_id,
                 revision: snapshot.revision,
                 state: snapshot.state,
+                stage: snapshot.stage,
                 downloaded_img_count: snapshot.downloaded_img_count,
                 total_img_count: snapshot.total_img_count,
+                failure: snapshot.failure,
+                attempts: snapshot.attempts,
+                image_failures: snapshot.image_failures,
                 error_message: snapshot.error_message,
             }
             .emit(&self.app);

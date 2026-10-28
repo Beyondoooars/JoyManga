@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use parking_lot::Mutex;
@@ -8,9 +10,10 @@ use tauri_specta::Event;
 
 use crate::archive_intents::ArchiveIntentStore;
 use crate::atomic_fs;
+use crate::errors::classify_failure;
 use crate::events::ComicArchiveEvent;
 use crate::extensions::AppHandleExt;
-use crate::types::{CbzMode, ChapterInfo, Comic};
+use crate::types::{ArchiveStage, CbzMode, ChapterInfo, Comic, TaskStage};
 use crate::utils;
 
 /// 正在执行归档最终整合的漫画 ID 集合（同一本漫画同时只允许一个整合任务）。
@@ -76,6 +79,7 @@ pub fn spawn_finalize_if_idle(app: &AppHandle, comic_id: i64) {
 }
 
 fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
+    let run_id = next_run_id();
     // 排队期间可能又创建了新任务，再次确认空闲状态；运行期间新章节完成会重新调度
     if app
         .get_download_manager()
@@ -87,6 +91,15 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
         Ok(comic) => comic,
         Err(error) => {
             tracing::error!(comic_id, error = %error, "归档最终整合：读取本地漫画失败");
+            let failure = classify_failure(&error, TaskStage::Archiving);
+            let _ = ComicArchiveEvent::Error {
+                comic_id,
+                comic_title: format!("JM{comic_id}"),
+                message: failure.message.clone(),
+                run_id,
+                failure,
+            }
+            .emit(app);
             return;
         }
     };
@@ -97,19 +110,23 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
             .unwrap_or_else(|| app.get_config().read().default_cbz_mode)
     };
     let comic_title = comic.name.clone();
+    let total = downloaded_chapter_count(&comic);
     let _ = ComicArchiveEvent::Start {
         comic_id,
         comic_title: comic_title.clone(),
         mode,
+        run_id,
+        total,
     }
     .emit(app);
+    let mut progress = ArchiveProgressReporter::new(app.clone(), comic_id, run_id, total);
 
     // 清理条件：本次执行期间没有新任务被创建。若新章节已排队/下载，保留意图，
     // 待任务完成触发下一次整合时再处理；否则清除本次已消费的意图。
     let has_new_tasks = app
         .get_download_manager()
         .has_active_tasks_for_comic(comic_id);
-    match run_finalize(app, &comic, mode) {
+    match run_finalize(app, &comic, mode, &mut progress) {
         Ok(archive_path) => {
             if !has_new_tasks {
                 // 运行期间用户可能重新选择了整理方式：只有仍与本次执行一致时才清除意图，
@@ -127,16 +144,20 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
                 comic_title,
                 mode,
                 archive_path,
+                run_id,
             }
             .emit(app);
         }
         Err(error) => {
             let message = format!("{error:#}");
             tracing::error!(comic_id, error = %error, "归档最终整合失败");
+            let failure = classify_failure(&error, TaskStage::Archiving);
             let _ = ComicArchiveEvent::Error {
                 comic_id,
                 comic_title,
                 message,
+                run_id,
+                failure,
             }
             .emit(app);
         }
@@ -150,6 +171,69 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
             .has_active_tasks_for_comic(comic_id)
     {
         spawn_finalize_if_idle(app, comic_id);
+    }
+}
+
+fn next_run_id() -> u64 {
+    static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn downloaded_chapter_count(comic: &Comic) -> u32 {
+    let count = comic
+        .chapter_infos
+        .iter()
+        .filter(|chapter| {
+            chapter.is_downloaded == Some(true) && chapter.chapter_download_dir.is_some()
+        })
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// 归档进度上报：阶段切换立即发，进度最多约每 5% 或 250ms 发一次。
+/// 100 章的合并不会因为逐章事件把前端刷爆。
+struct ArchiveProgressReporter {
+    app: AppHandle,
+    comic_id: i64,
+    run_id: u64,
+    total: u32,
+    stage: Option<ArchiveStage>,
+    last_emit: Instant,
+    last_current: u32,
+}
+
+impl ArchiveProgressReporter {
+    fn new(app: AppHandle, comic_id: i64, run_id: u64, total: u32) -> Self {
+        Self {
+            app,
+            comic_id,
+            run_id,
+            total,
+            stage: None,
+            last_emit: Instant::now(),
+            last_current: 0,
+        }
+    }
+
+    fn emit(&mut self, stage: ArchiveStage, current: u32) {
+        let stage_changed = self.stage != Some(stage);
+        let step = (self.total / 20).max(1);
+        let enough_progress = current >= self.last_current.saturating_add(step);
+        let enough_time = self.last_emit.elapsed() >= Duration::from_millis(250);
+        if !stage_changed && !enough_progress && !enough_time {
+            return;
+        }
+        self.stage = Some(stage);
+        self.last_current = current;
+        self.last_emit = Instant::now();
+        let _ = ComicArchiveEvent::Progress {
+            comic_id: self.comic_id,
+            run_id: self.run_id,
+            stage,
+            current,
+            total: self.total,
+        }
+        .emit(&self.app);
     }
 }
 
@@ -167,7 +251,13 @@ fn local_comic(app: &AppHandle, comic_id: i64) -> anyhow::Result<Comic> {
         .with_context(|| format!("本地书库没有漫画ID `{comic_id}`"))
 }
 
-fn run_finalize(app: &AppHandle, comic: &Comic, mode: CbzMode) -> anyhow::Result<PathBuf> {
+fn run_finalize(
+    app: &AppHandle,
+    comic: &Comic,
+    mode: CbzMode,
+    progress: &mut ArchiveProgressReporter,
+) -> anyhow::Result<PathBuf> {
+    progress.emit(ArchiveStage::Collecting, 0);
     let download_dir = app.get_config().read().download_dir.clone();
     std::fs::create_dir_all(&download_dir)
         .context(format!("创建下载目录`{}`失败", download_dir.display()))?;
@@ -181,27 +271,29 @@ fn run_finalize(app: &AppHandle, comic: &Comic, mode: CbzMode) -> anyhow::Result
             chapter.is_downloaded == Some(true) && chapter.chapter_download_dir.is_some()
         })
         .collect();
+    progress.emit(ArchiveStage::Sorting, 0);
     downloaded.sort_by_key(|chapter| (chapter.order, chapter.chapter_id));
     if downloaded.is_empty() {
         return Err(anyhow!("没有可整合的已下载章节"));
     }
+    progress.emit(ArchiveStage::Packing, 0);
 
     match mode {
         CbzMode::Merge => {
             let target = resolve_merged_target(&canonical_root, comic)?;
             // 读句柄的释放放在真正的提交之前（write_merged_cbz_archive 内）：
             // 合并耗时较长，提前释放会被期间的翻页重新缓存。
-            let total = downloaded.len() as u32;
-            let comic_id = comic.id;
-            let progress_app = app.clone();
-            crate::export::write_merged_cbz_archive(comic, &downloaded, &target, move |current| {
-                let _ = ComicArchiveEvent::Progress {
-                    comic_id,
-                    current,
-                    total,
-                }
-                .emit(&progress_app);
+            crate::export::write_merged_cbz_archive(comic, &downloaded, &target, |current| {
+                progress.emit(ArchiveStage::Packing, current);
             })?;
+            progress.emit(
+                ArchiveStage::Finalizing,
+                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
+            );
+            progress.emit(
+                ArchiveStage::Cleaning,
+                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
+            );
             cleanup_merged_sources(&canonical_root, &target, comic, &downloaded);
             tracing::info!(
                 comic_title = %comic.name,
@@ -213,7 +305,7 @@ fn run_finalize(app: &AppHandle, comic: &Comic, mode: CbzMode) -> anyhow::Result
         }
         CbzMode::PerChapter => {
             let total_chapters = comic.chapter_infos.len();
-            for chapter in &downloaded {
+            for (index, chapter) in downloaded.iter().enumerate() {
                 if let Err(error) =
                     rename_chapter_archive(&canonical_root, comic, total_chapters, chapter)
                 {
@@ -224,7 +316,19 @@ fn run_finalize(app: &AppHandle, comic: &Comic, mode: CbzMode) -> anyhow::Result
                         "章节归档命名整理失败，保留原文件名"
                     );
                 }
+                progress.emit(
+                    ArchiveStage::Packing,
+                    u32::try_from(index + 1).unwrap_or(u32::MAX),
+                );
             }
+            progress.emit(
+                ArchiveStage::Finalizing,
+                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
+            );
+            progress.emit(
+                ArchiveStage::Cleaning,
+                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
+            );
             // 逐话模式的最终形态就是各章节文件本身，回传书库目录便于前端提示定位
             Ok(canonical_root)
         }

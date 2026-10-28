@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::config::{Config, ConfigStorage};
+use crate::diagnostics;
 use crate::errors::{CommandError, CommandResult};
 use crate::extensions::AppHandleExt;
 use crate::logger;
@@ -348,80 +349,28 @@ pub fn export_logs(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let log_file_name = format!("{}{timestamp}.txt", crate::logger::DIAGNOSTIC_LOG_PREFIX);
+    let log_file_name = format!("{}{timestamp}.json", crate::logger::DIAGNOSTIC_JSON_PREFIX);
     let target_file_path = target_dir.join(log_file_name);
 
-    let mut log_content = String::new();
-    log_content.push_str("========================================\n");
-    log_content.push_str("JoyManga 诊断日志导出\n");
-    log_content.push_str("========================================\n");
-    log_content.push_str(&format!(
-        "系统平台: {} / {}\n",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    ));
-    log_content.push_str(&format!("导出时间戳(Unix): {}\n", timestamp));
-    log_content.push_str(&format!("软件版本: {}\n", app.package_info().version));
-    log_content.push_str(&format!("下载目录: {}\n", config.download_dir.display()));
-    log_content.push_str(&format!("导出目录: {}\n", config.export_dir.display()));
-    log_content.push_str(&format!("当前API域名: {}\n", config.get_api_domain()));
-    log_content.push_str(&format!("当前图片域名: {}\n\n", config.get_image_domain()));
+    let report = diagnostics::build_report(&app, frontend_logs)
+        .context("组装诊断包失败")
+        .map_err(|err| CommandError::from("导出诊断包失败", err))?;
+    let bytes = serde_json::to_vec_pretty(&report)
+        .context("序列化诊断包失败")
+        .map_err(|err| CommandError::from("导出诊断包失败", err))?;
 
-    if let Some(fe_logs) = frontend_logs {
-        if !fe_logs.is_empty() {
-            // 前端日志由 IPC 传入，限制条数与单条长度，避免超大载荷把内存打满
-            const MAX_FRONTEND_LOG_LINES: usize = 5_000;
-            const MAX_FRONTEND_LOG_LINE_CHARS: usize = 4_000;
-            log_content.push_str("=== 运行内存日志（最近记录） ===\n");
-            for line in fe_logs.into_iter().take(MAX_FRONTEND_LOG_LINES) {
-                log_content.push_str(
-                    &line
-                        .chars()
-                        .take(MAX_FRONTEND_LOG_LINE_CHARS)
-                        .collect::<String>(),
-                );
-                log_content.push('\n');
-            }
-            log_content.push('\n');
-        }
-    }
-
-    if let Ok(logs_dir) = logger::logs_dir(&app) {
-        if logs_dir.exists() {
-            log_content.push_str("=== 本地历史文件日志 ===\n");
-            let mut log_files: Vec<_> = walkdir::WalkDir::new(&logs_dir)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|e| {
-                    e.file_type().is_file()
-                        && e.path().extension().and_then(|s| s.to_str()) == Some("log")
-                })
-                .map(|e| e.into_path())
-                .collect();
-            log_files.sort();
-            for file_path in log_files {
-                let file_name = file_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                log_content.push_str(&format!("\n--- 文件: {file_name} ---\n"));
-                if let Ok(content) = std::fs::read_to_string(&file_path) {
-                    log_content.push_str(&content);
-                }
-                log_content.push('\n');
-            }
-        }
-    }
-
-    std::fs::write(&target_file_path, log_content.as_bytes())
-        .context(format!("写入日志文件`{}`失败", target_file_path.display()))
-        .map_err(|err| CommandError::from("导出日志失败", err))?;
+    std::fs::write(&target_file_path, &bytes)
+        .context(format!("写入诊断包`{}`失败", target_file_path.display()))
+        .map_err(|err| CommandError::from("导出诊断包失败", err))?;
 
     let file_path_str = target_file_path.to_string_lossy().to_string();
 
-    tracing::info!(path = %file_path_str, "已导出应用运行日志");
+    tracing::info!(path = %file_path_str, bytes = %bytes.len(), "已导出诊断包");
 
     Ok(ExportLogsResult {
         success: true,
         file_path: file_path_str,
-        message: format!("日志已成功导出至：{}", target_file_path.display()),
+        message: format!("诊断包已成功导出至：{}", target_file_path.display()),
     })
 }
 

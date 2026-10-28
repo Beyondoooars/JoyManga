@@ -46,8 +46,21 @@ function mockImage(title, index, page = false) {
 comics.forEach((comic, index) => { comic.localCoverData = mockImage(comic.name, index) })
 let revision = 3
 const tasks = [
-  { taskId: 'failed', revision: 1, state: 'Failed', comic: comics[0], chapterInfo: comics[0].chapterInfos[0], downloadedImgCount: 2, totalImgCount: 5, errorMessage: '总共有 5 张图片，但只下载了 2 张。第 3 张图片读取超时，请检查网络或线路后重试。' },
-  { taskId: 'paused', revision: 2, state: 'Paused', comic: comics[1], chapterInfo: comics[1].chapterInfos[0], downloadedImgCount: 0, totalImgCount: 0, errorMessage: null },
+  {
+    taskId: 'failed', revision: 1, state: 'Failed', comic: comics[0], chapterInfo: comics[0].chapterInfos[0],
+    downloadedImgCount: 2, totalImgCount: 5, stage: 'downloading', attempts: 3,
+    failure: {
+      kind: 'network', message: '总共有 5 张图片，但只下载了 2 张。第 3 张图片读取超时，请检查网络或线路后重试。',
+      retryable: true, stage: 'downloading', attempts: 3, line: 'img.fixture.invalid', at: 1,
+    },
+    imageFailures: [{ kind: 'network', count: 3 }],
+    errorMessage: '总共有 5 张图片，但只下载了 2 张。第 3 张图片读取超时，请检查网络或线路后重试。',
+  },
+  {
+    taskId: 'paused', revision: 2, state: 'Paused', comic: comics[1], chapterInfo: comics[1].chapterInfos[0],
+    downloadedImgCount: 0, totalImgCount: 0, stage: 'queued', attempts: 1, failure: null,
+    imageFailures: [], errorMessage: null,
+  },
 ]
 // ?signed-in=0 可查看未登录的「我的」页；默认展示已登录形态
 const signedIn = new URLSearchParams(location.search).get('signed-in') !== '0'
@@ -147,6 +160,10 @@ mockIPC(async (command, args) => {
     if (!task) throw new Error('模拟任务不存在')
     task.state = command === 'cancel_download_task' ? 'Cancelled' : command === 'pause_download_task' ? 'Paused' : 'Pending'
     task.errorMessage = null
+    task.stage = 'queued'
+    task.failure = null
+    task.attempts = 1
+    task.imageFailures = []
     task.revision = ++revision
     emitTask(structuredClone(task))
     return null

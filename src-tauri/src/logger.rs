@@ -333,8 +333,10 @@ pub const TARGET_LOGS_TOTAL_SIZE: u64 = 10 * 1024 * 1024; // 10 MB 清理目标�
 
 /// 滚动日志文件名前缀：`<前缀>.YYYY-MM-DD.log`
 pub const LOG_FILE_PREFIX: &str = "joymanga";
-/// 诊断日志导出文件名前缀：`<前缀>-log-<时间戳>.txt`
+/// 旧版诊断日志导出文件名前缀：`<前缀>-log-<时间戳>.txt`（仅用于清理与识别）
 pub const DIAGNOSTIC_LOG_PREFIX: &str = "joymanga-log-";
+/// 诊断包文件名前缀：`<前缀>-<时间戳>.json`
+pub const DIAGNOSTIC_JSON_PREFIX: &str = "joymanga-diagnostics-";
 /// 崩溃报告前缀：`crash-<unix 秒>.log`，由 panic hook 在日志系统未就绪时直接写盘
 pub const CRASH_LOG_PREFIX: &str = "crash-";
 
@@ -343,12 +345,16 @@ pub fn is_managed_log_file(file_name: &str) -> bool {
     // 诊断日志前缀（`joymanga-log-`）本身以滚动日志前缀（`joymanga`）开头，
     // 因此滚动日志必须先排除诊断前缀，否则 `joymanga-log-*.log` 会被误判。
     let is_diagnostic_log = lower.starts_with(DIAGNOSTIC_LOG_PREFIX) && lower.ends_with(".txt");
+    let is_diagnostic_json = lower.starts_with(DIAGNOSTIC_JSON_PREFIX) && lower.ends_with(".json");
     let is_rolling_log = !is_diagnostic_log
+        && !is_diagnostic_json
         && !lower.starts_with(DIAGNOSTIC_LOG_PREFIX)
+        && !lower.starts_with(DIAGNOSTIC_JSON_PREFIX)
         && lower.starts_with(LOG_FILE_PREFIX)
         && lower.ends_with(".log");
     is_rolling_log
         || is_diagnostic_log
+        || is_diagnostic_json
         || (lower.starts_with("panic") && lower.ends_with(".log"))
         || (lower.starts_with(CRASH_LOG_PREFIX) && lower.ends_with(".log"))
 }
@@ -524,6 +530,7 @@ mod tests {
     fn test_is_managed_log_file() {
         assert!(is_managed_log_file("joymanga.2026-09-29.log"));
         assert!(is_managed_log_file("joymanga-log-1727610000.txt"));
+        assert!(is_managed_log_file("joymanga-diagnostics-1727610000.json"));
         assert!(is_managed_log_file("panic.log"));
         // panic hook 写出的崩溃报告同样纳入清理，避免长期堆积
         assert!(is_managed_log_file("crash-1727610000.log"));

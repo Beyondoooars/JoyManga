@@ -8,6 +8,7 @@ import { PhArrowClockwise, PhArrowLeft, PhBookOpen, PhDownloadSimple, PhFolderOp
 import IconButton from '../components/IconButton.vue'
 import { useMessage } from 'naive-ui'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
+import { failureKindLabels } from '../utils/downloadProgress.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
 
@@ -15,6 +16,8 @@ const emit = defineEmits<{ (e: 'back'): void }>()
 const store = useStore()
 const message = useMessage()
 const { isMobile } = useIsMobile()
+// 整合失败只在本次会话内保留：成功或重新开始后由 store 清除
+const archiveFailure = computed(() => store.pickedComic ? store.archiveFailure(store.pickedComic.id) : undefined)
 
 function handleBack() {
   store.closeComicDetail()
@@ -468,6 +471,15 @@ function isDownloading(state: State) {
             <span class="stats-item is-brand">已选 <strong>{{ checkedIds.length }}</strong></span>
             <n-tag v-if="store.isArchiving(store.pickedComic.id)" type="warning" size="small" round class="archiving-tag">
               正在整合 CBZ…
+            </n-tag>
+            <n-tag
+              v-else-if="archiveFailure"
+              type="error"
+              size="small"
+              round
+              class="archiving-tag"
+              :title="archiveFailure.message">
+              整合失败 · {{ failureKindLabels[archiveFailure.kind] }}
             </n-tag>
           </div>
 

@@ -3,6 +3,7 @@ import type { CurrentTabName, ProgressData, ProgressesPaneTabName } from './type
 import {
   commands,
   events,
+  type ArchiveStage,
   type Comic,
   type ComicArchiveEvent,
   type LoginRespData,
@@ -15,6 +16,7 @@ import {
   type GetWeeklyResult,
   type LogEvent,
   type SearchResult,
+  type TaskFailure,
 } from './bindings.ts'
 import { computed, nextTick, ref, toRaw } from 'vue'
 import { mergeServerConfig, hasConfigChanges } from './utils/configState.ts'
@@ -158,29 +160,48 @@ export const useStore = defineStore('store', () => {
     return stateReady
   }
 
-  // 正在执行 CBZ 自动整合（合并/命名整理）的漫画：下载完成前不可阅读打开的窗口期
-  const archivingComics = ref(new Map<number, { current: number; total: number }>())
+  // 正在执行 CBZ 自动整合（合并/命名整理）的漫画：下载完成前不可阅读打开的窗口期。
+  // runId 用来隔离重试：旧运行迟到的进度/结束事件不能覆盖新运行。
+  const archivingComics = ref(
+    new Map<number, { runId: number; stage: ArchiveStage; current: number; total: number }>(),
+  )
+  // 最近一次整合失败按漫画保留，成功或下一次开始后清除；只在本次会话内有效。
+  const archiveFailures = ref(new Map<number, TaskFailure>())
 
   function isArchiving(comicId: number) {
     return archivingComics.value.has(comicId)
   }
 
+  function archiveFailure(comicId: number) {
+    return archiveFailures.value.get(comicId)
+  }
+
   function handleArchiveEvent(payload: ComicArchiveEvent) {
+    const { comicId } = payload.data
     switch (payload.event) {
       case 'Start':
-        archivingComics.value.set(payload.data.comicId, { current: 0, total: 0 })
+        archiveFailures.value.delete(comicId)
+        archivingComics.value.set(comicId, {
+          runId: payload.data.runId,
+          stage: 'collecting',
+          current: 0,
+          total: payload.data.total,
+        })
         break
       case 'Progress': {
-        const state = archivingComics.value.get(payload.data.comicId)
-        if (state) {
-          state.current = payload.data.current
-          state.total = payload.data.total
-        }
+        const state = archivingComics.value.get(comicId)
+        if (!state || state.runId !== payload.data.runId) break
+        state.stage = payload.data.stage
+        state.current = payload.data.current
+        state.total = payload.data.total
         break
       }
       case 'End': {
-        archivingComics.value.delete(payload.data.comicId)
-        if (pickedComic.value?.id === payload.data.comicId) {
+        const state = archivingComics.value.get(comicId)
+        if (state && state.runId !== payload.data.runId) break
+        archivingComics.value.delete(comicId)
+        archiveFailures.value.delete(comicId)
+        if (pickedComic.value?.id === comicId) {
           pickedComic.value.isDownloaded = true
         }
         // 整合会重写书库文件（合并成整本 CBZ 或改名），列表必须重新扫描；
@@ -194,7 +215,11 @@ export const useStore = defineStore('store', () => {
         break
       }
       case 'Error': {
-        archivingComics.value.delete(payload.data.comicId)
+        const state = archivingComics.value.get(comicId)
+        if (state && state.runId !== payload.data.runId) break
+        archivingComics.value.delete(comicId)
+        archiveFailures.value.set(comicId, payload.data.failure)
+        console.error('整合失败', payload.data.message, payload.data.failure)
         break
       }
     }
@@ -674,7 +699,7 @@ function trimProgressHistory() {
     openAccount, closeAccount, openSettings, closeSettings, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
-    archivingComics, isArchiving,
+    archivingComics, isArchiving, archiveFailures, archiveFailure,
     exportProgresses, initExportListener,
     initDownloadListener, reloadTasks, taskLoadError, loadingTasks,
     readingState,

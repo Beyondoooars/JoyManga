@@ -64,6 +64,15 @@ impl ArchiveIntentStore {
         self.state.lock().get(&comic_id).copied()
     }
 
+    /// 供诊断包读取当前待执行的归档意图（只读快照）。
+    pub fn entries(&self) -> Vec<(i64, CbzMode)> {
+        self.state
+            .lock()
+            .iter()
+            .map(|(comic_id, mode)| (*comic_id, *mode))
+            .collect()
+    }
+
     pub fn remove(&self, comic_id: i64) {
         let mut state = self.state.lock();
         if state.shift_remove(&comic_id).is_some() {

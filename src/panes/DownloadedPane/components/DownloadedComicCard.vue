@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { type Comic, commands } from '../../../bindings.ts'
+import { type ArchiveStage, type Comic, commands } from '../../../bindings.ts'
 import { useStore } from '../../../store.ts'
 import { PhArchive, PhCheck, PhDotsThree, PhFolderOpen, PhImage } from '@phosphor-icons/vue'
 import { computed, h, onBeforeUnmount, ref } from 'vue'
@@ -7,6 +7,7 @@ import { NDropdown, useMessage } from 'naive-ui'
 import { isMergeableComic, localChapters } from '../../../utils/mergeableComics.ts'
 import { useIsMobile } from '../../../composables/useIsMobile.ts'
 import { formatCommandError, getErrorMessage } from '../../../utils/errors.ts'
+import { failureKindLabels } from '../../../utils/downloadProgress.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -18,7 +19,36 @@ const percent = computed(() => {
   if (!value || value.totalPages <= 0) return 0
   return Math.min(100, Math.max(1, Math.round((value.page / value.totalPages) * 100)))
 })
-const archiving = computed(() => store.isArchiving(props.comic.id))
+const archivingInfo = computed(() => store.archivingComics.get(props.comic.id))
+const archiving = computed(() => archivingInfo.value !== undefined)
+const archiveFailure = computed(() => store.archiveFailure(props.comic.id))
+
+const archiveStageLabels: Record<ArchiveStage, string> = {
+  collecting: '收集章节',
+  sorting: '排序',
+  packing: '打包',
+  finalizing: '收尾',
+  cleaning: '清理原文件',
+}
+
+const archivingLabel = computed(() => {
+  const info = archivingInfo.value
+  if (!info) return ''
+  if (info.total <= 0) return '整合中'
+  return `整合中 ${Math.min(100, Math.round(info.current / info.total * 100))}%`
+})
+
+const archivingTitle = computed(() => {
+  const info = archivingInfo.value
+  if (!info) return ''
+  const stage = archiveStageLabels[info.stage]
+  return info.total > 0 ? `${stage} ${info.current}/${info.total}` : stage
+})
+
+const archiveFailureTitle = computed(() => {
+  const failure = archiveFailure.value
+  return failure ? `${failureKindLabels[failure.kind]}：${failure.message}` : ''
+})
 
 const props = defineProps<{
   comic: Comic
@@ -175,7 +205,7 @@ onBeforeUnmount(clearPress)
     <button
       type="button"
       class="tile-cover"
-      :aria-label="selectionMode ? `选择《${comic.name}》` : archiving ? `《${comic.name}》正在整合` : `阅读《${comic.name}》`"
+      :aria-label="selectionMode ? `选择《${comic.name}》` : archiving ? `《${comic.name}》正在整合` : archiveFailure ? `《${comic.name}》整合失败` : `阅读《${comic.name}》`"
       @click.capture="onClickCapture"
       @click="onCoverClick"
       @pointerdown="startPress"
@@ -201,7 +231,8 @@ onBeforeUnmount(clearPress)
       </span>
 
       <span v-if="comic.id < 0" class="tile-origin">导入</span>
-      <span v-if="archiving" class="tile-archiving">整合中</span>
+      <span v-if="archiving" class="tile-archiving" :title="archivingTitle">{{ archivingLabel }}</span>
+      <span v-else-if="archiveFailure" class="tile-archiving is-failed" :title="archiveFailureTitle">整合失败</span>
 
       <span v-if="progress" class="tile-progress" aria-hidden="true">
         <span :style="{ width: `${percent}%` }"></span>
@@ -325,6 +356,10 @@ onBeforeUnmount(clearPress)
 
 .tile-archiving {
   background: rgba(217, 131, 0, 0.9);
+}
+
+.tile-archiving.is-failed {
+  background: rgba(222, 59, 59, 0.9);
 }
 
 /* 阅读进度：贴着封面底边，粉色只在有进度时出现 */

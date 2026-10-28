@@ -472,6 +472,10 @@ updateDownloadedComicsEvent: "update-downloaded-comics-event"
 
 export type ApiDomainMode = "Domain1" | "Domain2" | "Domain3" | "Domain4" | "Domain5" | "Custom"
 export type ApiDomainPreset = { mode: ApiDomainMode; label: string; domain: string }
+/**
+ * 归档整合的子阶段。
+ */
+export type ArchiveStage = "collecting" | "sorting" | "packing" | "finalizing" | "cleaning"
 export type Category = { id: string | null; title: string | null }
 export type CategoryInWeeklyInfo = { id: string; title: string; time: string }
 export type CategoryRespData = { id: string | null; title: string | null }
@@ -501,7 +505,7 @@ export type Comic = { id: number; name: string; addtime: string; description: st
 /**
  * 下载完成后的 CBZ 自动整合（合并为单文件 / 逐话命名）过程事件。
  */
-export type ComicArchiveEvent = { event: "Start"; data: { comicId: number; comicTitle: string; mode: CbzMode } } | { event: "Progress"; data: { comicId: number; current: number; total: number } } | { event: "End"; data: { comicId: number; comicTitle: string; mode: CbzMode; archivePath: string } } | { event: "Error"; data: { comicId: number; comicTitle: string; message: string } }
+export type ComicArchiveEvent = { event: "Start"; data: { comicId: number; comicTitle: string; mode: CbzMode; runId: number; total: number } } | { event: "Progress"; data: { comicId: number; runId: number; stage: ArchiveStage; current: number; total: number } } | { event: "End"; data: { comicId: number; comicTitle: string; mode: CbzMode; archivePath: string; runId: number } } | { event: "Error"; data: { comicId: number; comicTitle: string; message: string; runId: number; failure: TaskFailure } }
 export type ComicInFavorite = { id: number; author: string; description: string | null; name: string; latestEp: string | null; latestEpAid: string | null; image: string; category: CategoryRespData; categorySub: CategorySubRespData; isDownloaded: boolean; comicDownloadDir: string }
 export type ComicInSearch = { id: number; author: string; name: string; image: string; category: CategoryRespData; categorySub: CategorySubRespData; liked: boolean; isFavorite: boolean; updateAt: number; isDownloaded: boolean; comicDownloadDir: string }
 export type ComicInWeekly = { id: number; author: string; description: string; name: string; image: string; category: Category; category_sub: CategorySub; liked: boolean; is_favorite: boolean; update_at: number; is_downloaded: boolean; comic_download_dir: string }
@@ -616,11 +620,55 @@ elapsedDays: number }
 export type DirectoryEntry = { name: string; path: string }
 export type DownloadAllFavoritesEvent = { event: "GetFavoritesStart" } | { event: "GetComicsProgress"; data: { current: number; total: number } } | { event: "StartCreateDownloadTasks"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreatingDownloadTask"; data: { comicId: number; current: number } } | { event: "EndCreateDownloadTasks"; data: { comicId: number } } | { event: "GetComicsEnd" }
 export type DownloadSpeedEvent = { speed: string }
-export type DownloadTaskEvent = { event: "Create"; data: DownloadTaskSnapshot } | { event: "Update"; data: { chapterId: number; revision: number; state: DownloadTaskState; downloadedImgCount: number; totalImgCount: number; errorMessage: string | null } }
-export type DownloadTaskSnapshot = { taskId: string; revision: number; state: DownloadTaskState; comic: Comic; chapterInfo: ChapterInfo; downloadedImgCount: number; totalImgCount: number; errorMessage: string | null }
+export type DownloadTaskEvent = { event: "Create"; data: DownloadTaskSnapshot } | { event: "Update"; data: { chapterId: number; revision: number; state: DownloadTaskState; stage: TaskStage; downloadedImgCount: number; totalImgCount: number; failure: TaskFailure | null; attempts: number; imageFailures: FailureCount[]; errorMessage: string | null } }
+export type DownloadTaskSnapshot = { taskId: string; revision: number; state: DownloadTaskState; comic: Comic; chapterInfo: ChapterInfo; downloadedImgCount: number; totalImgCount: number; errorMessage: string | null; 
+/**
+ * 当前步骤；旧队列没有该字段时按 `Queued` 处理。
+ */
+stage?: TaskStage; 
+/**
+ * 首次失败详情；成功/重试后的新任务会重新置空。
+ */
+failure?: TaskFailure | null; 
+/**
+ * 已发生的尝试次数（图片重试、恢复尝试）。
+ */
+attempts?: number; 
+/**
+ * 按类型聚合的图片失败数，仅在任务失败或阶段切换时落盘。
+ */
+imageFailures?: FailureCount[] }
 export type DownloadTaskState = "Pending" | "Downloading" | "Paused" | "Cancelled" | "Completed" | "Failed"
 export type ExportCbzEvent = { event: "Start"; data: { uuid: string; comicTitle: string; total: number } } | { event: "Progress"; data: { uuid: string; current: number } } | { event: "Error"; data: { uuid: string } } | { event: "End"; data: { uuid: string; chapterExportDir: string } }
 export type ExportLogsResult = { success: boolean; filePath: string; message: string }
+/**
+ * 同一任务内按类型聚合的图片失败计数。
+ */
+export type FailureCount = { kind: FailureKind; count: number }
+/**
+ * 失败原因分类：用于界面提示、重试决策与诊断包聚合。
+ */
+export type FailureKind = 
+/**
+ * 超时、DNS、TLS、连接被重置、代理不通
+ */
+"network" | 
+/**
+ * 5xx、网关页、限流、被墙、域名失效
+ */
+"upstream" | 
+/**
+ * JSON / HTML / 图片 / 归档内容解析失败
+ */
+"parse" | 
+/**
+ * 权限、磁盘满、IO、文件锁
+ */
+"storage" | 
+/**
+ * 401/404、章节不可用等业务语义失败
+ */
+"business" | "unknown"
 export type FavoriteChangedEvent = { comicId: number; isFavorite: boolean; sessionEpoch: number }
 export type FavoriteFolderRespData = { FID: string; UID: string; name: string }
 export type FavoriteSort = "FavoriteTime" | "UpdateTime"
@@ -708,6 +756,26 @@ export type SearchResult = { searchQuery: string; total: number; content: ComicI
 export type SearchResultVariant = { SearchResult: SearchResult } | { Comic: Comic }
 export type SearchSort = "Latest" | "View" | "Picture" | "Like"
 export type SessionChangedEvent = { sessionEpoch: number; profile: GetUserProfileRespData | null }
+/**
+ * 一次可诊断的失败详情。
+ */
+export type TaskFailure = { kind: FailureKind; 
+/**
+ * 用户可读信息，最多 2048 字符。
+ */
+message: string; retryable: boolean; stage: TaskStage; attempts: number; 
+/**
+ * 只记录线路主机名，不记录完整 URL（避免签名参数进入日志/诊断包）。
+ */
+line: string | null; 
+/**
+ * 毫秒时间戳。
+ */
+at: number }
+/**
+ * 任务当前正在执行的步骤。与 `DownloadTaskState`（生命周期）互补，不互相替代。
+ */
+export type TaskStage = "queued" | "fetchMeta" | "downloading" | "verifying" | "archiving" | "done"
 export type UpdateDownloadedComicsEvent = { event: "GetComicStart"; data: { total: number } } | { event: "GetComicProgress"; data: { current: number; total: number } } | { event: "CreateDownloadTasksStart"; data: { comicId: number; comicTitle: string; current: number; total: number } } | { event: "CreateDownloadTaskProgress"; data: { comicId: number; current: number } } | { event: "CreateDownloadTasksEnd"; data: { comicId: number } } | { event: "GetComicEnd" }
 export type ValidatedDownloadDir = { canonicalPath: string }
 export type WeeklyType = { id: string; title: string }
