@@ -1,7 +1,7 @@
 {
   "name": "joymanga",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "面向 Android 的漫画下载与本地阅读工具",
   "author": "Beyondoooars",
