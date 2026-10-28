@@ -73,18 +73,15 @@ jobs:
           node-version: lts/*
 
       # 主分支与手动触发的构建自动递增版本号：无需本地执行 pnpm bump 再手动提交。
-      # 里程碑合入 main 时，在提交信息里带 [minor]，自动按 minor 递增；
-      # 其余 main 推送按 patch 递增（只用于修复）。
+      # 里程碑合入 main 时，在提交信息末尾加一行 Release-Bump: minor（或 major）；
+      # 其余 main 推送按 patch 递增（只用于修复）。用 trailer 而不是方括号标记，
+      # 避免提交说明里提到标记本身时被误判。
       - name: Determine version bump
         id: bump
         if: github.ref == 'refs/heads/main'
         run: |
-          msg=$(git log -1 --pretty=%B)
-          if [[ "$msg" == *"[minor]"* ]]; then
-            echo "bump=minor" >> "$GITHUB_OUTPUT"
-          else
-            echo "bump=patch" >> "$GITHUB_OUTPUT"
-          fi
+          bump=$(git log -1 --pretty=%B | sed -nE 's/^Release-Bump:[[:space:]]*(minor|major)[[:space:]]*$/\1/p' | tail -n 1)
+          echo "bump=${bump:-patch}" >> "$GITHUB_OUTPUT"
 
       # agent / milestone 分支与打 tag 的构建保持仓库里已有的版本号，不重复递增。
       - name: Bump version

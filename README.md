@@ -142,7 +142,7 @@ pnpm build:android
 需要升 minor/major 时，在 Actions 面板手动运行 **Android Build**，`version` 输入 `minor`、`major` 或明确的 `X.Y.Z`。
 本地仍可用 `pnpm bump <patch|minor|major|X.Y.Z>` 手动同步版本号。
 
-功能开发在 `milestone/v0.x` 分支进行，CI 只构建不发布；验收通过后合入 `main`，并在合并提交信息中带上 `[minor]`，CI 会自动按 minor 递增并发布。`main` 始终是可日常使用的版本。
+功能开发在 `milestone/v0.x` 分支进行，CI 只构建不发布；验收通过后合入 `main`，并在合并提交信息末尾加一行 `Release-Bump: minor`，CI 会自动按 minor 递增并发布。`main` 始终是可日常使用的版本。
 
 ---
 
