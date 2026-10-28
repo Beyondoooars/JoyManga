@@ -10,6 +10,7 @@ on:
     branches:
       - main
       - 'agent/**'
+      - 'milestone/**'
     tags:
       - 'v*'
 
@@ -72,11 +73,24 @@ jobs:
           node-version: lts/*
 
       # 主分支与手动触发的构建自动递增版本号：无需本地执行 pnpm bump 再手动提交。
-      # agent 分支与打 tag 的构建保持仓库里已有的版本号，不重复递增。
+      # 里程碑合入 main 时，在提交信息里带 [minor]，自动按 minor 递增；
+      # 其余 main 推送按 patch 递增（只用于修复）。
+      - name: Determine version bump
+        id: bump
+        if: github.ref == 'refs/heads/main'
+        run: |
+          msg=$(git log -1 --pretty=%B)
+          if [[ "$msg" == *"[minor]"* ]]; then
+            echo "bump=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "bump=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      # agent / milestone 分支与打 tag 的构建保持仓库里已有的版本号，不重复递增。
       - name: Bump version
         if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         env:
-          BUMP: ${{ github.event.inputs.version || 'patch' }}
+          BUMP: ${{ github.event.inputs.version || steps.bump.outputs.bump || 'patch' }}
         run: node scripts/bump-version.mjs "$BUMP"
 
       - name: Setup pnpm
@@ -109,7 +123,7 @@ jobs:
             VERSION="${GITHUB_REF#refs/tags/v}"
             node scripts/bump-version.mjs "$VERSION" > /dev/null
           else
-            # main 上由上一步自动递增；agent 分支沿用仓库里已有的版本号
+            # main 上由上一步自动递增；agent / milestone 分支沿用仓库里已有的版本号
             VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
@@ -196,7 +210,7 @@ jobs:
         run: node scripts/release-notes.mjs "$VERSION" release-notes.md
 
       # 每次 main 构建（含手动触发）都发布 Release：应用内更新依赖它发现新版本。
-      # agent 分支只产出构建产物，不发布。
+      # agent / milestone 分支只产出构建产物，不发布。
       - name: Publish release
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
