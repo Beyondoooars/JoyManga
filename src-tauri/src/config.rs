@@ -275,34 +275,55 @@ fn migrate_config_schema(value: &mut serde_json::Value) {
 
 /// 将配置序列化为磁盘存储格式。
 ///
-/// 密码单独加密后写入，其余字段仍是明文 JSON（便于用户查看与自用）。
+/// 登录账号与密码分别加密后写入，其余字段仍是明文 JSON（便于用户查看与自用）。
 fn serialize_config_for_storage(config: &Config) -> anyhow::Result<String> {
     let mut value = serde_json::to_value(config).context("序列化配置失败")?;
-    // 加密失败时不能退回明文：宁可这次保存失败，也不要让密码以明文落盘。
-    let encrypted = crate::credential_cipher::encrypt_for_this_machine(&config.password)
+    // 加密失败时不能退回明文：宁可这次保存失败，也不要让凭据以明文落盘。
+    let encrypted_username = crate::credential_cipher::encrypt_for_this_machine(&config.username)
+        .context("加密登录账号失败")?;
+    let encrypted_password = crate::credential_cipher::encrypt_for_this_machine(&config.password)
         .context("加密登录密码失败")?;
     if let Some(object) = value.as_object_mut() {
-        object.insert("password".into(), serde_json::Value::String(encrypted));
+        object.insert(
+            "username".into(),
+            serde_json::Value::String(encrypted_username),
+        );
+        object.insert(
+            "password".into(),
+            serde_json::Value::String(encrypted_password),
+        );
     }
     serde_json::to_string_pretty(&value).context("序列化配置失败")
 }
 
+/// 解密对象里的一个凭据字段；缺失或非字符串时保持原样。
+fn decrypt_stored_credential(
+    value: &mut serde_json::Value,
+    field: &str,
+    label: &str,
+) -> anyhow::Result<()> {
+    let Some(stored) = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+    let decrypted = crate::credential_cipher::decrypt_for_this_machine(&stored)
+        .with_context(|| format!("解密登录{label}失败"))?;
+    value[field] = serde_json::Value::String(decrypted);
+    Ok(())
+}
+
 /// 从磁盘存储格式反序列化配置。
 ///
-/// 密码先解密再交给 `Config`；历史明文密码原样通过，下次保存时自动转为密文。
+/// 账号与密码先解密再交给 `Config`；历史明文凭据原样通过，下次保存时自动转为密文。
 fn deserialize_config_from_storage(config_string: &str) -> anyhow::Result<Config> {
     let mut value: serde_json::Value =
         serde_json::from_str(config_string).context("解析配置JSON失败")?;
     migrate_config_schema(&mut value);
-    if let Some(password) = value
-        .get("password")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-    {
-        let decrypted = crate::credential_cipher::decrypt_for_this_machine(&password)
-            .context("解密登录密码失败")?;
-        value["password"] = serde_json::Value::String(decrypted);
-    }
+    decrypt_stored_credential(&mut value, "username", "账号")?;
+    decrypt_stored_credential(&mut value, "password", "密码")?;
     serde_json::from_value(value).context("将配置JSON反序列化为Config失败")
 }
 
@@ -477,17 +498,30 @@ impl Config {
             return default_config;
         };
         migrate_config_schema(&mut user_value);
-        // 磁盘上密码是密文：逐字段恢复也要先解密，否则会把 `enc:v1:…` 当成密码。
-        // 解密失败（换过机器、文件被改）时清空该字段，让用户重新登录，而不是把
-        // 密文当密码发出去。
-        if let Some(password) = user_value
-            .get("password")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-        {
-            let decrypted =
-                crate::credential_cipher::decrypt_for_this_machine(&password).unwrap_or_default();
-            user_value["password"] = serde_json::Value::String(decrypted);
+        // 磁盘上账号与密码都是密文：逐字段恢复也要先解密，否则会把 `enc:v1:…`
+        // 当成账号或密码发出去。解密失败（换过机器、文件被改）时清空该字段，
+        // 让用户重新登录；`Config::new` 会先把原配置备份到 `config.invalid-*.json`。
+        for (field, label) in [("username", "账号"), ("password", "密码")] {
+            let Some(stored) = user_value
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let decrypted = match crate::credential_cipher::decrypt_for_this_machine(&stored) {
+                Ok(decrypted) => decrypted,
+                Err(error) => {
+                    tracing::warn!(
+                        field = field,
+                        label = label,
+                        error = %error,
+                        "保存的登录凭据无法解密，本次以空值启动"
+                    );
+                    String::new()
+                }
+            };
+            user_value[field] = serde_json::Value::String(decrypted);
         }
         let serde_json::Value::Object(user_map) = user_value else {
             return default_config;
@@ -784,24 +818,24 @@ mod tests {
         config.username = "alice".to_string();
         config.password = "plain-password".to_string();
 
-        // 密码必须加密落盘：配置会被备份、被文件管理器看到，明文等于泄漏
+        // 账号与密码都必须加密落盘：配置会被备份、被文件管理器看到，明文等于泄漏
         let stored = serialize_config_for_storage(&config).unwrap();
-        assert!(stored.contains("alice"));
+        assert!(!stored.contains("alice"), "账号不能以明文出现在配置里");
         assert!(
             !stored.contains("plain-password"),
             "密码不能以明文出现在配置里"
         );
-        assert!(stored.contains("enc:v1:"));
+        assert_eq!(stored.matches("enc:v1:").count(), 2);
 
-        // 读回来必须还原成明文，否则登录会用密文当密码
+        // 读回来必须还原成明文，否则登录会用密文当账号或密码
         let restored = deserialize_config_from_storage(&stored).unwrap();
         assert_eq!(restored.username, "alice");
         assert_eq!(restored.password, "plain-password");
     }
 
     #[test]
-    fn legacy_plaintext_password_is_still_readable() {
-        // 升级前落盘的是明文密码：必须能读出来，并在下次保存时转成密文。
+    fn legacy_plaintext_credentials_are_still_readable() {
+        // 升级前落盘的是明文账号与密码：必须能读出来，并在下次保存时转成密文。
         let app_data_dir = Path::new("test-app-data");
         let mut config = Config::default(app_data_dir);
         config.username = "alice".to_string();
@@ -811,10 +845,26 @@ mod tests {
         let legacy = serde_json::to_string(&value).unwrap();
 
         let restored = deserialize_config_from_storage(&legacy).unwrap();
+        assert_eq!(restored.username, "alice");
         assert_eq!(restored.password, "plain-password");
 
         let resaved = serialize_config_for_storage(&restored).unwrap();
+        assert!(!resaved.contains("alice"));
         assert!(!resaved.contains("plain-password"));
+    }
+
+    #[test]
+    fn merge_config_decrypts_encrypted_credentials() {
+        let app_data_dir = Path::new("test-app-data");
+        let mut config = Config::default(app_data_dir);
+        config.username = "alice".to_string();
+        config.password = "plain-password".to_string();
+        let stored = serialize_config_for_storage(&config).unwrap();
+
+        let merged = Config::merge_config(&stored, app_data_dir);
+
+        assert_eq!(merged.username, "alice");
+        assert_eq!(merged.password, "plain-password");
     }
 
     #[test]

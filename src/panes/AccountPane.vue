@@ -91,6 +91,7 @@ const showLoginForm = ref(false)
 let disposed = false
 onBeforeUnmount(() => {
   disposed = true
+  store.manualLoginInProgress = false
   if (loggingIn.value) void commands.cancelLogin().catch(console.error)
 })
 
@@ -98,6 +99,7 @@ onBeforeUnmount(() => {
 // 失活即取消（与旧弹窗关闭时行为一致）；返回本页后再点一次即可。
 let cancelledByLeave = false
 onDeactivated(() => {
+  store.manualLoginInProgress = false
   if (loggingIn.value) {
     loggingIn.value = false
     cancelledByLeave = true
@@ -133,6 +135,7 @@ async function onLogin() {
   }
 
   loggingIn.value = true
+  store.manualLoginInProgress = true
   cancelledByLeave = false
   try {
     const result = await commands.login(cleanUsername, cleanPassword)
@@ -162,6 +165,7 @@ async function onLogin() {
     message.error(`登录失败：${getErrorMessage(error)}`)
   } finally {
     loggingIn.value = false
+    store.manualLoginInProgress = false
   }
 }
 
@@ -331,7 +335,7 @@ async function clearUsernameAndPasswordInConfig() {
         </div>
         <div class="login-options">
           <n-tooltip>
-            账密以明文保存在本机配置文件中
+            账号与密码加密保存在本机，换设备后需重新登录
             <template #trigger>
               <n-checkbox v-model:checked="remember">记住我</n-checkbox>
             </template>

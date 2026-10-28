@@ -2,7 +2,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context};
 use bytes::{Bytes, BytesMut};
@@ -739,21 +739,54 @@ impl JmClient {
     }
 
     pub async fn login(&self, username: &str, password: &str) -> anyhow::Result<LoginRespData> {
+        let started = Instant::now();
         let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.auth_cancel.send_replace(generation);
         let mut cancellation = self.auth_cancel.subscribe();
-        let _guard = self.auth_lock.lock().await;
-        anyhow::ensure!(
-            generation == self.auth_generation.load(Ordering::SeqCst),
-            "登录已取消"
+        tracing::info!(
+            generation,
+            username_len = username.trim().chars().count(),
+            "开始登录"
         );
+        let _guard = self.auth_lock.lock().await;
+        let current_generation = self.auth_generation.load(Ordering::SeqCst);
+        if generation != current_generation {
+            tracing::info!(
+                generation,
+                current_generation,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "登录在排队期间被取消"
+            );
+        }
+        anyhow::ensure!(generation == current_generation, "登录已取消");
         let config = self.app.get_config().read().clone();
         let result = tokio::select! {
             result = tokio::time::timeout(Duration::from_secs(35), self.login_candidates(&config, username, password, generation)) => {
                 result.map_err(|_| anyhow!("登录整体超时，请在设置 → 网络中检查线路或代理"))?
             },
-            _ = cancellation.changed() => Err(anyhow!("登录已取消")),
+            _ = cancellation.changed() => {
+                tracing::info!(
+                    generation,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "登录等待期间收到取消通知"
+                );
+                Err(anyhow!("登录已取消"))
+            },
         };
+        match &result {
+            Ok(data) => tracing::info!(
+                generation,
+                session_epoch = data.session_epoch,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "登录成功"
+            ),
+            Err(error) => tracing::warn!(
+                generation,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                error = %error,
+                "登录失败"
+            ),
+        }
         result
     }
 
@@ -769,11 +802,26 @@ impl JmClient {
             .build()?;
         let form = json!({"username": username.trim(), "password": password});
         let candidates = self.api_domain_candidates();
+        tracing::info!(
+            generation,
+            candidate_count = candidates.len(),
+            api_domain_mode = ?config.api_domain_mode,
+            proxy_mode = ?config.proxy_mode,
+            "登录候选线路已准备"
+        );
         let mut last_error = None;
-        for candidate in &candidates {
+        for (index, candidate) in candidates.iter().enumerate() {
+            let attempt_started = Instant::now();
             anyhow::ensure!(
                 generation == self.auth_generation.load(Ordering::SeqCst),
                 "登录已取消"
+            );
+            tracing::info!(
+                generation,
+                attempt = index + 1,
+                candidate_count = candidates.len(),
+                domain = %candidate,
+                "尝试登录线路"
             );
             let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let request = client
@@ -792,6 +840,13 @@ impl JmClient {
             .await;
             match result {
                 Ok(profile) => {
+                    tracing::info!(
+                        generation,
+                        attempt = index + 1,
+                        domain = %candidate,
+                        elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                        "登录线路成功"
+                    );
                     self.domain_health
                         .record_success(candidate, std::time::Duration::ZERO);
                     *self.last_success_domain.write() = Some(candidate.clone());
@@ -802,17 +857,49 @@ impl JmClient {
                     } else {
                         preset_mode_for_domain(candidate).unwrap_or(config.api_domain_mode)
                     };
-                    return self.commit_login(config, mode, profile, generation);
+                    let outcome = self.commit_login(config, mode, profile, generation);
+                    if let Err(error) = &outcome {
+                        tracing::warn!(
+                            generation,
+                            domain = %candidate,
+                            error = %error,
+                            "登录提交失败"
+                        );
+                    }
+                    return outcome;
                 }
                 Err(error) if is_route_unreachable(&error) => {
+                    tracing::warn!(
+                        generation,
+                        attempt = index + 1,
+                        domain = %candidate,
+                        elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                        error = %error,
+                        "登录线路不可达，尝试下一条"
+                    );
                     self.domain_health.record_failure(candidate);
                     last_error = Some(error);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        generation,
+                        attempt = index + 1,
+                        domain = %candidate,
+                        elapsed_ms = attempt_started.elapsed().as_millis() as u64,
+                        error = %error,
+                        "登录请求失败，停止换线"
+                    );
+                    return Err(error);
+                }
             }
         }
         // 登录候选线路全部失败：同样触发一次后台静默重解析。
         self.spawn_domain_refresh_in_background();
+        tracing::warn!(
+            generation,
+            candidate_count = candidates.len(),
+            "登录候选线路全部失败"
+        );
 
         Err(last_error
             .unwrap_or_else(|| anyhow!("没有可用线路"))

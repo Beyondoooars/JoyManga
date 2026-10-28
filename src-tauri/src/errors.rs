@@ -107,7 +107,16 @@ pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
     if lower.contains("timeout") || lower.contains("超时") {
         return CommandErrorKind::Timeout;
     }
-    if lower.contains("登录") || lower.contains("未登录") || lower.contains("avs") {
+    if lower.contains("登录")
+        || lower.contains("未登录")
+        || lower.contains("avs")
+        || lower.contains("密码错误")
+        || lower.contains("密碼錯誤")
+        || lower.contains("账号或密码")
+        || lower.contains("帳號或密碼")
+        || lower.contains("账号不存在")
+        || lower.contains("帳號不存在")
+    {
         return CommandErrorKind::Auth;
     }
     if lower.contains("磁盘") || lower.contains("空间") || lower.contains("no space") {
@@ -319,6 +328,10 @@ mod tests {
 
         let timeout = anyhow::anyhow!("请求超时，请重试");
         assert_eq!(classify(&timeout), CommandErrorKind::Timeout);
+
+        // 站点登录接口的业务错误不带「登录」二字，仍应视为账号问题而不是可重试的网络错误
+        let wrong_password = anyhow::anyhow!("帳號或密碼錯誤");
+        assert_eq!(classify(&wrong_password), CommandErrorKind::Auth);
 
         let unknown = anyhow::anyhow!("序列化失败的奇怪问题");
         assert_eq!(classify(&unknown), CommandErrorKind::Unknown);

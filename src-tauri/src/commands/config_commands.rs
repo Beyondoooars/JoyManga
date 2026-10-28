@@ -366,7 +366,9 @@ mod tests {
         let serialized = serde_json::to_string(&backup).unwrap();
         assert!(!serialized.contains("private-user"));
         assert!(!serialized.contains("private-password"));
+        assert_eq!(backup["config"]["username"], "");
         assert_eq!(backup["config"]["password"], "");
+        assert_eq!(config.username, "private-user");
         assert_eq!(config.password, "private-password");
     }
 }

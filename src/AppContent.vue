@@ -8,6 +8,7 @@ import { useStore } from './store.ts'
 import icon from './assets/icon.png'
 import type { CurrentTabName } from './types.ts'
 import { getErrorMessage } from './utils/errors.ts'
+import { runAutoLogin } from './utils/autoLogin.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
 import { useIsMobile } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
@@ -217,18 +218,27 @@ async function initializeApp() {
   }
 
   if (store.config?.autoLogin && store.config.username !== '' && store.config.password !== '') {
-    try {
-      const result = await commands.login(store.config.username, store.config.password)
-      if (result.status === 'error') {
-        console.error(result.error)
-        message.warning(`自动登录失败：${result.error.err_message}`)
-        return
-      }
-      store.applyLoginResult(result.data)
-      message.success('自动登录成功')
-    } catch (error) {
-      console.error(error)
-      message.warning(`自动登录失败：${getErrorMessage(error)}`)
+    const username = store.config.username
+    const password = store.config.password
+    const outcome = await runAutoLogin({
+      username,
+      password,
+      login: (name, secret) => commands.login(name, secret),
+      // 用户已手动登录、正在手动登录，或手动改了表单：停止自动重试，
+      // 避免自动登录的新请求把正在进行的会话顶掉。
+      shouldStop: () => store.userProfile !== undefined
+        || store.manualLoginInProgress
+        || store.config?.username !== username
+        || store.config?.password !== password,
+      onRetry: (attempt, error) => console.warn(`自动登录第 ${attempt} 次失败，准备重试`, error),
+    })
+    if (outcome.status === 'success') {
+      store.applyLoginResult(outcome.data)
+      message.success(outcome.attempts > 1 ? `自动登录成功（第 ${outcome.attempts} 次尝试）` : '自动登录成功')
+    } else if (outcome.status === 'failed') {
+      const errorMessage = typeof outcome.error === 'string' ? outcome.error : outcome.error.err_message
+      console.error(outcome.error)
+      message.warning(`自动登录失败：${errorMessage}`)
     }
   }
 }
