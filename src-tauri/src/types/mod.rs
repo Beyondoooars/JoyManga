@@ -12,6 +12,7 @@ mod page_size;
 mod proxy_mode;
 mod reading_direction;
 mod reading_mode;
+mod search_dual_result;
 mod search_result;
 mod search_sort;
 
@@ -29,6 +30,7 @@ pub use page_size::*;
 pub use proxy_mode::*;
 pub use reading_direction::*;
 pub use reading_mode::*;
+pub use search_dual_result::*;
 pub use search_result::*;
 pub use search_sort::*;
 

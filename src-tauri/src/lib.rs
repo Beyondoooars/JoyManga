@@ -39,6 +39,7 @@ mod network_check;
 mod network_state;
 mod page_size;
 mod responses;
+mod search_variants;
 mod state_transactions;
 mod types;
 mod utils;
@@ -69,7 +70,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             restore_app_data,
             save_config,
             login,
-            search,
+            search_dual,
             get_comic,
             get_favorite_folder,
             get_weekly_info,

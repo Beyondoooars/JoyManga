@@ -3,15 +3,19 @@ use specta::Type;
 
 use super::{string_to_i64, CategoryRespData, CategorySubRespData, GetComicRespData};
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
-#[serde(default, rename_all = "camelCase")]
-pub struct RedirectRespData {
-    #[serde(rename = "search_query")]
-    pub search_query: String,
-    pub total: i64,
-    // 接口曾返回字符串，现在返回数字，两种都要兼容
-    #[serde(rename = "redirect_aid", deserialize_with = "string_to_i64")]
-    pub redirect_aid: i64,
+/// 搜索结果响应里存在有效的跳转漫画编号时返回它。
+///
+/// 不能再用“能否反序列化成 RedirectRespData”判断：普通搜索响应同样带 `total`，
+/// 容器级 `#[serde(default)]` 会让它解析成功并得到 `redirect_aid = 0`，
+/// 随后去请求一部不存在的漫画。必须显式检查字段存在且大于 0。
+pub fn redirect_aid(value: &serde_json::Value) -> Option<i64> {
+    let aid = match value.get("redirect_aid")? {
+        serde_json::Value::Number(number) => number.as_i64(),
+        // 接口曾返回字符串，现在返回数字，两种都要兼容
+        serde_json::Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    }?;
+    (aid > 0).then_some(aid)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -51,18 +55,41 @@ pub struct ComicInSearchRespData {
 
 #[cfg(test)]
 mod tests {
-    use super::RedirectRespData;
+    use super::redirect_aid;
+
+    fn parse(raw: &str) -> serde_json::Value {
+        serde_json::from_str(raw).unwrap()
+    }
 
     #[test]
-    fn redirect_resp_parses_numeric_and_string_aid() {
-        // 接口现在返回数字
-        let numeric = r#"{"search_query":"123456","total":1,"redirect_aid":123456}"#;
-        let parsed = serde_json::from_str::<RedirectRespData>(numeric).unwrap();
-        assert_eq!(parsed.redirect_aid, 123456);
+    fn redirect_aid_accepts_numeric_and_string() {
+        assert_eq!(
+            redirect_aid(&parse(
+                r#"{"search_query":"123456","total":1,"redirect_aid":123456}"#
+            )),
+            Some(123456)
+        );
+        assert_eq!(
+            redirect_aid(&parse(
+                r#"{"search_query":"123456","total":1,"redirect_aid":"123456"}"#
+            )),
+            Some(123456)
+        );
+    }
 
-        // 兼容旧版返回字符串
-        let string = r#"{"search_query":"123456","total":1,"redirect_aid":"123456"}"#;
-        let parsed = serde_json::from_str::<RedirectRespData>(string).unwrap();
-        assert_eq!(parsed.redirect_aid, 123456);
+    #[test]
+    fn redirect_aid_ignores_zero_missing_and_invalid() {
+        assert_eq!(redirect_aid(&parse(r#"{"redirect_aid":0}"#)), None);
+        assert_eq!(redirect_aid(&parse(r#"{"redirect_aid":-1}"#)), None);
+        assert_eq!(redirect_aid(&parse(r#"{"redirect_aid":""}"#)), None);
+        assert_eq!(redirect_aid(&parse(r#"{"redirect_aid":"abc"}"#)), None);
+    }
+
+    #[test]
+    fn normal_search_response_is_not_a_redirect() {
+        // 普通搜索响应的 total 是数字，旧实现会把它误判成 redirect
+        let normal =
+            parse(r#"{"search_query":"漫画","total":42,"content":[{"id":"1","name":"x"}]}"#);
+        assert_eq!(redirect_aid(&normal), None);
     }
 }

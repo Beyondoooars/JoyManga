@@ -124,9 +124,16 @@ async login(username: string, password: string) : Promise<Result<LoginRespData, 
     else return { status: "error", error: e  as any };
 }
 },
-async search(keyword: string, page: number, sort: SearchSort) : Promise<Result<SearchResultVariant, CommandError>> {
+/**
+ * 简繁双变体取页。
+ * 
+ * 前端按“合并流”自行决定每个变体下一次要取哪一页：两个变体的游标可以不同步，
+ * 所以页码由调用方分别给出，`None` 表示本轮不取该变体。转换关键词在服务端计算，
+ * 前端只拿到 `converted_keyword` 用于展示和后续游标。
+ */
+async searchDual(keyword: string, sort: SearchSort, originalPage: number | null, convertedPage: number | null) : Promise<Result<SearchDualResult, CommandError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("search", { keyword, page, sort }) };
+    return { status: "ok", data: await TAURI_INVOKE("search_dual", { keyword, sort, originalPage, convertedPage }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -753,7 +760,28 @@ export type ReadingMode =
 "Scroll"
 export type RelatedListRespData = { id: string; author: string; name: string; image: string }
 export type RestoreOutcome = { config: Config; readingState: JsonValue | null; archiveIntentsRestored: number | null; backupVersion: number }
-export type SearchResult = { searchQuery: string; total: number; content: ComicInSearch[] }
+/**
+ * 一次简繁双变体取页的结果。
+ * 
+ * 每个变体独立的 `Option` 字段而非一个混合枚举，避免空值语义含糊：
+ * - 成功：`Some(variant)`，对应 error 为 `None`
+ * - 失败：`variant` 为 `None`，对应 error 为 `Some(原因)`
+ * - 本轮未请求：两者都为 `None`
+ */
+export type SearchDualResult = { original: SearchResultVariant | null; originalError: string | null; converted: SearchResultVariant | null; convertedError: string | null; 
+/**
+ * 转换后的关键词；`None` 表示该关键词没有另一种写法（数字、英文、简繁同形）
+ */
+convertedKeyword: string | null; 
+/**
+ * 非致命提示（例如转换变体被识别为 JM 号而忽略）
+ */
+warnings: string[] }
+export type SearchResult = { searchQuery: string; total: number; content: ComicInSearch[]; 
+/**
+ * 是否还有下一页；双变体合并后只代表"这个变体"是否还有页
+ */
+hasMore: boolean }
 export type SearchResultVariant = { SearchResult: SearchResult } | { Comic: Comic }
 export type SearchSort = "Latest" | "View" | "Picture" | "Like"
 export type SessionChangedEvent = { sessionEpoch: number; profile: GetUserProfileRespData | null }

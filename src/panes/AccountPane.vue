@@ -13,7 +13,6 @@ import {
   PhBooks,
   PhCaretRight,
   PhCoin,
-  PhDownloadSimple,
   PhGearSix,
   PhHeart,
   PhSignIn,
@@ -30,26 +29,6 @@ const exp = computed(() => expProgress(store.userProfile))
 
 const readingCount = computed(() => Object.keys(store.readingState.progress).length)
 const bookmarkCount = computed(() => store.readingState.bookmarks.length)
-
-const pendingTransfers = computed(() => {
-  let count = 0
-  for (const progress of store.progresses.values()) {
-    if (progress.state !== 'Completed' && progress.state !== 'Cancelled') count++
-  }
-  return count
-})
-
-const quickLinks = computed(() => {
-  const links = [
-    { key: 'library', label: '书库', icon: PhBooks, tint: 'brand' as const, badge: store.downloadedComics.length, action: () => goToLibrary() },
-    { key: 'transfers', label: '传输', icon: PhDownloadSimple, tint: 'accent' as const, badge: pendingTransfers.value, action: () => store.openTransfers() },
-    { key: 'settings', label: '设置', icon: PhGearSix, tint: 'neutral' as const, badge: 0, action: () => store.openSettings() },
-  ]
-  if (store.userProfile !== undefined) {
-    links.unshift({ key: 'favorite', label: '收藏', icon: PhHeart, tint: 'brand' as const, badge: store.userProfile.album_favorites, action: () => { store.currentTabName = 'favorite' } })
-  }
-  return links
-})
 
 function goToLibrary() {
   store.downloadedSubTab = 'library'
@@ -237,6 +216,13 @@ async function clearUsernameAndPasswordInConfig() {
             </div>
             <span class="hero-uid">UID {{ store.userProfile.uid }} · 云端已同步</span>
           </div>
+          <button
+            type="button"
+            class="hero-settings"
+            aria-label="打开设置"
+            @click="store.openSettings()">
+            <PhGearSix :size="19" weight="duotone" />
+          </button>
         </div>
 
         <div class="hero-stats">
@@ -269,19 +255,6 @@ async function clearUsernameAndPasswordInConfig() {
           <span class="exp-fill" :style="{ width: `${exp.percent}%` }"></span>
         </div>
       </section>
-
-      <div class="quick-grid">
-        <button
-          v-for="link in quickLinks"
-          :key="link.key"
-          type="button"
-          class="quick-tile"
-          @click="link.action()">
-          <span class="quick-icon" :class="`is-${link.tint}`"><component :is="link.icon" :size="22" weight="duotone" /></span>
-          <span class="quick-label">{{ link.label }}</span>
-          <span v-if="link.badge > 0" class="quick-badge">{{ link.badge > 999 ? '999+' : link.badge }}</span>
-        </button>
-      </div>
 
       <DailyCheckInCard />
 
@@ -350,19 +323,6 @@ async function clearUsernameAndPasswordInConfig() {
         <n-button v-if="store.userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">返回我的</n-button>
         <p class="privacy-note">账号信息只保存在本机；退出登录会一并清除记住的账密。</p>
       </section>
-
-      <div class="quick-grid is-guest">
-        <button
-          v-for="link in quickLinks"
-          :key="link.key"
-          type="button"
-          class="quick-tile"
-          @click="link.action()">
-          <span class="quick-icon" :class="`is-${link.tint}`"><component :is="link.icon" :size="22" weight="duotone" /></span>
-          <span class="quick-label">{{ link.label }}</span>
-          <span v-if="link.badge > 0" class="quick-badge">{{ link.badge > 999 ? '999+' : link.badge }}</span>
-        </button>
-      </div>
 
       <section class="local-card">
         <header class="local-head">
@@ -554,83 +514,30 @@ async function clearUsernameAndPasswordInConfig() {
   transition: width 320ms ease;
 }
 
-/* 快捷入口 */
-.quick-grid {
+/* 设置入口：资料卡右上角 */
+.hero-settings {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0 var(--jm-gutter);
-}
-
-.quick-grid.is-guest {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.quick-tile {
-  position: relative;
-  display: flex;
-  min-height: 88px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 12px 4px;
-  border: 1px solid var(--jm-line);
-  border-radius: var(--jm-r-lg);
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  align-self: flex-start;
+  padding: 0;
+  color: var(--jm-text-2);
+  border: 0;
+  border-radius: var(--jm-r-pill);
   background: var(--jm-surface);
+  box-shadow: var(--jm-shadow-1);
   cursor: pointer;
-  transition:
-    transform 160ms ease,
-    border-color 160ms ease;
-}
-
-.quick-tile:active {
-  transform: scale(0.97);
-}
-
-.quick-icon {
-  display: grid;
-  width: 40px;
-  height: 40px;
   place-items: center;
-  border-radius: var(--jm-r-md);
+  transition:
+    color 160ms ease,
+    background 160ms ease;
 }
 
-.quick-icon.is-brand {
+.hero-settings:hover {
   color: var(--jm-brand);
   background: var(--jm-brand-soft);
-}
-
-.quick-icon.is-accent {
-  color: var(--jm-accent);
-  background: var(--jm-accent-soft);
-}
-
-.quick-icon.is-neutral {
-  color: var(--jm-text-2);
-  background: var(--jm-sunken);
-}
-
-.quick-label {
-  color: var(--jm-text);
-  font-size: var(--jm-fs-sm);
-  font-weight: 650;
-}
-
-.quick-badge {
-  position: absolute;
-  top: 8px;
-  right: 10px;
-  min-width: 18px;
-  padding: 1px 5px;
-  color: var(--jm-text-3);
-  border-radius: var(--jm-r-pill);
-  background: var(--jm-sunken);
-  font-size: 9.5px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.4;
-  text-align: center;
 }
 
 /* 阅读数据卡 */
