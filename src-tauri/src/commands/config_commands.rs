@@ -330,7 +330,9 @@ pub fn restore_app_data(app: AppHandle, backup_path: String) -> CommandResult<Co
         .get("config")
         .ok_or_else(|| CommandError::from("恢复备份失败", anyhow!("备份文件中缺少 config 字段")))?;
 
-    let mut restored_config: Config = serde_json::from_value(config_value.clone())
+    // 备份里的账号密码若已是 enc:v1 密文，必须和正常启动一样先解密；
+    // 否则密文会被当成明文继续保存、并用于登录。
+    let mut restored_config: Config = crate::config::deserialize_config_value(config_value.clone())
         .context("解析备份配置失败")
         .map_err(|err| CommandError::from("恢复备份失败", err))?;
     restored_config.apply_storage_policy();

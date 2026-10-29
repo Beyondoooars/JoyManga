@@ -63,6 +63,11 @@ pub struct NetworkInfo {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigInfo {
+    /// 是否开启了自动登录；只报告配置意图，不暴露账号密码。
+    pub auto_login: bool,
+    /// 账号 / 密码是否已保存；排查自动登录是否因缺少凭据而未触发。
+    pub username_saved: bool,
+    pub password_saved: bool,
     pub download_dir: PathBuf,
     pub export_dir: PathBuf,
     pub proxy_mode: ProxyMode,
@@ -86,6 +91,9 @@ pub struct ConfigInfo {
 impl From<&Config> for ConfigInfo {
     fn from(config: &Config) -> Self {
         Self {
+            auto_login: config.auto_login,
+            username_saved: !config.username.is_empty(),
+            password_saved: !config.password.is_empty(),
             download_dir: config.download_dir.clone(),
             export_dir: config.export_dir.clone(),
             proxy_mode: config.proxy_mode.clone(),
@@ -425,17 +433,48 @@ fn redact_secrets(line: &str) -> String {
         while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
+        // JSON / JS 对象里的键通常带引号："password": "secret"。
+        if pos < bytes.len() && matches!(bytes[pos], b'"' | b'\'') {
+            let mut after_quote = pos + 1;
+            while after_quote < bytes.len() && bytes[after_quote].is_ascii_whitespace() {
+                after_quote += 1;
+            }
+            if after_quote < bytes.len() && matches!(bytes[after_quote], b'=' | b':') {
+                pos = after_quote;
+            } else {
+                index += key.len();
+                continue;
+            }
+        }
         if pos < bytes.len() && matches!(bytes[pos], b'=' | b':') {
             pos += 1;
             while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
                 pos += 1;
             }
-            let value_start = pos;
-            while pos < bytes.len()
-                && !bytes[pos].is_ascii_whitespace()
-                && !matches!(bytes[pos], b'&' | b',' | b';' | b'"' | b'\'')
-            {
+            let quote = if pos < bytes.len() && matches!(bytes[pos], b'"' | b'\'') {
+                let quote = bytes[pos];
                 pos += 1;
+                Some(quote)
+            } else {
+                None
+            };
+            let value_start = pos;
+            match quote {
+                Some(quote) => {
+                    while pos < bytes.len() && bytes[pos] != quote {
+                        // 跳过反斜杠转义，避免把 \" 当成值的结束。
+                        pos += if bytes[pos] == b'\\' && pos + 1 < bytes.len() {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                }
+                None => {
+                    while pos < bytes.len() && !is_secret_value_delimiter(bytes[pos]) {
+                        pos += 1;
+                    }
+                }
             }
             if value_start < pos {
                 out.push_str(&line[cursor..value_start]);
@@ -449,6 +488,10 @@ fn redact_secrets(line: &str) -> String {
     }
     out.push_str(&line[cursor..]);
     out
+}
+
+fn is_secret_value_delimiter(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b'&' | b',' | b';' | b'"' | b'\'' | b'}' | b']')
 }
 
 fn floor_char_boundary(text: &str, max_bytes: usize) -> usize {
@@ -495,6 +538,38 @@ mod tests {
             redacted,
             "login username=*** password=*** cookie=*** token: ***"
         );
+    }
+
+    #[test]
+    fn json_style_sensitive_values_are_replaced() {
+        let line = r#"{"username":"alice","password":"s3cret","token": "abc","ok":true}"#;
+        assert_eq!(
+            redact_text(line),
+            r#"{"username":"***","password":"***","token": "***","ok":true}"#
+        );
+    }
+
+    #[test]
+    fn quoted_single_values_and_escaped_quotes_are_replaced() {
+        let line = r#"password='s3cr\'et' username: 'bob'"#;
+        assert_eq!(redact_text(line), "password='***' username: '***'");
+    }
+
+    #[test]
+    fn config_info_reports_credential_presence_without_values() {
+        let mut config = Config::default(std::path::Path::new("test-app-data"));
+        config.auto_login = true;
+        config.username = "alice".to_string();
+        config.password = "secret".to_string();
+
+        let info = ConfigInfo::from(&config);
+        assert!(info.auto_login);
+        assert!(info.username_saved);
+        assert!(info.password_saved);
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(!json.contains("alice"));
+        assert!(!json.contains("secret"));
     }
 
     #[test]
