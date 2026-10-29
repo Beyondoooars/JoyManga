@@ -13,6 +13,7 @@ import { withAndroidSelection, exportToAndroidDownloads, isUnderPublicDownloads 
 import { getErrorMessage } from '../utils/errors.ts'
 import PathField from '../components/PathField.vue'
 import StorageLocationDialog from '../dialogs/StorageLocationDialog.vue'
+import ThirdPartyNoticesDialog from '../dialogs/ThirdPartyNoticesDialog.vue'
 
 const store = useStore()
 const message = useMessage()
@@ -21,6 +22,7 @@ const { isAndroid } = useIsMobile()
 const emit = defineEmits<{ (e: 'back'): void }>()
 
 const showStoragePicker = ref(false)
+const showThirdPartyNotices = ref(false)
 // 二级面板：设置主页只列分类，点进去才看到具体项，避免一屏塞满所有输入框。
 const openPanel = ref<'storage' | 'network' | 'reading' | 'data' | 'about' | null>(null)
 const manualNetwork = ref(false)
@@ -68,6 +70,10 @@ const {
 
 // 返回键：先退二级面板，再退出设置页
 useBackHandler(() => {
+  if (showThirdPartyNotices.value) {
+    showThirdPartyNotices.value = false
+    return true
+  }
   if (showStoragePicker.value) {
     showStoragePicker.value = false
     return true
@@ -648,7 +654,12 @@ const readingSummary = computed(() => {
               <n-button size="small" secondary :loading="updateChecking" @click="checkForUpdates(false)">检查更新</n-button>
             </div>
           </div>
+          <button type="button" class="nav-row inner" @click="showThirdPartyNotices = true">
+            <div class="nav-copy"><strong>开源许可</strong><span>第三方组件与许可证全文</span></div>
+            <PhCaretRight :size="16" aria-hidden="true" />
+          </button>
         </section>
+        <ThirdPartyNoticesDialog v-model:show="showThirdPartyNotices" />
       </template>
     </div>
   </div>

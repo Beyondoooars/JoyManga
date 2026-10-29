@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { commands, type SearchSort } from '../bindings.ts'
+import {
+  commands,
+  type ComicInSearch,
+  type SearchResultVariant,
+  type SearchSort,
+} from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
 import WeeklyPane from './WeeklyPane.vue'
@@ -15,12 +20,21 @@ import {
 } from '@phosphor-icons/vue'
 import { useStore } from '../store.ts'
 import { getErrorMessage } from '../utils/errors.ts'
+import {
+  SearchSession,
+  SEARCH_PAGE_SIZE,
+  type DualSearchRequest,
+  type DualSearchResponse,
+  type SearchVariantPage,
+} from '../utils/searchSession.ts'
+import { LANGUAGE_FILTER_LABELS, type SearchFilter } from '../utils/searchLanguage.ts'
 
 const store = useStore()
 const message = useMessage()
 
 type DiscoverView = 'weekly' | 'search'
-const view = ref<DiscoverView>(store.searchResult !== undefined ? 'search' : 'weekly')
+// 发现页默认展示每周必看；搜索时临时切到结果，清空搜索后回到榜单
+const view = ref<DiscoverView>('weekly')
 
 const sortOptions: Array<{ label: string; value: SearchSort }> = [
   { label: '最新', value: 'Latest' },
@@ -35,7 +49,76 @@ const sortSelected = ref<SearchSort>('Latest')
 const searchPage = ref<number>(1)
 const committedKeyword = ref(store.searchResult?.searchQuery ?? '')
 const committedSort = ref<SearchSort>('Latest')
+const languageFilter = ref<SearchFilter>('all')
+// SearchSession 是普通对象（不依赖 Vue 响应式），每次取页/筛选后递增版本号触发重算
+const sessionRevision = ref(0)
+let activeSession: SearchSession | null = null
 let searchGeneration = 0
+
+const languageFilters: Array<{ label: string; value: SearchFilter }> = [
+  { label: '全部', value: 'all' },
+  { label: '中文', value: 'zh' },
+  { label: '日文', value: 'ja' },
+  { label: '英文', value: 'en' },
+  { label: '韩文', value: 'ko' },
+  { label: '全彩', value: 'fullColor' },
+]
+
+// SearchSession 是普通对象：computed 通过读取版本号来建立依赖，会话更新后由 bump 触发重算
+function sessionVersion(): number {
+  return sessionRevision.value
+}
+
+const currentSession = computed(() => {
+  sessionVersion()
+  return activeSession
+})
+const pageItems = computed<ComicInSearch[]>(() => {
+  sessionVersion()
+  return activeSession?.pageItems(searchPage.value) ?? []
+})
+const visibleCount = computed(() => {
+  sessionVersion()
+  return activeSession?.visibleCount ?? 0
+})
+const hasNextPage = computed(() => {
+  sessionVersion()
+  return activeSession?.hasMoreAfter(searchPage.value) ?? false
+})
+const isExhausted = computed(() => {
+  sessionVersion()
+  return activeSession?.exhausted ?? false
+})
+const fatalError = computed(() => {
+  sessionVersion()
+  return activeSession?.fatalError ?? null
+})
+const resultWarnings = computed(() => {
+  sessionVersion()
+  return activeSession?.warningsList ?? []
+})
+const hiddenUnknownCount = computed(() => {
+  sessionVersion()
+  return activeSession?.hiddenUnknownCount ?? 0
+})
+const exactTotal = computed(() => {
+  sessionVersion()
+  return activeSession?.exactTotal ?? null
+})
+const pageCount = computed(() => Math.max(1, Math.ceil(visibleCount.value / SEARCH_PAGE_SIZE)))
+const filterLabel = computed(() => LANGUAGE_FILTER_LABELS[languageFilter.value])
+const resultSummary = computed(() => {
+  if (activeSession === null) return ''
+  if (languageFilter.value !== 'all') return `已筛选 ${visibleCount.value} 部`
+  if (exactTotal.value !== null) return `${exactTotal.value} 部`
+  return isExhausted.value ? `共 ${visibleCount.value} 部` : `至少 ${visibleCount.value} 部`
+})
+const pageIsPartial = computed(
+  () =>
+    pageItems.value.length > 0 &&
+    pageItems.value.length < SEARCH_PAGE_SIZE &&
+    hasNextPage.value,
+)
 
 const SEARCH_HISTORY_KEY = 'joymanga_search_history'
 const searchHistory = ref<string[]>([])
@@ -92,7 +175,7 @@ function clearHistory() {
 function handleHistoryClick(kw: string) {
   searchInput.value = kw
   historyOpen.value = false
-  void search(kw, 1, sortSelected.value)
+  void startSearch(kw, sortSelected.value)
 }
 
 const matchingHistory = computed(() => {
@@ -108,26 +191,59 @@ watch(
   (val) => {
     if (val) {
       searchInput.value = val
-      void search(val, 1, sortSelected.value)
+      void startSearch(val, sortSelected.value)
       store.pendingSearchKeyword = ''
     }
   },
   { immediate: true },
 )
 
-const PAGE_SIZE = 80
-const searchPageCount = computed(() => {
-  if (store.searchResult === undefined) return 0
-  return Math.ceil(store.searchResult.total / PAGE_SIZE)
-})
-
 watch(() => store.sessionEpoch, () => {
   searchGeneration++
   searching.value = false
-  if (committedKeyword.value) void search(committedKeyword.value, searchPage.value, committedSort.value)
+  if (committedKeyword.value !== '') {
+    void startSearch(committedKeyword.value, committedSort.value, searchPage.value)
+  }
 })
 
-async function search(keyword: string, page: number, sort: SearchSort) {
+function toVariantPage(
+  variant: SearchResultVariant | null,
+  error: string | null,
+): SearchVariantPage | null {
+  if (error !== null) return { kind: 'error', message: error }
+  if (variant === null) return null
+  if ('SearchResult' in variant) {
+    const page = variant.SearchResult
+    return { kind: 'result', content: page.content, total: page.total, hasMore: page.hasMore }
+  }
+  return { kind: 'comic', comic: variant.Comic }
+}
+
+async function fetchDual(
+  keyword: string,
+  sort: SearchSort,
+  request: DualSearchRequest,
+): Promise<DualSearchResponse> {
+  const result = await commands.searchDual(
+    keyword,
+    sort,
+    request.originalPage,
+    request.convertedPage,
+  )
+  if (result.status === 'error') {
+    throw new Error(`${result.error.err_title}：${result.error.err_message}`)
+  }
+  const data = result.data
+  return {
+    original: toVariantPage(data.original, data.originalError),
+    converted: toVariantPage(data.converted, data.convertedError),
+    convertedKeyword: data.convertedKeyword,
+    warnings: data.warnings,
+  }
+}
+
+/** 开始一次新的搜索：重建会话并加载第一页（或指定页） */
+async function startSearch(keyword: string, sort: SearchSort, page = 1) {
   keyword = keyword.trim()
   if (keyword === '') {
     message.warning('请输入关键词或 JM 号')
@@ -141,32 +257,65 @@ async function search(keyword: string, page: number, sort: SearchSort) {
   const generation = ++searchGeneration
   const epoch = store.sessionEpoch
   const observedRevision = store.favoriteRevision
-  searching.value = true
+  const keywordChanged = keyword !== committedKeyword.value
+  if (keywordChanged) languageFilter.value = 'all'
 
+  committedKeyword.value = keyword
+  committedSort.value = sort
+  sortSelected.value = sort
+  searchPage.value = page
+  activeSession = new SearchSession({
+    keyword,
+    sort,
+    fetcher: (request) => fetchDual(keyword, sort, request),
+  })
+  sessionRevision.value++
+
+  await loadPage(page, { generation, epoch, observedRevision })
+}
+
+/** 加载指定逻辑页；已加载的结果不会重复请求 */
+async function loadPage(
+  page: number,
+  context?: { generation: number; epoch: number; observedRevision: number },
+) {
+  const session = activeSession
+  if (session === null) return
+
+  const generation = context?.generation ?? searchGeneration
+  const epoch = context?.epoch ?? store.sessionEpoch
+  const observedRevision = context?.observedRevision ?? store.favoriteRevision
+
+  searching.value = true
   try {
-    const result = await commands.search(keyword, page, sort)
-    if (generation !== searchGeneration || epoch !== store.sessionEpoch) return
-    if (result.status === 'error') {
-      console.error(result.error)
-      message.error(`${result.error.err_title}：${result.error.err_message}`)
+    await session.ensureVisible(page * SEARCH_PAGE_SIZE)
+    if (
+      generation !== searchGeneration ||
+      epoch !== store.sessionEpoch ||
+      session !== activeSession
+    ) {
       return
     }
-    const variant = result.data
-    if ('SearchResult' in variant) {
-      const respData = variant.SearchResult
-      store.searchResult = respData
-      store.searchResultEpoch = epoch
-      for (const comic of respData.content) store.recordFavorite(comic.id, comic.isFavorite, epoch, observedRevision)
-      committedKeyword.value = keyword
-      committedSort.value = sort
-      searchPage.value = page
-      sortSelected.value = sort
-      if (respData.content.length === 0) {
-        message.warning('没有找到结果，换个关键词试试')
-      }
-    } else if ('Comic' in variant) {
-      store.showComic(variant.Comic, true)
+    searchPage.value = page
+
+    if (session.redirect !== null) {
+      store.showComic(session.redirect, true)
+      return
     }
+
+    const items = session.pageItems(page)
+    store.searchResult = {
+      searchQuery: committedKeyword.value,
+      total: session.exactTotal ?? session.visibleCount,
+      content: items,
+      hasMore: session.hasMoreAfter(page),
+    }
+    store.searchResultEpoch = epoch
+    for (const comic of items) {
+      store.recordFavorite(comic.id, comic.isFavorite, epoch, observedRevision)
+    }
+    sessionRevision.value++
+    if (session.fatalError !== null) message.error(session.fatalError)
   } catch (error) {
     if (generation === searchGeneration) {
       console.error(error)
@@ -185,12 +334,34 @@ function clearSearch() {
   searchInput.value = ''
   store.searchResult = undefined
   committedKeyword.value = ''
+  activeSession = null
+  languageFilter.value = 'all'
+  sessionRevision.value++
   view.value = 'weekly'
 }
 
 function changeSort(sort: SearchSort) {
-  sortSelected.value = sort
-  if (committedKeyword.value) void search(committedKeyword.value, 1, sort)
+  if (sort === committedSort.value) return
+  if (committedKeyword.value !== '') void startSearch(committedKeyword.value, sort)
+}
+
+function changeFilter(filter: SearchFilter) {
+  if (filter === languageFilter.value || searching.value) return
+  languageFilter.value = filter
+  activeSession?.setFilter(filter)
+  searchPage.value = 1
+  sessionRevision.value++
+  void loadPage(1)
+}
+
+function clearFilter() {
+  changeFilter('all')
+}
+
+function goToPage(page: number) {
+  if (searching.value || page < 1) return
+  if (page > searchPage.value && !hasNextPage.value) return
+  void loadPage(page)
 }
 </script>
 
@@ -210,9 +381,9 @@ function changeSort(sort: SearchSort) {
           aria-label="搜索漫画、作者或 JM 编号"
           @focus="historyOpen = true"
           @blur="historyOpen = false"
-          @keydown.enter="search(searchInput, 1, sortSelected)" />
+          @keydown.enter="startSearch(searchInput, sortSelected)" />
         <button
-          v-if="searchInput || store.searchResult"
+          v-if="searchInput || currentSession"
           type="button"
           class="search-clear"
           aria-label="清空搜索"
@@ -240,26 +411,6 @@ function changeSort(sort: SearchSort) {
       </div>
     </div>
 
-    <!-- 视图切换：搜索中显示"结果 / 每周必看" -->
-    <div class="view-switch">
-      <button
-        type="button"
-        class="switch-item"
-        :class="{ 'is-active': view === 'weekly' }"
-        @click="view = 'weekly'">
-        榜单
-      </button>
-      <button
-        type="button"
-        class="switch-item"
-        :class="{ 'is-active': view === 'search' }"
-        :disabled="store.searchResult === undefined"
-        @click="view = 'search'">
-        搜索结果
-        <span v-if="store.searchResult" class="switch-count">{{ store.searchResult.total }}</span>
-      </button>
-    </div>
-
     <div class="jm-scroll discover-scroll">
       <ContinueReadingRow />
 
@@ -268,25 +419,19 @@ function changeSort(sort: SearchSort) {
 
       <!-- 搜索结果 -->
       <template v-else>
-        <div v-if="store.searchResult === undefined" class="jm-empty">
+        <div v-if="currentSession === null" class="jm-empty">
           <div class="jm-empty-icon"><PhSparkle :size="28" weight="duotone" /></div>
           <strong>找到下一部想看的漫画</strong>
           <p>输入标题、作者，或直接粘贴 JM 编号。</p>
         </div>
 
-        <template v-else-if="store.searchResult.content.length === 0">
-          <div class="jm-empty">
-            <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
-            <strong>没有匹配的结果</strong>
-            <p>「{{ committedKeyword }}」没有找到漫画，试试更短的关键词或换个说法。</p>
-          </div>
-        </template>
-
         <template v-else>
-          <div class="result-head">
+          <div
+            v-if="visibleCount > 0 || languageFilter !== 'all' || resultWarnings.length > 0"
+            class="result-head">
             <div class="result-copy">
               <strong>「{{ committedKeyword }}」</strong>
-              <span>{{ store.searchResult.total }} 部</span>
+              <span>{{ resultSummary }}</span>
             </div>
             <div class="sort-row">
               <button
@@ -299,49 +444,116 @@ function changeSort(sort: SearchSort) {
                 {{ option.label }}
               </button>
             </div>
+            <div class="filter-row" role="group" aria-label="语言筛选（本地按标题判断）">
+              <button
+                v-for="option in languageFilters"
+                :key="option.value"
+                type="button"
+                class="sort-chip"
+                :class="{ 'is-active': languageFilter === option.value }"
+                :disabled="searching"
+                :aria-pressed="languageFilter === option.value"
+                @click="changeFilter(option.value)">
+                {{ option.label }}
+              </button>
+              <span class="filter-hint">本地判断</span>
+            </div>
+            <p v-if="currentSession.streamCount > 1" class="result-warning">
+              已合并「{{ committedKeyword }}」与「{{ currentSession.convertedKeywordValue }}」两种写法
+            </p>
+            <p v-for="warning in resultWarnings" :key="warning" class="result-warning">{{ warning }}</p>
           </div>
 
-          <div v-if="searching" class="cover-grid is-loading">
-            <div v-for="n in 6" :key="n" class="skeleton-card">
-              <div class="jm-skeleton skeleton-cover"></div>
-              <div class="jm-skeleton skeleton-line"></div>
-              <div class="jm-skeleton skeleton-line is-short"></div>
+          <div v-if="fatalError !== null" class="jm-empty">
+            <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
+            <strong>搜索失败</strong>
+            <p>{{ fatalError }}</p>
+            <div class="empty-actions">
+              <button
+                type="button"
+                class="jm-link"
+                @click="startSearch(committedKeyword, committedSort, searchPage)">
+                重试
+              </button>
             </div>
           </div>
-          <div v-else class="cover-grid">
-            <ComicCard
-              v-for="comic in store.searchResult.content"
-              :key="comic.id"
-              :comic-id="comic.id"
-              :comic-favorite="comic.isFavorite"
-              :favorite-epoch="store.searchResultEpoch"
-              :comic-title="comic.name"
-              :comic-author="comic.author"
-              :comic-category="comic.category"
-              :comic-category-sub="comic.categorySub"
-              :comic-downloaded="comic.isDownloaded"
-              :comic-download-dir="comic.comicDownloadDir" />
-          </div>
 
-          <nav v-if="searchPageCount > 1" class="pager" aria-label="搜索结果分页">
-            <button
-              type="button"
-              class="pager-btn"
-              :disabled="searchPage <= 1 || searching"
-              aria-label="上一页"
-              @click="search(committedKeyword, searchPage - 1, committedSort)">
-              <PhArrowLeft :size="17" weight="bold" />
-            </button>
-            <span class="pager-info">{{ searchPage }} / {{ searchPageCount }}</span>
-            <button
-              type="button"
-              class="pager-btn"
-              :disabled="searchPage >= searchPageCount || searching"
-              aria-label="下一页"
-              @click="search(committedKeyword, searchPage + 1, committedSort)">
-              <PhArrowRight :size="17" weight="bold" />
-            </button>
-          </nav>
+          <template v-else>
+            <div v-if="searching && pageItems.length === 0" class="cover-grid is-loading">
+              <div v-for="n in 6" :key="n" class="skeleton-card">
+                <div class="jm-skeleton skeleton-cover"></div>
+                <div class="jm-skeleton skeleton-line"></div>
+                <div class="jm-skeleton skeleton-line is-short"></div>
+              </div>
+            </div>
+
+            <div v-else-if="pageItems.length > 0" class="cover-grid">
+              <ComicCard
+                v-for="comic in pageItems"
+                :key="comic.id"
+                :comic-id="comic.id"
+                :comic-favorite="comic.isFavorite"
+                :favorite-epoch="store.searchResultEpoch"
+                :comic-title="comic.name"
+                :comic-author="comic.author"
+                :comic-category="comic.category"
+                :comic-category-sub="comic.categorySub"
+                :comic-downloaded="comic.isDownloaded"
+                :comic-download-dir="comic.comicDownloadDir" />
+            </div>
+
+            <div v-else-if="languageFilter !== 'all'" class="jm-empty">
+              <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
+              <strong v-if="isExhausted">没有符合「{{ filterLabel }}」的作品</strong>
+              <strong v-else>本页暂无符合「{{ filterLabel }}」的作品</strong>
+              <p v-if="isExhausted">「{{ committedKeyword }}」的搜索结果已到末尾，可以清除筛选查看全部。</p>
+              <p v-else>筛选只作用于已加载的结果，可以继续加载下一页。</p>
+              <p v-if="hiddenUnknownCount > 0">另有 {{ hiddenUnknownCount }} 部语言未识别，已隐藏。</p>
+              <div class="empty-actions">
+                <button
+                  v-if="!isExhausted"
+                  type="button"
+                  class="jm-link"
+                  @click="goToPage(searchPage + 1)">
+                  查看下一页
+                </button>
+                <button type="button" class="jm-link" @click="clearFilter">清除筛选</button>
+              </div>
+            </div>
+
+            <div v-else class="jm-empty">
+              <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
+              <strong>没有匹配的结果</strong>
+              <p>「{{ committedKeyword }}」没有找到漫画，试试更短的关键词或换个说法。</p>
+            </div>
+
+            <p v-if="pageIsPartial && languageFilter !== 'all'" class="page-hint">
+              筛选结果较少，可继续加载下一页
+            </p>
+
+            <nav v-if="hasNextPage || searchPage > 1" class="pager" aria-label="搜索结果分页">
+              <button
+                type="button"
+                class="pager-btn"
+                :disabled="searchPage <= 1 || searching"
+                aria-label="上一页"
+                @click="goToPage(searchPage - 1)">
+                <PhArrowLeft :size="17" weight="bold" />
+              </button>
+              <span class="pager-info">
+                <template v-if="isExhausted">{{ searchPage }} / {{ pageCount }}</template>
+                <template v-else>第 {{ searchPage }} 页</template>
+              </span>
+              <button
+                type="button"
+                class="pager-btn"
+                :disabled="!hasNextPage || searching"
+                aria-label="下一页"
+                @click="goToPage(searchPage + 1)">
+                <PhArrowRight :size="17" weight="bold" />
+              </button>
+            </nav>
+          </template>
         </template>
       </template>
     </div>
@@ -501,73 +713,6 @@ function changeSort(sort: SearchSort) {
   background: rgba(251, 114, 153, 0.14);
 }
 
-/* 视图切换：下划线式，克制 */
-.view-switch {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 22px;
-  padding: 0 var(--jm-gutter);
-  border-bottom: 1px solid var(--jm-line);
-  background: var(--jm-surface);
-}
-
-.switch-item {
-  position: relative;
-  display: inline-flex;
-  height: 42px;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  color: var(--jm-text-3);
-  border: 0;
-  background: none;
-  font-size: var(--jm-fs-body);
-  font-weight: 600;
-  cursor: pointer;
-  transition: color 160ms ease;
-}
-
-.switch-item::after {
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  height: 2.5px;
-  border-radius: 2px;
-  background: var(--jm-brand);
-  opacity: 0;
-  transform: scaleX(0.4);
-  transition:
-    opacity 180ms ease,
-    transform 180ms ease;
-  content: '';
-}
-
-.switch-item.is-active {
-  color: var(--jm-text);
-  font-weight: 700;
-}
-
-.switch-item.is-active::after {
-  opacity: 1;
-  transform: scaleX(1);
-}
-
-.switch-item:disabled {
-  color: var(--jm-text-4);
-  cursor: default;
-}
-
-.switch-count {
-  padding: 1px 7px;
-  color: var(--jm-brand);
-  border-radius: var(--jm-r-pill);
-  background: var(--jm-brand-soft);
-  font-size: 10.5px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
 .discover-scroll {
   padding-bottom: 28px;
   background: var(--jm-bg);
@@ -633,6 +778,41 @@ function changeSort(sort: SearchSort) {
   color: var(--jm-brand);
   border-color: rgba(251, 114, 153, 0.28);
   background: var(--jm-brand-soft);
+}
+
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-hint {
+  margin-left: 2px;
+  color: var(--jm-text-4);
+  font-size: 10.5px;
+}
+
+.result-warning {
+  margin: 0;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+  line-height: 1.5;
+}
+
+.page-hint {
+  padding: 0 var(--jm-gutter) 6px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+  text-align: center;
+}
+
+.empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 10px;
 }
 
 .cover-grid {

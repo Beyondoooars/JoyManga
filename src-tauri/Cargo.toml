@@ -53,6 +53,8 @@ notify = { version = "8.0.0" }
 walkdir = { version = "2.5.0" }
 indexmap = { version = "2.10.0", features = ["serde"] }
 ring = "0.17"
+# 简繁转换：纯 Rust + 内嵌 OpenCC 词典（词典为 Apache-2.0，见 THIRD_PARTY_NOTICES.md）
+opencc-fmmseg = { version = "=0.13.0", default-features = false }
 
 [profile.release]
 strip = true

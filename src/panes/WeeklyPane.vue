@@ -4,7 +4,7 @@ import { commands, type GetWeeklyInfoRespData } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
 import { useStore } from '../store.ts'
-import { PhArrowClockwise, PhFire, PhWarningCircle } from '@phosphor-icons/vue'
+import { PhArrowClockwise, PhCaretDown, PhFire, PhWarningCircle } from '@phosphor-icons/vue'
 import { getErrorMessage } from '../utils/errors.ts'
 
 const store = useStore()
@@ -26,6 +26,10 @@ const categories = computed(() => weeklyInfo.value?.categories ?? [])
 const types = computed(() => weeklyInfo.value?.type ?? [])
 const activeCategoryLabel = computed(
   () => categories.value.find((category) => category.id === selectedCategoryId.value)?.time ?? '',
+)
+// 期数选择：小框点开后可在弹层里上下滑动，直接跳到任意一期
+const categoryOptions = computed(() =>
+  categories.value.map((category) => ({ label: category.time, value: category.id })),
 )
 
 onMounted(async () => {
@@ -162,7 +166,22 @@ async function getWeekly() {
           <span class="title-icon"><PhFire :size="18" weight="fill" /></span>
           <div class="title-copy">
             <h2 id="weekly-heading">每周必看</h2>
-            <span v-if="activeCategoryLabel">{{ activeCategoryLabel }}</span>
+            <n-popselect
+              v-model:value="selectedCategoryId"
+              :options="categoryOptions"
+              trigger="click"
+              size="small"
+              scrollable
+              :disabled="categories.length === 0">
+              <button
+                type="button"
+                class="issue-select"
+                :disabled="categories.length === 0"
+                aria-label="选择榜单期数">
+                <span>{{ activeCategoryLabel || '选择期数' }}</span>
+                <PhCaretDown :size="13" weight="bold" aria-hidden="true" />
+              </button>
+            </n-popselect>
           </div>
         </div>
         <button
@@ -178,17 +197,6 @@ async function getWeekly() {
 
       <!-- 筛选：顺序为周期，第二个为类型 -->
       <div class="filter-block">
-        <div v-if="categories.length > 1" class="filter-row" role="group" aria-label="榜单周期">
-          <button
-            v-for="category in categories"
-            :key="category.id"
-            type="button"
-            class="filter-chip"
-            :class="{ 'is-active': selectedCategoryId === category.id }"
-            @click="selectedCategoryId = category.id">
-            {{ category.time }}
-          </button>
-        </div>
         <div class="filter-row" role="group" aria-label="漫画类型">
           <button
             v-for="weeklyType in types"
@@ -296,10 +304,39 @@ async function getWeekly() {
   line-height: 1.25;
 }
 
-.title-copy span {
-  overflow: hidden;
+/* 期数选择：小框点开后弹层可上下滑动 */
+.issue-select {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 1px 8px 1px 9px;
   color: var(--jm-text-3);
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-surface);
   font-size: var(--jm-fs-xs);
+  font-weight: 600;
+  line-height: 1.6;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease;
+}
+
+.issue-select:hover {
+  color: var(--jm-brand);
+  border-color: var(--jm-brand-ring);
+}
+
+.issue-select:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.issue-select span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

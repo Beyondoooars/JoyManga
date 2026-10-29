@@ -21,8 +21,7 @@ use crate::extensions::AppHandleExt;
 use crate::responses::{
     DailyCheckInRespData, DailyCheckInResultRespData, GetChapterRespData, GetComicRespData,
     GetFavoriteRespData, GetUserProfileRespData, GetWeeklyInfoRespData, GetWeeklyRespData, JmResp,
-    LoginRespData, RedirectRespData, SearchResp, SearchRespData, ToggleFavoriteRespData,
-    ToggleType,
+    LoginRespData, SearchResp, SearchRespData, ToggleFavoriteRespData, ToggleType,
 };
 use crate::types::{DailyCheckInOutcome, DailyCheckInState, FavoriteSort, SearchSort};
 use crate::utils;
@@ -1197,16 +1196,16 @@ impl JmClient {
                 }
             })
             .await?;
-        if let Ok(redirect_resp_data) = serde_json::from_str::<RedirectRespData>(&data) {
-            let comic_resp_data = self.get_comic(redirect_resp_data.redirect_aid).await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&data).with_context(|| format!("解析搜索响应失败: {data}"))?;
+        // 只有显式存在且大于 0 的 redirect_aid 才算 JM 号跳转
+        if let Some(aid) = crate::responses::redirect_aid(&value) {
+            let comic_resp_data = self.get_comic(aid).await?;
             return Ok(SearchResp::ComicRespData(Box::new(comic_resp_data)));
         }
-        if let Ok(search_resp_data) = serde_json::from_str::<SearchRespData>(&data) {
-            return Ok(SearchResp::SearchRespData(search_resp_data));
-        }
-        Err(anyhow!(
-            "将解密后的数据解析为SearchRespData或RedirectRespData失败: {data}"
-        ))
+        let search_resp_data: SearchRespData = serde_json::from_value(value)
+            .with_context(|| format!("将解密后的数据解析为SearchRespData失败: {data}"))?;
+        Ok(SearchResp::SearchRespData(search_resp_data))
     }
 
     pub async fn get_comic(&self, aid: i64) -> anyhow::Result<GetComicRespData> {

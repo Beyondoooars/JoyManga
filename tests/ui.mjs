@@ -119,7 +119,10 @@ mockIPC(async (command, args) => {
     sessionStorage.setItem('jm-ui-fixture-config', JSON.stringify(config))
     return null
   }
-  if (command === 'get_weekly_info') return { categories: [{ id: '258', time: '2026年第258期' }], type: [{ id: 'hanman', title: '韩漫' }, { id: 'manga', title: '日漫' }] }
+  if (command === 'get_weekly_info') return {
+    categories: Array.from({ length: 12 }, (_, index) => ({ id: String(258 - index), time: `2026年第${258 - index}期` })),
+    type: [{ id: 'hanman', title: '韩漫' }, { id: 'manga', title: '日漫' }],
+  }
   if (command === 'get_weekly') return { total: comics.length, list: comics.map((comic) => ({
     id: comic.id, name: comic.name, author: comic.author.join('、'), description: '', image: '',
     category: { title: '模拟分类' }, category_sub: { title: '日常' }, liked: false, is_favorite: false,
@@ -132,11 +135,37 @@ mockIPC(async (command, args) => {
   }
   if (command === 'export_cbz' || command === 'export_merged_cbz') return null
   if (command === 'login') return { profile: fixtureProfile, sessionEpoch: 2, switchedApiDomainMode: null }
-  if (command === 'search') return { SearchResult: { total: comics.length, content: comics.map((comic) => ({
-    id: comic.id, name: comic.name, author: comic.author.join('、'), description: '', image: '',
-    category: { title: '模拟分类' }, categorySub: { title: '日常' }, liked: false, isFavorite: false,
-    updateAt: 0, isDownloaded: true, comicDownloadDir: comic.comicDownloadDir,
-  })) } }
+  // 简繁双变体搜索：原文命中全部条目，繁体变体只命中奇数条目（用于核对去重与语言筛选）。
+  if (command === 'search_dual') {
+    const keyword = String(args.keyword ?? '')
+    const traditional = keyword.replace(/[汉画龙东后发]/g, (char) => ({ 汉: '漢', 画: '畫', 龙: '龍', 东: '東', 后: '後', 发: '發' })[char])
+    const convertedKeyword = traditional !== keyword ? traditional : null
+    const searchLanguages = [
+      { id: 'chinese', title: '汉化', mark: '汉化' },
+      { id: 'japanese', title: '日语', mark: '日文' },
+      { id: 'english', title: '英文', mark: '英文' },
+      { id: 'korean', title: '韩语', mark: '韩文' },
+    ]
+    const toItem = (comic, index, suffix) => {
+      const language = searchLanguages[index % searchLanguages.length]
+      const colorMark = index % 5 === 0 ? '【全彩】' : ''
+      return {
+        id: comic.id, name: `${colorMark}【${language.mark}】${comic.name}${suffix}`, author: comic.author.join('、'), image: '',
+        category: { title: '模拟分类' }, categorySub: { id: language.id, title: language.title },
+        liked: false, isFavorite: false, updateAt: index, isDownloaded: true, comicDownloadDir: comic.comicDownloadDir,
+      }
+    }
+    return {
+      original: { SearchResult: { searchQuery: keyword, total: comics.length, hasMore: false,
+        content: comics.map((comic, index) => toItem(comic, index, '')) } },
+      originalError: null,
+      converted: convertedKeyword === null ? null : { SearchResult: { searchQuery: convertedKeyword, total: 13, hasMore: false,
+        content: comics.filter((_, index) => index % 2 === 1).map((comic, index) => toItem(comic, index * 2 + 1, '')) } },
+      convertedError: null,
+      convertedKeyword,
+      warnings: convertedKeyword === null ? [] : ['已按简体与繁体两种写法取回结果，重复作品只保留一次。'],
+    }
+  }
   if (command === 'diagnose_library') return { kind: 'Empty', message: '书库目录为空，先下载或导入漫画。', skipped: [] }
   if (command === 'get_favorite_folder') return {
     folderList: [], total: 1, count: 20,

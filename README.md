@@ -148,5 +148,5 @@ pnpm build:android
 
 ## 📜 声明
 
-1. **许可协议**：本项目以 [MIT License](LICENSE) 开源，版权归属与许可条款以 LICENSE 文件为准。
+1. **许可协议**：本项目以 [MIT License](LICENSE) 开源，版权归属与许可条款以 LICENSE 文件为准；内嵌第三方组件（OpenCC 词典）的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 2. **免责声明**：本项目所有代码与编译产物仅供个人离线学习、技术研究及归档备份使用。禁止用于任何商业用途、付费分发或侵犯版权的行为。因使用本工具产生的一切法律纠纷与责任均由使用者自行承担。
