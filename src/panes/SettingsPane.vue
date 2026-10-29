@@ -4,7 +4,7 @@ import { PhArrowClockwise, PhBookOpenText, PhCaretRight, PhDatabase, PhFolderSim
 import PageHeader from '../components/PageHeader.vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
-import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode } from '../bindings.ts'
+import { commands, type CbzMode, type ImageDomainPreset, type JsonValue, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { useIsMobile } from '../composables/useIsMobile.ts'
@@ -257,7 +257,8 @@ async function dataAction(name: string, action: () => Promise<void>) {
 async function backup() {
   await dataAction('backup', async () => {
     await store.saveConfigNow()
-    const result = await commands.backupAppData()
+    const readingState: JsonValue = JSON.parse(JSON.stringify(toRaw(store.readingState)))
+    const result = await commands.backupAppData(readingState)
     if (result.status === 'error') throw new Error(result.error.err_message)
     // 书库本身就在公共下载时，备份文件已经可见；再发布只会产生「xxx (1).json」副本
     if (isUnderPublicDownloads(result.data)) {
@@ -269,25 +270,37 @@ async function backup() {
   })
 }
 
-async function restore() {
-  const apply = async (paths: string[]) => {
-    await dataAction('restore', async () => {
-      await store.saveConfigNow()
-      const result = await store.runConfigMaintenance(() => commands.restoreAppData(paths[0]))
-      if (result.status === 'error') throw new Error(result.error.err_message)
-      store.applyConfig(result.data, true)
-      store.applySession(await commands.getSession())
-      store.progresses.clear()
-      await store.reloadTasks()
-      await store.refreshDownloadedComics()
-      message.success('备份已恢复')
-    })
-  }
-  try {
-    await withAndroidSelection('backup', apply)
-  } catch (error) {
-    dataError.value = getErrorMessage(error)
-  }
+function restore() {
+  dialog.warning({
+    title: '恢复备份',
+    content: '将用备份覆盖当前设置、任务队列、阅读进度、书签和归档设置；已下载的漫画文件不受影响。',
+    positiveText: '选择备份文件',
+    negativeText: '取消',
+    // 确认后先选文件：Android 的导入文件会在选择回调返回后清理，
+    // 若把确认框放进回调里等用户点击，恢复时文件可能已经被删掉。
+    onPositiveClick: () => {
+      void withAndroidSelection('backup', (paths) => dataAction('restore', async () => {
+        await store.saveConfigNow()
+        const result = await store.runConfigMaintenance(() => commands.restoreAppData(paths[0]))
+        if (result.status === 'error') throw new Error(result.error.err_message)
+        const outcome = result.data
+        store.applyConfig(outcome.config, true)
+        store.applySession(await commands.getSession())
+        store.progresses.clear()
+        let readingNotice = ''
+        if (outcome.readingState !== null) {
+          const imported = store.importReadingStateSnapshot(outcome.readingState)
+          if (imported === 'invalid') readingNotice = '；阅读记录格式无效，已跳过'
+          else if (imported === 'write-failed') readingNotice = '；阅读记录未能保存到本地'
+        }
+        await store.reloadTasks()
+        await store.refreshDownloadedComics()
+        message.success(readingNotice ? `备份已恢复${readingNotice}` : '备份已恢复')
+      })).catch((error) => {
+        dataError.value = getErrorMessage(error)
+      })
+    },
+  })
 }
 
 async function clearCache() {
@@ -301,7 +314,7 @@ async function clearCache() {
 function resetSettings() {
   dialog.warning({
     title: '重置设置',
-    content: '恢复默认设置并清除账号与任务队列；已下载的漫画保留。',
+    content: '恢复默认设置并清除账号、任务队列与归档设置；已下载的漫画与阅读记录保留。',
     positiveText: '重置设置',
     negativeText: '取消',
     onPositiveClick: () =>
@@ -566,12 +579,12 @@ const readingSummary = computed(() => {
       <template v-else-if="openPanel === 'data'">
         <section class="group">
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="backup">
-            <div class="nav-copy"><strong>导出备份</strong><span>设置与任务，不含漫画文件和账号密码</span></div>
+            <div class="nav-copy"><strong>导出备份</strong><span>设置、任务、阅读进度与书签，不含漫画文件和账号密码</span></div>
             <PhCaretRight v-if="dataBusy !== 'backup'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="restore">
-            <div class="nav-copy"><strong>恢复备份</strong><span>从备份文件还原设置与任务</span></div>
+            <div class="nav-copy"><strong>恢复备份</strong><span>从备份还原设置、任务、阅读进度与归档设置</span></div>
             <PhCaretRight v-if="dataBusy !== 'restore'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>

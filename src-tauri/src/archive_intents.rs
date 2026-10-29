@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -9,11 +9,66 @@ use crate::atomic_fs;
 use crate::types::CbzMode;
 
 const MAX_INTENTS: usize = 200;
+pub const INTENTS_FILE_NAME: &str = "archive-intents.json";
+
+/// 归档意图文件与配置同目录；启动、备份与事务恢复共用同一路径。
+pub fn intents_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name(INTENTS_FILE_NAME)
+}
+
+fn default_version() -> u32 {
+    1
+}
 
 #[derive(Serialize, Deserialize)]
 struct IntentFile {
+    #[serde(default = "default_version")]
     version: u32,
+    #[serde(default)]
     entries: IndexMap<i64, CbzMode>,
+}
+
+fn trim_entries(entries: &mut IndexMap<i64, CbzMode>) {
+    while entries.len() > MAX_INTENTS {
+        entries.shift_remove_index(0);
+    }
+}
+
+fn parse_intent_value(value: serde_json::Value) -> anyhow::Result<IndexMap<i64, CbzMode>> {
+    let mut file: IntentFile = serde_json::from_value(value).context("解析归档意图失败")?;
+    ensure!(file.version == 1, "归档意图版本不受支持");
+    trim_entries(&mut file.entries);
+    Ok(file.entries)
+}
+
+fn write_intents_file(path: &Path, entries: &IndexMap<i64, CbzMode>) -> anyhow::Result<()> {
+    let file = IntentFile {
+        version: 1,
+        entries: entries.clone(),
+    };
+    atomic_fs::write(path, serde_json::to_vec_pretty(&file)?).context("保存归档意图失败")
+}
+
+fn remove_intents_file(path: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("删除归档意图失败"),
+    }
+}
+
+/// 事务恢复使用：把备份中的意图快照写回磁盘；`None` 表示恢复为“没有意图文件”。
+pub(crate) fn restore_intents_file(
+    path: &Path,
+    value: Option<&serde_json::Value>,
+) -> anyhow::Result<()> {
+    match value {
+        Some(value) => {
+            let entries = parse_intent_value(value.clone())?;
+            write_intents_file(path, &entries)
+        }
+        None => remove_intents_file(path),
+    }
 }
 
 /// 记录每本漫画期望的 CBZ 归档方式（下载完成后的自动整合行为）。
@@ -64,6 +119,45 @@ impl ArchiveIntentStore {
         self.state.lock().get(&comic_id).copied()
     }
 
+    /// 供备份读取当前意图的稳定快照。
+    pub fn export_entries(&self) -> IndexMap<i64, CbzMode> {
+        self.state.lock().clone()
+    }
+
+    /// 整批替换：先成功落盘，再替换内存；失败时内存保持原样。
+    pub fn replace_entries(&self, mut entries: IndexMap<i64, CbzMode>) -> anyhow::Result<()> {
+        trim_entries(&mut entries);
+        write_intents_file(&self.path, &entries)?;
+        *self.state.lock() = entries;
+        Ok(())
+    }
+
+    /// 事务回滚：`Some` 写回旧快照，`None` 删除文件并清空内存。
+    pub fn restore_snapshot(&self, value: Option<serde_json::Value>) -> anyhow::Result<()> {
+        match value {
+            Some(value) => {
+                let entries = parse_intent_value(value)?;
+                write_intents_file(&self.path, &entries)?;
+                *self.state.lock() = entries;
+            }
+            None => {
+                remove_intents_file(&self.path)?;
+                self.state.lock().clear();
+            }
+        }
+        Ok(())
+    }
+
+    /// 解析备份中的 `archiveIntents` section；缺省/null 返回 `None`，空对象返回 `Some(空)`。
+    pub fn parse_backup_section(
+        value: Option<&serde_json::Value>,
+    ) -> anyhow::Result<Option<IndexMap<i64, CbzMode>>> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        parse_intent_value(value.clone()).map(Some)
+    }
+
     /// 供诊断包读取当前待执行的归档意图（只读快照）。
     pub fn entries(&self) -> Vec<(i64, CbzMode)> {
         self.state
@@ -94,24 +188,8 @@ impl ArchiveIntentStore {
         }
     }
 
-    /// 出厂重置等场景下清空全部记录。
-    pub fn clear(&self) {
-        let mut state = self.state.lock();
-        if state.is_empty() {
-            return;
-        }
-        state.clear();
-        if let Err(error) = self.save(&state) {
-            tracing::error!(error = %error, "清空归档意图失败");
-        }
-    }
-
     fn save(&self, state: &IndexMap<i64, CbzMode>) -> anyhow::Result<()> {
-        let file = IntentFile {
-            version: 1,
-            entries: state.clone(),
-        };
-        atomic_fs::write(&self.path, serde_json::to_vec_pretty(&file)?).context("保存归档意图失败")
+        write_intents_file(&self.path, state)
     }
 }
 
@@ -139,6 +217,34 @@ mod tests {
         assert_eq!(reloaded.get(101), None);
         assert_eq!(reloaded.get(102), Some(CbzMode::PerChapter));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_section_distinguishes_missing_from_empty() {
+        let empty = ArchiveIntentStore::parse_backup_section(Some(&serde_json::json!({
+            "version": 1,
+            "entries": {},
+        })))
+        .unwrap();
+        assert!(empty.unwrap().is_empty());
+        assert!(ArchiveIntentStore::parse_backup_section(None)
+            .unwrap()
+            .is_none());
+        assert!(
+            ArchiveIntentStore::parse_backup_section(Some(&serde_json::Value::Null))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn backup_section_rejects_unknown_version() {
+        let error = ArchiveIntentStore::parse_backup_section(Some(&serde_json::json!({
+            "version": 2,
+            "entries": {},
+        })))
+        .unwrap_err();
+        assert!(error.to_string().contains("版本"));
     }
 
     #[test]

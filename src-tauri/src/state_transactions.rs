@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StateJournal {
     pub previous_config: crate::config::Config,
+    #[serde(default)]
     pub previous_queue: Option<serde_json::Value>,
+    /// 恢复归档意图时的旧文件快照；`None` 表示旧事务日志，不应触碰意图文件。
+    #[serde(default)]
+    pub previous_intents: Option<serde_json::Value>,
+    #[serde(default)]
+    pub intents_managed: bool,
     pub committed: bool,
 }
 
@@ -194,6 +200,14 @@ fn recover_state_replace(config_path: &Path, state_path: &Path) -> anyhow::Resul
         } else if queue_path.exists() {
             std::fs::remove_file(&queue_path)?;
         }
+        if journal.intents_managed {
+            let intents_path = crate::archive_intents::intents_path(config_path);
+            crate::archive_intents::restore_intents_file(
+                &intents_path,
+                journal.previous_intents.as_ref(),
+            )
+            .context("恢复归档意图失败")?;
+        }
     }
     std::fs::remove_file(state_path)?;
     Ok(())
@@ -245,6 +259,70 @@ fn quarantine(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interrupted_state_replace_restores_archive_intents() {
+        let root = std::env::temp_dir().join(format!("jm-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.json");
+        let intents_path = crate::archive_intents::intents_path(&config_path);
+        std::fs::write(
+            &intents_path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "entries": { "2": "perChapter" },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let journal = StateJournal {
+            previous_config: crate::config::Config::default(&root),
+            previous_queue: None,
+            previous_intents: Some(serde_json::json!({
+                "version": 1,
+                "entries": { "1": "merge" },
+            })),
+            intents_managed: true,
+            committed: false,
+        };
+        journal.save(&root.join(".state-replace.json")).unwrap();
+
+        recover(&config_path);
+
+        let restored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&intents_path).unwrap()).unwrap();
+        assert_eq!(restored["entries"]["1"], "merge");
+        assert!(restored["entries"].get("2").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_state_journal_leaves_archive_intents_untouched() {
+        let root = std::env::temp_dir().join(format!("jm-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.json");
+        let intents_path = crate::archive_intents::intents_path(&config_path);
+        let original = serde_json::json!({
+            "version": 1,
+            "entries": { "7": "perChapter" },
+        });
+        std::fs::write(&intents_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let journal = StateJournal {
+            previous_config: crate::config::Config::default(&root),
+            previous_queue: None,
+            previous_intents: None,
+            intents_managed: false,
+            committed: false,
+        };
+        journal.save(&root.join(".state-replace.json")).unwrap();
+
+        recover(&config_path);
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&intents_path).unwrap()).unwrap();
+        assert_eq!(stored, original);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn interrupted_removal_restores_original_and_catalog() {
         let root = std::env::temp_dir().join(format!("jm-removal-{}", uuid::Uuid::new_v4()));

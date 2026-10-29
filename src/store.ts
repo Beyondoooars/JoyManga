@@ -22,8 +22,8 @@ import { computed, nextTick, ref, toRaw } from 'vue'
 import { mergeServerConfig, hasConfigChanges } from './utils/configState.ts'
 import { applyDownloadEvent } from './utils/downloadProgress.ts'
 import { resolveImageDomain } from './utils/imageDomain.ts'
-import { emptyReadingState, parseReadingState, recordProgress, toggleBookmark, READING_STORAGE_KEY,
-  type ReadingProgress, type ReadingState } from './utils/readingState.ts'
+import { emptyReadingState, parseReadingState, recordProgress, sanitizeReadingStateValue, toggleBookmark,
+  READING_STORAGE_KEY, type ReadingProgress, type ReadingState } from './utils/readingState.ts'
 
 export type LogRecord = LogEvent & { id: number; formatedLog: string }
 
@@ -237,6 +237,21 @@ export const useStore = defineStore('store', () => {
       if (typeof localStorage !== 'undefined') localStorage.setItem(READING_STORAGE_KEY, JSON.stringify(next))
       readingPersistenceError.value = ''
     } catch { readingPersistenceError.value = '阅读记录保存失败，请检查磁盘空间' }
+  }
+
+  /** 恢复备份时整批导入：先成功写入本地存储，再替换内存状态，失败时保留原记录。 */
+  function importReadingStateSnapshot(value: unknown): 'applied' | 'invalid' | 'write-failed' {
+    const next = sanitizeReadingStateValue(value)
+    if (!next) return 'invalid'
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(READING_STORAGE_KEY, JSON.stringify(next))
+      readingState.value = next
+      readingPersistenceError.value = ''
+      return 'applied'
+    } catch {
+      readingPersistenceError.value = '阅读记录保存失败，请检查磁盘空间'
+      return 'write-failed'
+    }
   }
 
   function saveReadingProgress(progress: ReadingProgress) {
@@ -708,6 +723,7 @@ function trimProgressHistory() {
     readingState,
     readingPersistenceError,
     saveReadingProgress,
+    importReadingStateSnapshot,
     toggleReadingBookmark,
     removeReadingBookmark,
     forgetComicReadingState,

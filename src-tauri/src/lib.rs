@@ -192,9 +192,8 @@ pub fn run() {
             crate::state_transactions::recover(config_storage.config_path());
             // 提交替换 CBZ 前释放阅读器读句柄（持有替换锁后执行，见 atomic_fs）
             crate::commands::reader_commands::install_commit_hook();
-            let intent_store_path = config_storage
-                .config_path()
-                .with_file_name("archive-intents.json");
+            let intent_store_path =
+                crate::archive_intents::intents_path(config_storage.config_path());
             let config = RwLock::new(Config::new(&config_storage)?);
             let download_dir = config.read().download_dir.clone();
             let _ = std::fs::create_dir_all(&download_dir);
@@ -261,6 +260,8 @@ mod tests {
             specta_typescript::export::<super::download_queue::DownloadTaskSnapshot>(&config)
                 .unwrap();
         let event = specta_typescript::export::<super::events::DownloadTaskEvent>(&config).unwrap();
+        let restore_outcome =
+            specta_typescript::export::<super::commands::RestoreOutcome>(&config).unwrap();
         let normalize = |source: &str| {
             source
                 .chars()
@@ -275,6 +276,10 @@ mod tests {
         assert!(
             bindings.contains(&normalize(&event)),
             "事件类型需要重新生成：{event}"
+        );
+        assert!(
+            bindings.contains(&normalize(&restore_outcome)),
+            "恢复结果类型需要重新生成：{restore_outcome}"
         );
     }
 
