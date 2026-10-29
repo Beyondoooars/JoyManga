@@ -198,6 +198,19 @@ impl DownloadQueue {
         self.state.lock().entries.values().cloned().collect()
     }
 
+    /// 备份只包含重启后仍会恢复的任务，避免把已完成/已取消的历史写进备份。
+    pub fn backup_snapshot(&self) -> serde_json::Value {
+        let tasks: Vec<_> = self
+            .state
+            .lock()
+            .entries
+            .values()
+            .filter(|entry| should_restore(entry.snapshot.state))
+            .cloned()
+            .collect();
+        serde_json::json!({ "version": 1, "tasks": tasks })
+    }
+
     /// 首次入队必须先成功落盘，再允许下载开始。
     pub fn insert(&self, mut entry: StoredDownload) -> anyhow::Result<DownloadTaskSnapshot> {
         let mut state = self.state.lock();
@@ -323,6 +336,25 @@ mod tests {
         assert_eq!(restored.len(), 3);
         assert_eq!(restored[1].snapshot.state, DownloadTaskState::Paused);
         assert_eq!(restored[2].snapshot.state, DownloadTaskState::Failed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_snapshot_only_contains_restorable_tasks() {
+        let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
+        let queue = DownloadQueue::load(root.join("queue.json")).unwrap();
+        queue.insert(entry(1, DownloadTaskState::Pending)).unwrap();
+        queue
+            .insert(entry(2, DownloadTaskState::Completed))
+            .unwrap();
+        queue
+            .insert(entry(3, DownloadTaskState::Cancelled))
+            .unwrap();
+
+        let backup: QueueFile = serde_json::from_value(queue.backup_snapshot()).unwrap();
+        assert_eq!(backup.version, 1);
+        assert_eq!(backup.tasks.len(), 1);
+        assert_eq!(backup.tasks[0].snapshot.chapter_info.chapter_id, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 

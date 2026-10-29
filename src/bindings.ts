@@ -92,15 +92,15 @@ async resetAppState() : Promise<Result<Config, CommandError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async backupAppData() : Promise<Result<string, CommandError>> {
+async backupAppData(readingState: JsonValue | null) : Promise<Result<string, CommandError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("backup_app_data") };
+    return { status: "ok", data: await TAURI_INVOKE("backup_app_data", { readingState }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async restoreAppData(backupPath: string) : Promise<Result<Config, CommandError>> {
+async restoreAppData(backupPath: string) : Promise<Result<RestoreOutcome, CommandError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("restore_app_data", { backupPath }) };
 } catch (e) {
@@ -752,6 +752,7 @@ export type ReadingMode =
  */
 "Scroll"
 export type RelatedListRespData = { id: string; author: string; name: string; image: string }
+export type RestoreOutcome = { config: Config; readingState: JsonValue | null; archiveIntentsRestored: number | null; backupVersion: number }
 export type SearchResult = { searchQuery: string; total: number; content: ComicInSearch[] }
 export type SearchResultVariant = { SearchResult: SearchResult } | { Comic: Comic }
 export type SearchSort = "Latest" | "View" | "Picture" | "Like"
