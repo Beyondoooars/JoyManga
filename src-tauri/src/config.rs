@@ -315,16 +315,21 @@ fn decrypt_stored_credential(
     Ok(())
 }
 
-/// 从磁盘存储格式反序列化配置。
+/// 从 JSON 对象还原配置：磁盘读取与备份恢复共用同一套迁移、解密逻辑。
 ///
 /// 账号与密码先解密再交给 `Config`；历史明文凭据原样通过，下次保存时自动转为密文。
-fn deserialize_config_from_storage(config_string: &str) -> anyhow::Result<Config> {
-    let mut value: serde_json::Value =
-        serde_json::from_str(config_string).context("解析配置JSON失败")?;
+pub(crate) fn deserialize_config_value(mut value: serde_json::Value) -> anyhow::Result<Config> {
     migrate_config_schema(&mut value);
     decrypt_stored_credential(&mut value, "username", "账号")?;
     decrypt_stored_credential(&mut value, "password", "密码")?;
     serde_json::from_value(value).context("将配置JSON反序列化为Config失败")
+}
+
+/// 从磁盘存储格式反序列化配置。
+fn deserialize_config_from_storage(config_string: &str) -> anyhow::Result<Config> {
+    let value: serde_json::Value =
+        serde_json::from_str(config_string).context("解析配置JSON失败")?;
+    deserialize_config_value(value)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -743,8 +748,9 @@ pub enum ImageDomainMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        deserialize_config_from_storage, serialize_config_for_storage, ApiDomainMode, Config,
-        ConfigStorage, ImageDomainMode, API_DOMAIN_2, CONFIG_FILE_NAME, IMAGE_DOMAIN_3,
+        deserialize_config_from_storage, deserialize_config_value, serialize_config_for_storage,
+        ApiDomainMode, Config, ConfigStorage, ImageDomainMode, API_DOMAIN_2, CONFIG_FILE_NAME,
+        IMAGE_DOMAIN_3,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -829,6 +835,22 @@ mod tests {
 
         // 读回来必须还原成明文，否则登录会用密文当账号或密码
         let restored = deserialize_config_from_storage(&stored).unwrap();
+        assert_eq!(restored.username, "alice");
+        assert_eq!(restored.password, "plain-password");
+    }
+
+    #[test]
+    fn backup_config_value_is_decrypted_before_restore() {
+        let app_data_dir = Path::new("test-app-data");
+        let mut config = Config::default(app_data_dir);
+        config.username = "alice".to_string();
+        config.password = "plain-password".to_string();
+        let stored = serialize_config_for_storage(&config).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+
+        // 恢复备份走的是同一入口：必须把 enc:v1 还原，不能把密文写回内存配置。
+        let restored = deserialize_config_value(value).unwrap();
+
         assert_eq!(restored.username, "alice");
         assert_eq!(restored.password, "plain-password");
     }
