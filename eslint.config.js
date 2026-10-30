@@ -5,7 +5,7 @@ import pluginVue from 'eslint-plugin-vue'
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
-  { ignores: ['dist/**', 'dist-apk/**', 'artifacts_latest/**', 'docs/handoffs/**', '.internal-docs/**', 'src-tauri/target/**', 'src-tauri/gen/**', 'src/bindings.ts'] },
+  { ignores: ['dist/**', 'dist-apk/**', 'artifacts_latest/**', 'docs/handoffs/**', '.internal-docs/**', '.analysis/**', 'src-tauri/target/**', 'src-tauri/gen/**', 'src/bindings.ts'] },
   { files: ['**/*.{js,mjs,cjs,ts,vue}'] },
   { languageOptions: { globals: globals.browser } },
   { files: ['scripts/**/*.{js,mjs}'], languageOptions: { globals: globals.node } },

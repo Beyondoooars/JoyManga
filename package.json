@@ -25,7 +25,9 @@
     "build:android": "node scripts/build-android.mjs --release",
     "build:android:debug": "node scripts/build-android.mjs --debug",
     "build:android:test": "node scripts/build-android.mjs --test",
-    "bump": "node scripts/bump-version.mjs"
+    "bump": "node scripts/bump-version.mjs",
+    "check": "pnpm exec eslint . && pnpm test && pnpm build && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml --all-targets",
+    "setup:hooks": "git config core.hooksPath .githooks"
   },
   "dependencies": {
     "@phosphor-icons/vue": "^2.2.1",

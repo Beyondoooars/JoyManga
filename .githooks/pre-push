@@ -1,0 +1,42 @@
+#!/bin/sh
+# 推送前把关：main 的每次推送都会自动打包并发布 Release，所以先在本地跑一遍
+# 与云端完全相同的检查（`pnpm check`），红着推上去会直接中止。
+#
+# 启用方式：pnpm setup:hooks
+# 临时跳过：SKIP_CHECK=1 git push
+set -u
+
+# git 通过 stdin 传入「本地 ref 本地 sha 远端 ref 远端 sha」，可能有多个。
+push_main=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    push_main=1
+  fi
+done
+
+# 只有 main 会自动发版；其他分支和 tag 不拦。
+[ "$push_main" = "1" ] || exit 0
+
+if [ "${SKIP_CHECK:-0}" = "1" ]; then
+  echo "[pre-push] SKIP_CHECK=1，跳过检查"
+  exit 0
+fi
+
+# 发布流程会在打包成功后把版本号提交写回 main，本地下次推送前必须先同步。
+# 在这里直接给出可操作的提示，而不是让 git push 报一层看不懂的拒绝。
+if ! git fetch --quiet origin main; then
+  echo "[pre-push] 无法获取 origin/main，检查网络后重试（确需推送可加 SKIP_CHECK=1）。" >&2
+  exit 1
+fi
+if ! git merge-base --is-ancestor origin/main HEAD; then
+  echo "[pre-push] origin/main 上有本地没有的提交——发布流程打包成功后会写回版本号提交。" >&2
+  echo "[pre-push] 先执行 git pull --rebase，再重新推送。" >&2
+  exit 1
+fi
+
+echo "[pre-push] 运行与云端一致的检查：eslint / 单元测试 / 前端构建 / cargo fmt、clippy、test"
+if ! pnpm check; then
+  echo "" >&2
+  echo "[pre-push] 检查未通过，已阻止推送。修复后重试；确需推送可加 SKIP_CHECK=1。" >&2
+  exit 1
+fi
