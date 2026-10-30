@@ -109,6 +109,7 @@ test('auto login retries thrown transport errors and returns the last message', 
 
   assert.equal(outcome.status, 'failed')
   assert.equal(outcome.attempts, 2)
+  assert.equal(calls, 2)
   assert.equal(outcome.error, '连接被重置')
 })
 
