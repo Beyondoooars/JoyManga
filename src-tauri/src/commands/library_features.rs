@@ -154,19 +154,38 @@ pub fn remove_library_comic(
             ));
         }
     }
-    if delete_files {
+    let refreshed = if delete_files {
         let manager = app.get_download_manager();
         for task in manager
             .snapshots()
             .into_iter()
             .filter(|task| task.comic.id == comic_id)
         {
-            manager
-                .cancel_download_task(task.chapter_info.chapter_id)
-                .map_err(|err| CommandError::from("停止下载任务失败", err))?;
+            // 已完成/已取消的历史任务不需要取消：cancel_download_task 对已结束任务返回错误，
+            // 以前对全部任务都调用一遍，导致刚下载完的漫画在本次会话里始终删不掉。
+            if !matches!(
+                task.state,
+                crate::download_manager::DownloadTaskState::Pending
+                    | crate::download_manager::DownloadTaskState::Downloading
+                    | crate::download_manager::DownloadTaskState::Paused
+            ) {
+                continue;
+            }
+            if let Err(error) = manager.cancel_download_task(task.chapter_info.chapter_id) {
+                // 取消失败不阻断删除：任务可能刚好在取消前完成，继续收集文件路径。
+                tracing::warn!(
+                    comic_id,
+                    chapter_id = task.chapter_info.chapter_id,
+                    error = %error,
+                    "删除前取消下载任务失败，继续删除"
+                );
+            }
         }
-    }
-    let refreshed = super::reader_commands::local_comic(&app, comic_id)?;
+        Some(resolve_comic_for_delete(&app, comic_id)?)
+    } else {
+        // 只删库存记录不依赖扫描结果：漫画已经不在书库里（或文件损坏被跳过）时也要能删掉记录。
+        None
+    };
     let _guard = CATALOG_LOCK.lock();
     let records_path = catalog_path(&app);
     let mut catalog = LibraryCatalog::load(&records_path)
@@ -176,8 +195,8 @@ pub fn remove_library_comic(
             .map_err(|err| CommandError::from("准备书库操作失败", err))?,
     )
     .map_err(|err| CommandError::from("准备书库操作失败", err))?;
-    let paths = if delete_files {
-        collect_delete_paths(&root, &refreshed, &catalog)
+    let paths = if let Some(refreshed) = refreshed.as_ref() {
+        collect_delete_paths(&root, refreshed, &catalog)
             .map_err(|err| CommandError::from("检查删除目标失败", err))?
     } else {
         Vec::new()
@@ -195,6 +214,22 @@ pub fn remove_library_comic(
         .remove(comic_id);
     tracing::info!(comic_id, delete_files, "移除书库记录成功");
     Ok(())
+}
+
+/// 删除文件前解析漫画：优先用书库扫描缓存；缓存里没有时（例如之前只删过库存记录，
+/// 扫描结果被 removed 记录过滤）再直接扫一遍下载目录，避免「文件还在却再也删不掉」。
+fn resolve_comic_for_delete(app: &AppHandle, comic_id: i64) -> CommandResult<Comic> {
+    match super::reader_commands::local_comic(app, comic_id) {
+        Ok(comic) => Ok(comic),
+        Err(error) => {
+            let root = app.get_config().read().download_dir.clone();
+            super::library_commands::scan_downloaded_comics(&root)
+                .comics
+                .into_iter()
+                .find(|comic| comic.id == comic_id)
+                .ok_or(error)
+        }
+    }
 }
 
 fn collect_delete_paths(

@@ -136,10 +136,6 @@ export const useStore = defineStore('store', () => {
       stateUnlisteners.push(await events.configChangedEvent.listen(({ payload }) => applyConfig(payload.config)))
       stateUnlisteners.push(await events.sessionChangedEvent.listen(({ payload }) => applySession(payload)))
       stateUnlisteners.push(await events.comicArchiveEvent.listen(({ payload }) => handleArchiveEvent(payload)))
-      // 导出进度监听常驻：书库页发起导出时传输页可能尚未挂载
-      await initExportListener().catch((error) => {
-        console.error('注册导出进度监听失败', error)
-      })
       stateUnlisteners.push(await events.favoriteChangedEvent.listen(({ payload }) => {
         applyFavoriteMutation(payload.comicId, payload.isFavorite, payload.sessionEpoch)
         if (payload.sessionEpoch === sessionEpoch.value && getFavoriteResult.value) {
@@ -507,65 +503,6 @@ export const useStore = defineStore('store', () => {
     return true
   }
 
-  // ── 导出进度（书库 / 传输页共用）──
-  // 监听器放在 store 中常驻，避免“从书库发起导出、但传输页未挂载时进度事件全部丢失”。
-  interface ExportProgressItem {
-    // 与 ExportProgresses.vue 的 ProgressData 保持同形
-    uuid: string
-    exportType: 'cbz'
-    state: 'Processing' | 'Error' | 'End'
-    comicTitle: string
-    current: number
-    total: number
-    percentage: number
-    indicator: string
-    chapterExportDir?: string
-  }
-  const exportProgresses = ref(new Map<string, ExportProgressItem>())
-  let exportListenerPromise: Promise<void> | undefined
-
-  function initExportListener(): Promise<void> {
-    if (exportListenerPromise) return exportListenerPromise
-    exportListenerPromise = (async () => {
-      const cbzUnlisten = await events.exportCbzEvent.listen(({ payload }) => {
-        if (payload.event === 'Start') {
-          const { uuid, comicTitle, total } = payload.data
-          exportProgresses.value.set(uuid, {
-            uuid,
-            exportType: 'cbz',
-            state: 'Processing',
-            comicTitle,
-            current: 0,
-            total,
-            percentage: 0,
-            indicator: 'CBZ 创建中',
-          })
-          return
-        }
-        const progress = exportProgresses.value.get(payload.data.uuid)
-        if (!progress) return
-        if (payload.event === 'Progress') {
-          progress.current = payload.data.current
-          progress.percentage = progress.total === 0 ? 0 : (progress.current / progress.total) * 100
-          progress.indicator = `CBZ创建中 ${progress.current}/${progress.total}`
-        } else if (payload.event === 'Error') {
-          progress.state = 'Error'
-          progress.indicator = 'CBZ创建失败'
-        } else if (payload.event === 'End') {
-          progress.state = 'End'
-          progress.chapterExportDir = payload.data.chapterExportDir
-          progress.indicator = 'CBZ创建完成'
-        }
-      })
-      exportUnlisteners.push(cbzUnlisten)
-    })().catch((error) => {
-      exportUnlisteners.splice(0).forEach((unlisten) => unlisten())
-      exportListenerPromise = undefined
-      throw error
-    })
-    return exportListenerPromise
-  }
-  const exportUnlisteners: Array<() => void> = []
 
   const taskLoadError = ref('')
   const loadingTasks = ref(false)
@@ -718,7 +655,6 @@ function trimProgressHistory() {
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
     archivingComics, isArchiving, archiveFailures, archiveFailure,
-    exportProgresses, initExportListener,
     initDownloadListener, reloadTasks, taskLoadError, loadingTasks,
     readingState,
     readingPersistenceError,

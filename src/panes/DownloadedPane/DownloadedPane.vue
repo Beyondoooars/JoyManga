@@ -7,8 +7,6 @@ import { NCheckbox } from 'naive-ui'
 import {
   PhArchive,
   PhArrowClockwise,
-  PhBookOpen,
-  PhFileZip,
   PhFunnel,
   PhImage,
   PhMagnifyingGlass,
@@ -18,9 +16,7 @@ import {
   PhX,
 } from '@phosphor-icons/vue'
 import ProgressesPane from '../ProgressesPane/ProgressesPane.vue'
-import UpdateDownloadedComicsButton from './components/UpdateDownloadedComicsButton.vue'
-import PathField from '../../components/PathField.vue'
-import { useDialog, useMessage } from 'naive-ui'
+import { useDialog, useMessage, type DialogReactive } from 'naive-ui'
 import { getErrorMessage } from '../../utils/errors.ts'
 import { hasAllFilesAccess, requestAllFilesAccessAndWait, withAndroidSelection } from '../../utils/androidStorage.ts'
 import { isAndroid } from '../../composables/useIsMobile.ts'
@@ -35,7 +31,6 @@ const dialog = useDialog()
 const checkedIds = ref<Set<number>>(new Set())
 const loading = ref(false)
 const importing = ref(false)
-const exporting = ref(false)
 const searchQuery = ref('')
 const libraryFilter = ref<'all' | 'reading' | 'bookmarks' | 'imported' | 'mergeable'>('all')
 const sortOrder = ref<'added' | 'read' | 'title'>('added')
@@ -44,7 +39,9 @@ const filterSheetOpen = ref(false)
 const PAGE_SIZE = 24
 
 const mergeableComics = computed(() => store.downloadedComics.filter(isMergeableComic))
-const checkedComics = computed(() => currentPageComics.value.filter((comic) => checkedIds.value.has(comic.id)))
+// 选中项按整个书库取，而不是只看当前页：下载完成会刷新列表并重排，
+// 选中的漫画可能被挤到其它页，只看当前页会弹出「删除 0 本」的空操作。
+const checkedComics = computed(() => store.downloadedComics.filter((comic) => checkedIds.value.has(comic.id)))
 const checkedMergeableComics = computed(() => checkedComics.value.filter(isMergeableComic))
 
 const filters = computed(() => [
@@ -233,43 +230,6 @@ watch(
   { immediate: true },
 )
 
-// 批量导出：失败不中断，结束后汇总提示；整个过程中禁用按钮防止重复提交
-async function runBatchExport() {
-  if (checkedIds.value.size === 0 || exporting.value) return
-  try {
-    await store.saveConfigNow()
-  } catch (error) {
-    message.error(getErrorMessage(error))
-    return
-  }
-  const comics = checkedComics.value
-  if (comics.length === 0) return
-  store.progressesPaneTabName = 'export'
-  store.downloadedSubTab = 'transfers'
-  exporting.value = true
-  const failures: string[] = []
-  try {
-    for (const comic of comics) {
-      try {
-        const result = await commands.exportCbz(comic)
-        if (result.status === 'error') {
-          failures.push(`${comic.name}：${result.error.err_message}`)
-        }
-      } catch (error) {
-        failures.push(`${comic.name}：${getErrorMessage(error)}`)
-      }
-    }
-  } finally {
-    exporting.value = false
-  }
-  checkedIds.value.clear()
-  if (failures.length === 0) {
-    message.success(`已提交 ${comics.length} 本导出`)
-  } else {
-    message.warning(`${failures.length}/${comics.length} 本导出失败：${failures.slice(0, 3).join('；')}${failures.length > 3 ? '…' : ''}`)
-  }
-}
-
 async function mergeSelectedComics(comics: Comic[] = checkedMergeableComics.value) {
   if (comics.length === 0) return
 
@@ -290,17 +250,32 @@ async function mergeSelectedComics(comics: Comic[] = checkedMergeableComics.valu
   checkedIds.value.clear()
 }
 
-async function deleteDownloadedComics() {
+function deleteDownloadedComics() {
   if (checkedIds.value.size === 0) return
+  confirmDeleteComics([...checkedComics.value])
+}
 
-  const comics = checkedComics.value
+// 单本（卡片菜单）与批量删除共用同一个确认框；删除文件默认关闭，勾选后才连本地文件一起删。
+function confirmDeleteComics(selected: Comic[]) {
+  // 正在整理 CBZ 的漫画后端会拒绝删除：先提示并跳过，只处理其余项。
+  const archiving = selected.filter((comic) => store.isArchiving(comic.id))
+  const comics = selected.filter((comic) => !store.isArchiving(comic.id))
+  if (archiving.length > 0) {
+    message.warning(`《${archiving[0].name}》正在整理 CBZ，完成后再删除`)
+  }
+  if (comics.length === 0) {
+    if (archiving.length === 0) message.warning('没有可删除的漫画，请重新选择')
+    return
+  }
+
   const deleteFiles = ref(false)
-  dialog.warning({
+  let instance: DialogReactive | undefined
+  instance = dialog.warning({
     title: `删除 ${comics.length} 本漫画`,
     content: () => (
       <div>
         <p>仅删除库存记录，阅读进度与书签会同步清理。</p>
-        <NCheckbox checked={deleteFiles.value} onUpdateChecked={(value) => { deleteFiles.value = value }}>
+        <NCheckbox checked={deleteFiles.value} onUpdate:checked={(value: boolean) => { deleteFiles.value = value }}>
           同时删除本地文件
         </NCheckbox>
         {deleteFiles.value && <p style="color: #DE3B3B">本地文件删除后无法恢复</p>}
@@ -309,21 +284,37 @@ async function deleteDownloadedComics() {
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
-      let failedCount = 0
-      for (const comic of comics) {
-        try {
-          await libraryApi.removeComic(comic.id, deleteFiles.value)
-          if (store.activeReaderTarget?.comicId === comic.id) store.closeReader()
-          store.forgetComicReadingState(comic.id)
-        } catch (error) {
-          message.error(getErrorMessage(error))
-          failedCount += 1
+      // 删除后要重新扫描整个书库，手机上可能要几秒；给按钮加载态，避免重复点击。
+      if (instance) instance.loading = true
+      try {
+        let failedCount = 0
+        const failures: string[] = []
+        for (const comic of comics) {
+          try {
+            await libraryApi.removeComic(comic.id, deleteFiles.value)
+            if (store.activeReaderTarget?.comicId === comic.id) store.closeReader()
+            store.forgetComicReadingState(comic.id)
+          } catch (error) {
+            // 失败原因写入控制台日志，便于真机排查具体卡在哪一步
+            console.error('删除漫画失败', comic.id, error)
+            failures.push(`${comic.name}：${getErrorMessage(error)}`)
+            failedCount += 1
+          }
         }
+        checkedIds.value.clear()
+        try {
+          await store.refreshDownloadedComics()
+        } catch (error) {
+          message.error(`删除后刷新书库失败：${getErrorMessage(error)}`)
+        }
+        if (failedCount > 0) {
+          message.warning(`${failedCount} 本未能删除：${failures.slice(0, 2).join('；')}${failures.length > 2 ? '…' : ''}`)
+        } else {
+          message.success(deleteFiles.value ? `已删除 ${comics.length} 本及本地文件` : `已删除 ${comics.length} 本记录`)
+        }
+      } finally {
+        if (instance) instance.loading = false
       }
-      checkedIds.value.clear()
-      await store.refreshDownloadedComics()
-      if (failedCount > 0) message.warning(`${failedCount} 本未能删除`)
-      else message.success('已删除')
     },
   })
 }
@@ -340,17 +331,6 @@ const pendingCount = computed(() => {
   return count
 })
 
-const readingCount = computed(() => Object.keys(store.readingState.progress).length)
-
-function percentOf(comic: Comic) {
-  const progress = store.readingState.progress[String(comic.id)]
-  if (!progress || progress.totalPages <= 0) return 0
-  return Math.min(100, Math.max(1, Math.round((progress.page / progress.totalPages) * 100)))
-}
-
-function continueComic(comic: Comic) {
-  store.continueReading(comic)
-}
 </script>
 
 <template>
@@ -420,20 +400,6 @@ function continueComic(comic: Comic) {
         </button>
       </div>
 
-      <!-- 继续阅读横幅 -->
-      <button
-        v-if="store.downloadedComics.length > 0 && readingCount > 0"
-        type="button"
-        class="resume-banner"
-        @click="(() => { const next = store.downloadedComics.filter((c) => store.readingState.progress[String(c.id)]).sort((a, b) => (store.readingState.progress[String(b.id)]?.updatedAt ?? 0) - (store.readingState.progress[String(a.id)]?.updatedAt ?? 0))[0]; if (next) continueComic(next) })()">
-        <span class="resume-icon"><PhBookOpen :size="20" weight="duotone" /></span>
-        <span class="resume-copy">
-          <strong>继续阅读</strong>
-          <span>{{ (() => { const next = store.downloadedComics.filter((c) => store.readingState.progress[String(c.id)]).sort((a, b) => (store.readingState.progress[String(b.id)]?.updatedAt ?? 0) - (store.readingState.progress[String(a.id)]?.updatedAt ?? 0))[0]; return next ? `${next.name} · ${store.readingState.progress[String(next.id)]?.chapterTitle ?? ''} ${percentOf(next)}%` : '' })() }}</span>
-        </span>
-        <span class="resume-go">继续 ›</span>
-      </button>
-
       <!-- 搜索 + 筛选 -->
       <div class="library-tools">
         <div class="search-box">
@@ -494,14 +460,6 @@ function continueComic(comic: Comic) {
             </button>
           </div>
         </div>
-        <div class="filter-group">
-          <span class="filter-label">书库位置</span>
-          <PathField v-model:value="store.config.downloadDir" label="书库" />
-          <div class="filter-extra">
-            <UpdateDownloadedComicsButton />
-            <button type="button" class="jm-link" @click="openStorageSettings">更改位置</button>
-          </div>
-        </div>
       </div>
 
       <!-- 选择模式工具条 -->
@@ -514,6 +472,10 @@ function continueComic(comic: Comic) {
         <button type="button" class="sel-icon" :aria-label="allChecked ? '取消全选' : '全选'" :title="allChecked ? '取消全选' : '全选'" @click="toggleSelectAll">
           {{ allChecked ? '取消全选' : '全选' }}
         </button>
+        <button type="button" class="sel-icon is-danger" title="删除所选漫画" @click="deleteDownloadedComics">
+          <PhTrash :size="17" />
+          删除
+        </button>
         <button
           v-if="checkedMergeableComics.length > 0"
           type="button"
@@ -522,13 +484,6 @@ function continueComic(comic: Comic) {
           @click="mergeSelectedComics()">
           <PhArchive :size="17" />
           整理
-        </button>
-        <button type="button" class="sel-icon is-accent" :disabled="exporting" title="导出为 CBZ" @click="runBatchExport">
-          <PhFileZip :size="17" />
-          导出
-        </button>
-        <button type="button" class="sel-icon is-danger" title="删除库存" @click="deleteDownloadedComics">
-          <PhTrash :size="17" />
         </button>
       </div>
 
@@ -586,7 +541,8 @@ function continueComic(comic: Comic) {
             :checked="checkedIds.has(comic.id)"
             :selection-mode="selectionMode"
             @toggle-check="toggleCheck"
-            @long-press="toggleCheck" />
+            @long-press="toggleCheck"
+            @delete="confirmDeleteComics([$event])" />
         </div>
 
         <nav v-if="pageCount > 1" class="pager" aria-label="书库分页">
@@ -798,66 +754,6 @@ function continueComic(comic: Comic) {
   cursor: pointer;
 }
 
-/* 继续阅读横幅 */
-.resume-banner {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 11px;
-  margin: 0 var(--jm-gutter) 10px;
-  padding: 11px 13px;
-  text-align: left;
-  border: 1px solid rgba(251, 114, 153, 0.22);
-  border-radius: var(--jm-r-lg);
-  background: linear-gradient(105deg, #FFF4F8 0%, #FFFFFF 72%);
-  cursor: pointer;
-}
-
-.resume-banner:active {
-  transform: scale(0.99);
-}
-
-.resume-icon {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  color: var(--jm-brand);
-  place-items: center;
-  border-radius: var(--jm-r-md);
-  background: var(--jm-surface);
-  box-shadow: var(--jm-shadow-1);
-}
-
-.resume-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.resume-copy strong {
-  color: var(--jm-text);
-  font-size: 13.5px;
-  font-weight: 700;
-}
-
-.resume-copy span {
-  overflow: hidden;
-  color: var(--jm-text-3);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.resume-go {
-  flex: 0 0 auto;
-  color: var(--jm-brand);
-  font-size: var(--jm-fs-sm);
-  font-weight: 700;
-}
-
 /* 搜索 / 筛选 */
 .library-tools {
   display: flex;
@@ -1016,33 +912,17 @@ function continueComic(comic: Comic) {
   color: rgba(251, 114, 153, 0.72);
 }
 
-.filter-extra {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.filter-extra :deep(.n-button) {
-  height: 34px;
-  border-radius: var(--jm-r-pill);
-}
-
 /* 选择模式 */
+/* 不横向滚动：按钮换行显示，保证删除这类操作在窄屏上也点得到 */
 .selection-bar {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 8px var(--jm-gutter);
   border-bottom: 1px solid var(--jm-line);
   background: var(--jm-surface);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.selection-bar::-webkit-scrollbar {
-  display: none;
 }
 
 .sel-btn,
@@ -1085,7 +965,6 @@ function continueComic(comic: Comic) {
 }
 
 .sel-icon.is-danger {
-  margin-left: auto;
   color: var(--jm-danger);
   border-color: rgba(222, 59, 59, 0.2);
   background: var(--jm-danger-soft);

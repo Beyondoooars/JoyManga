@@ -1,9 +1,8 @@
 <script setup lang="tsx">
 import { ProgressData } from '../../../types.ts'
-import { ref, watchEffect, computed } from 'vue'
-import { SelectionArea, SelectionEvent } from '@viselect/vue'
+import { ref, watchEffect, computed, onBeforeUnmount } from 'vue'
 import { commands, DownloadTaskState } from '../../../bindings.ts'
-import { DropdownOption, NIcon, ProgressProps, useDialog, useMessage } from 'naive-ui'
+import { ProgressProps, useDialog, useMessage } from 'naive-ui'
 import { getErrorMessage } from '../../../utils/errors.ts'
 import { describeFailure } from '../../../utils/downloadProgress.ts'
 import { useStore } from '../../../store.ts'
@@ -12,14 +11,14 @@ import {
   PhChecks,
   PhTrash,
   PhCaretRight,
+  PhCheck,
   PhCloudArrowDown,
   PhClock,
   PhWarningCircle,
   PhTray,
   PhArrowClockwise,
+  PhX,
 } from '@phosphor-icons/vue'
-
-import { useDropdown } from '../../../composables/useDropdown.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -27,79 +26,7 @@ const dialog = useDialog()
 const pendingActions = ref(new Set<number>())
 
 const selectedIds = ref<Set<number>>(new Set())
-const selectionAreaRef = ref<InstanceType<typeof SelectionArea>>()
-const selectableRefs = ref<HTMLDivElement[]>([])
-const { dropdownX, dropdownY, dropdownShowing, showDropdown, closeDropdown } = useDropdown()
-
-const dropdownOptions: DropdownOption[] = [
-  {
-    label: '全选',
-    key: 'select-all',
-    icon: () => (
-      <NIcon size="20">
-        <PhChecks />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        if (selectionAreaRef.value === undefined) {
-          return
-        }
-        const selection = selectionAreaRef.value.selection
-        if (selection === undefined) {
-          return
-        }
-        selection.select(selectableRefs.value)
-        dropdownShowing.value = false
-      },
-    },
-  },
-  {
-    label: '继续',
-    key: 'resume',
-    icon: () => (
-      <NIcon size="20">
-        <PhCaretRight />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        void resumeSelected()
-        dropdownShowing.value = false
-      },
-    },
-  },
-  {
-    label: '暂停',
-    key: 'pause',
-    icon: () => (
-      <NIcon size="20">
-        <PhPause />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        void pauseSelected()
-        dropdownShowing.value = false
-      },
-    },
-  },
-  {
-    label: '取消',
-    key: 'cancel',
-    icon: () => (
-      <NIcon size="20">
-        <PhTrash />
-      </NIcon>
-    ),
-    props: {
-      onClick: () => {
-        void cancelSelected()
-        dropdownShowing.value = false
-      },
-    },
-  },
-]
+const selectionMode = computed(() => selectedIds.value.size > 0)
 
 const uncompletedProgresses = computed<[number, ProgressData][]>(() =>
   Array.from(store.progresses.entries())
@@ -113,31 +40,73 @@ watchEffect(() => {
   selectedIds.value = new Set([...selectedIds.value].filter((chapterId) => uncompletedIds.has(chapterId)))
 })
 
-function extractIds(elements: Element[]): number[] {
-  return elements
-    .map((element) => element.getAttribute('data-key'))
-    .filter(Boolean)
-    .map(Number)
+function toggleSelect(chapterId: number) {
+  if (selectedIds.value.has(chapterId)) selectedIds.value.delete(chapterId)
+  else selectedIds.value.add(chapterId)
 }
 
-function updateSelectedIds({
-  store: {
-    changed: { added, removed },
-  },
-}: SelectionEvent) {
-  extractIds(added).forEach((chapterId) => selectedIds.value.add(chapterId))
-  extractIds(removed).forEach((chapterId) => selectedIds.value.delete(chapterId))
+function selectAll() {
+  selectedIds.value = new Set(uncompletedProgresses.value.map(([chapterId]) => chapterId))
 }
 
-function unselectAll({ event, selection }: SelectionEvent) {
-  if (!event?.ctrlKey && !event?.metaKey) {
-    selection.clearSelection()
-    selectedIds.value.clear()
+function clearSelection() {
+  selectedIds.value.clear()
+}
+
+// 长按进入选择：手机上没有右键，长按是批量操作的入口。
+// 按住期间一旦移动就视为滚动，取消计时，避免滑动列表时误选。
+let pressTimer: ReturnType<typeof setTimeout> | undefined
+let pressStart: { x: number; y: number } | undefined
+let longPressed = false
+
+function clearPress() {
+  if (pressTimer !== undefined) {
+    clearTimeout(pressTimer)
+    pressTimer = undefined
   }
+  pressStart = undefined
+}
+
+function startPress(event: PointerEvent, chapterId: number) {
+  if (event.button !== 0) return
+  // 失败卡片里的按钮和可复制文字不参与长按选择
+  if ((event.target as HTMLElement).closest('button')) return
+  clearPress()
+  longPressed = false
+  pressStart = { x: event.clientX, y: event.clientY }
+  pressTimer = setTimeout(() => {
+    pressTimer = undefined
+    longPressed = true
+    if (navigator.vibrate) navigator.vibrate(12)
+    selectedIds.value.add(chapterId)
+  }, 480)
+}
+
+function movePress(event: PointerEvent) {
+  if (pressStart === undefined) return
+  if (Math.abs(event.clientX - pressStart.x) > 10 || Math.abs(event.clientY - pressStart.y) > 10) clearPress()
+}
+
+function endPress() {
+  clearPress()
+}
+
+onBeforeUnmount(clearPress)
+
+function handleCardClick(event: MouseEvent, chapterId: number) {
+  // 长按已经进入选择时，抬起后紧跟的 click 不应再取消刚选中的这一项
+  if (longPressed) {
+    longPressed = false
+    event.preventDefault()
+    event.stopPropagation()
+    return
+  }
+  if (!selectionMode.value) return
+  toggleSelect(chapterId)
 }
 
 async function handleProgressDoubleClick(state: DownloadTaskState, chapterId: number) {
-  if (pendingActions.value.has(chapterId)) return
+  if (selectionMode.value || pendingActions.value.has(chapterId)) return
   pendingActions.value.add(chapterId)
   try {
     const progress = store.progresses.get(chapterId)
@@ -166,14 +135,6 @@ async function removeFailedTask(chapterId: number) {
   } finally {
     pendingActions.value.delete(chapterId)
   }
-}
-
-function handleProgressContextMenu(chapterId: number) {
-  if (selectedIds.value.has(chapterId)) {
-    return
-  }
-  selectedIds.value.clear()
-  selectedIds.value.add(chapterId)
 }
 
 async function resumeSelected() {
@@ -345,13 +306,7 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
 </script>
 
 <template>
-  <SelectionArea
-    ref="selectionAreaRef"
-    class="selection-container"
-    :options="{ selectables: '.selectable', features: { deselectOnBlur: true } }"
-    @contextmenu="showDropdown"
-    @move="updateSelectedIds"
-    @start="unselectAll">
+  <div class="transfer-scroll">
     <div v-if="uncompletedProgresses.length === 0" class="jm-empty transfer-empty">
       <div class="jm-empty-icon is-muted"><PhTray :size="28" weight="duotone" /></div>
       <strong>队列空空如也</strong>
@@ -360,32 +315,60 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
 
     <template v-else>
       <div class="transfer-toolbar">
-        <button v-if="hasActiveTasks" type="button" class="batch-btn" :disabled="batchOperating" @click="pauseAll">
-          <PhPause :size="13" weight="bold" />
-          全部暂停
-        </button>
-        <button v-if="hasPausedTasks" type="button" class="batch-btn is-accent" :disabled="batchOperating" @click="resumeAll">
-          <PhCaretRight :size="13" weight="bold" />
-          全部继续
-        </button>
-        <button v-if="hasFailedTasks" type="button" class="batch-btn is-danger" :disabled="batchOperating" @click="retryAllFailed">
-          <PhArrowClockwise :size="13" weight="bold" />
-          重试失败
-        </button>
-        <button type="button" class="batch-btn is-neutral" :disabled="batchOperating" @click="cancelAll">全部取消</button>
-        <span class="transfer-hint">拖动框选 · 右键操作 · 双击暂停/继续</span>
+        <template v-if="selectionMode">
+          <button type="button" class="batch-btn is-neutral" @click="clearSelection">
+            <PhX :size="13" weight="bold" />
+            退出
+          </button>
+          <span class="sel-count">已选 {{ selectedIds.size }} 个</span>
+          <button type="button" class="batch-btn is-neutral" @click="selectAll">
+            <PhChecks :size="13" weight="bold" />
+            全选
+          </button>
+          <button type="button" class="batch-btn is-accent" @click="resumeSelected">
+            <PhCaretRight :size="13" weight="bold" />
+            继续
+          </button>
+          <button type="button" class="batch-btn" @click="pauseSelected">
+            <PhPause :size="13" weight="bold" />
+            暂停
+          </button>
+          <button type="button" class="batch-btn is-danger" @click="cancelSelected">
+            <PhTrash :size="13" weight="bold" />
+            取消
+          </button>
+        </template>
+        <template v-else>
+          <button v-if="hasActiveTasks" type="button" class="batch-btn" :disabled="batchOperating" @click="pauseAll">
+            <PhPause :size="13" weight="bold" />
+            全部暂停
+          </button>
+          <button v-if="hasPausedTasks" type="button" class="batch-btn is-accent" :disabled="batchOperating" @click="resumeAll">
+            <PhCaretRight :size="13" weight="bold" />
+            全部继续
+          </button>
+          <button v-if="hasFailedTasks" type="button" class="batch-btn is-danger" :disabled="batchOperating" @click="retryAllFailed">
+            <PhArrowClockwise :size="13" weight="bold" />
+            重试失败
+          </button>
+          <button type="button" class="batch-btn is-neutral" :disabled="batchOperating" @click="cancelAll">全部取消</button>
+        </template>
       </div>
 
       <div class="task-list">
         <div
           v-for="[chapterId, { state, comic, chapterInfo, percentage, indicator, failure, errorMessage }] in uncompletedProgresses"
           :key="chapterId"
-          ref="selectableRefs"
-          :data-key="chapterId"
-          class="selectable task-card"
+          class="task-card"
           :class="{ 'is-selected': selectedIds.has(chapterId), 'is-failed': state === 'Failed' }"
+          :aria-selected="selectionMode ? selectedIds.has(chapterId) : undefined"
+          @click="(event) => handleCardClick(event, chapterId)"
           @dblclick="() => handleProgressDoubleClick(state, chapterId)"
-          @contextmenu="() => handleProgressContextMenu(chapterId)">
+          @pointerdown="(event) => startPress(event, chapterId)"
+          @pointermove="movePress"
+          @pointerup="endPress"
+          @pointerleave="endPress"
+          @pointercancel="endPress">
           <div class="task-head">
             <span class="task-state-icon" :data-state="state">
               <PhCloudArrowDown v-if="state === 'Downloading'" :size="14" weight="bold" />
@@ -397,6 +380,9 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
               <strong :title="comic.name">{{ comic.name }}</strong>
               <span :title="chapterInfo.chapterTitle">{{ chapterInfo.chapterTitle }}</span>
             </div>
+            <span v-if="selectionMode" class="task-check" :class="{ 'is-on': selectedIds.has(chapterId) }" aria-hidden="true">
+              <PhCheck v-if="selectedIds.has(chapterId)" :size="12" weight="bold" />
+            </span>
             <span class="task-indicator">{{ indicator }}</span>
           </div>
 
@@ -409,7 +395,7 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
             :show-indicator="false"
             :height="4" />
 
-          <div v-if="state === 'Failed'" class="task-error" @dblclick.stop @mousedown.stop>
+          <div v-if="state === 'Failed'" class="task-error" @dblclick.stop @mousedown.stop @pointerdown.stop>
             <div v-if="failure" class="task-failure-meta">{{ describeFailure(failure) }}</div>
             <div role="status">{{ failure?.message || errorMessage || '下载失败，请重试或查看日志' }}</div>
             <div class="task-error-actions">
@@ -424,20 +410,11 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
         </div>
       </div>
     </template>
-
-    <n-dropdown
-      placement="bottom-start"
-      trigger="manual"
-      :x="dropdownX"
-      :y="dropdownY"
-      :options="dropdownOptions"
-      :show="dropdownShowing"
-      :on-clickoutside="closeDropdown" />
-  </SelectionArea>
+  </div>
 </template>
 
 <style scoped>
-.selection-container {
+.transfer-scroll {
   height: 100%;
   overflow-y: auto;
   padding: 12px var(--jm-gutter) calc(24px + var(--safe-bottom));
@@ -495,10 +472,15 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
   background: var(--jm-surface);
 }
 
-.transfer-hint {
-  margin-left: auto;
-  color: var(--jm-text-4);
-  font-size: 9.5px;
+.sel-count {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  padding: 0 4px;
+  color: var(--jm-brand);
+  font-size: 11.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -513,6 +495,8 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
   border: 1px solid var(--jm-line);
   border-radius: var(--jm-r-md);
   background: var(--jm-surface);
+  cursor: pointer;
+  touch-action: pan-y;
   transition:
     border-color 160ms ease,
     background-color 160ms ease;
@@ -587,6 +571,24 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
   white-space: nowrap;
 }
 
+.task-check {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  color: transparent;
+  place-items: center;
+  border: 1.5px solid var(--jm-line);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-surface);
+}
+
+.task-check.is-on {
+  color: #fff;
+  border-color: var(--jm-brand);
+  background: var(--jm-brand);
+}
+
 .task-indicator {
   flex: 0 0 auto;
   color: var(--jm-text-3);
@@ -655,11 +657,5 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
 .tiny-btn:disabled {
   opacity: 0.55;
   cursor: wait;
-}
-
-:global(.selection-area) {
-  background-color: rgba(251, 114, 153, 0.14) !important;
-  border: 1px solid var(--jm-brand) !important;
-  border-radius: 2px;
 }
 </style>

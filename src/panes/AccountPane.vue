@@ -8,9 +8,6 @@ import { useStore } from '../store.ts'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
 import { compactNumber, expProgress } from '../utils/dailyCheckIn.ts'
 import {
-  PhBookmarkSimple,
-  PhBookOpen,
-  PhBooks,
   PhCaretRight,
   PhCoin,
   PhGearSix,
@@ -27,26 +24,10 @@ const message = useMessage()
 /** 金币与等级经验都挂在用户资料上，签到成功后后端会重新拉取资料并经会话事件推回来 */
 const exp = computed(() => expProgress(store.userProfile))
 
-const readingCount = computed(() => Object.keys(store.readingState.progress).length)
-const bookmarkCount = computed(() => store.readingState.bookmarks.length)
-
-function goToLibrary() {
-  store.downloadedSubTab = 'library'
-  store.currentTabName = 'downloaded'
-}
-
-// 书库列表平时由书库页加载：直接从「我的」进来时它还是空的，本地统计会显示 0。
-// 未加载过就补一次，失败不提示——统计不是本页的主内容。
-function ensureLibraryLoaded() {
-  if (store.downloadedComicsLoaded && !store.downloadedComicsStale) return
-  void store.refreshDownloadedComics().catch((error) => console.error('加载本地书库失败', error))
-}
-
 // 资料只在登录时写入 store，金币/经验会随时间变化：每次回到本页静默刷新一次。
 // 失败不提示——签到卡自己会显示拉取失败，这里再弹一次只是噪音。
 let activatedOnce = false
 onActivated(() => {
-  ensureLibraryLoaded()
   if (!activatedOnce) {
     activatedOnce = true
     return
@@ -258,31 +239,6 @@ async function clearUsernameAndPasswordInConfig() {
 
       <DailyCheckInCard />
 
-      <!-- 本地阅读数据 -->
-      <section class="local-card">
-        <header class="local-head">
-          <h3>我的阅读</h3>
-          <button type="button" class="jm-link is-brand" @click="goToLibrary">去书库 ›</button>
-        </header>
-        <div class="local-stats">
-          <button type="button" class="local-stat" @click="goToLibrary">
-            <PhBookOpen :size="19" weight="duotone" />
-            <strong>{{ readingCount }}</strong>
-            <span>在读</span>
-          </button>
-          <button type="button" class="local-stat" @click="goToLibrary">
-            <PhBooks :size="19" weight="duotone" />
-            <strong>{{ store.downloadedComics.length }}</strong>
-            <span>已下载</span>
-          </button>
-          <button type="button" class="local-stat" @click="goToLibrary">
-            <PhBookmarkSimple :size="19" weight="duotone" />
-            <strong>{{ bookmarkCount }}</strong>
-            <span>书签</span>
-          </button>
-        </div>
-      </section>
-
       <button type="button" class="logout-row" :disabled="loggingIn || loggingOut" @click="handleLogout">
         <PhSignOut :size="18" />
         <span>退出登录</span>
@@ -322,30 +278,6 @@ async function clearUsernameAndPasswordInConfig() {
         <n-button v-if="loggingIn" size="small" quaternary @click="cancelLogin">取消登录</n-button>
         <n-button v-if="store.userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">返回我的</n-button>
         <p class="privacy-note">账号信息只保存在本机；退出登录会一并清除记住的账密。</p>
-      </section>
-
-      <section class="local-card">
-        <header class="local-head">
-          <h3>本地阅读</h3>
-          <button type="button" class="jm-link is-brand" @click="goToLibrary">去书库 ›</button>
-        </header>
-        <div class="local-stats">
-          <button type="button" class="local-stat" @click="goToLibrary">
-            <PhBookOpen :size="19" weight="duotone" />
-            <strong>{{ readingCount }}</strong>
-            <span>在读</span>
-          </button>
-          <button type="button" class="local-stat" @click="goToLibrary">
-            <PhBooks :size="19" weight="duotone" />
-            <strong>{{ store.downloadedComics.length }}</strong>
-            <span>已下载</span>
-          </button>
-          <button type="button" class="local-stat" @click="goToLibrary">
-            <PhBookmarkSimple :size="19" weight="duotone" />
-            <strong>{{ bookmarkCount }}</strong>
-            <span>书签</span>
-          </button>
-        </div>
       </section>
 
       <button type="button" class="settings-row" @click="store.openSettings()">
@@ -538,63 +470,6 @@ async function clearUsernameAndPasswordInConfig() {
 .hero-settings:hover {
   color: var(--jm-brand);
   background: var(--jm-brand-soft);
-}
-
-/* 阅读数据卡 */
-.local-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin: 0 var(--jm-gutter);
-  padding: 14px 16px;
-  border: 1px solid var(--jm-line);
-  border-radius: var(--jm-r-lg);
-  background: var(--jm-surface);
-}
-
-.local-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.local-head h3 {
-  margin: 0;
-  color: var(--jm-text);
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.local-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.local-stat {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 10px 12px;
-  color: var(--jm-text-2);
-  border: 0;
-  border-radius: var(--jm-r-md);
-  background: var(--jm-sunken);
-  cursor: pointer;
-}
-
-.local-stat strong {
-  color: var(--jm-text);
-  font-size: 18px;
-  font-weight: 800;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.15;
-}
-
-.local-stat span {
-  color: var(--jm-text-3);
-  font-size: 10.5px;
 }
 
 /* 行式入口 */

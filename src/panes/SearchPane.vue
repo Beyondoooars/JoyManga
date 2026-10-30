@@ -9,7 +9,6 @@ import {
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
 import WeeklyPane from './WeeklyPane.vue'
-import ContinueReadingRow from '../components/ContinueReadingRow.vue'
 import {
   PhArrowLeft,
   PhArrowRight,
@@ -412,8 +411,6 @@ function goToPage(page: number) {
     </div>
 
     <div class="jm-scroll discover-scroll">
-      <ContinueReadingRow />
-
       <!-- 每周必看 -->
       <WeeklyPane v-if="view === 'weekly'" />
 

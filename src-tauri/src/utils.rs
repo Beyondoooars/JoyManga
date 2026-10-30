@@ -335,9 +335,9 @@ pub fn walk_comic_metadata_files(download_dir: &Path) -> impl Iterator<Item = wa
         .filter_entry(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            // `.import-` 与 `.downloading-` 都是应用自己的一次性工作目录：
-            // 前者是导入暂存，后者是下载中途的散图，扫描时都不该下钻。
-            if name.starts_with(".import-") || name.starts_with(".downloading-") {
+            // 隐藏目录都是应用自身的工作目录或删除残留（`.import-`、`.downloading-`、
+            // `.原名.trash-*`），扫描时一律跳过，避免残留被误识别成新漫画。
+            if entry.depth() > 0 && name.starts_with('.') {
                 return false;
             }
             if entry.file_type().is_dir() {
@@ -758,6 +758,26 @@ mod tests {
         let entries: Vec<_> = super::walk_comic_metadata_files(sandbox.path()).collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].file_name(), "元数据.json");
+    }
+
+    #[test]
+    fn walk_comic_metadata_files_skips_hidden_work_dirs() {
+        let sandbox = TestDir::new();
+        let comic_dir = sandbox.path().join("comic_1");
+        std::fs::create_dir_all(&comic_dir).unwrap();
+        std::fs::write(comic_dir.join("元数据.json"), b"{}").unwrap();
+
+        // 删除残留（.原名.trash-*）与下载/导入临时目录都是隐藏目录，
+        // 不能被当成一本新漫画扫描出来。
+        for hidden in [".小说.trash-1234", ".downloading-小说-1", ".import-abc"] {
+            let dir = sandbox.path().join(hidden);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("元数据.json"), b"{}").unwrap();
+        }
+
+        let entries: Vec<_> = super::walk_comic_metadata_files(sandbox.path()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), comic_dir.join("元数据.json"));
     }
 
     #[test]
