@@ -116,7 +116,21 @@ pub(crate) fn remove_with_catalog(
                 // 拿替换锁后释放，避免释放与改名之间被重新打开
                 let _guard = crate::atomic_fs::commit_guard();
                 crate::commands::reader_commands::release_handle_for(original);
-                std::fs::rename(original, staged).context("隔离删除目标失败")?;
+                if let Err(rename_error) = std::fs::rename(original, staged) {
+                    // Android 公共存储/FUSE 会拒绝改名正被媒体扫描或其它进程打开的文件。
+                    // 删除本身不需要改名，改名失败时直接删除，避免整本漫画因此删不掉。
+                    tracing::warn!(
+                        path = %original.display(),
+                        error = %rename_error,
+                        "隔离删除目标失败，改为直接删除"
+                    );
+                    if original.is_dir() {
+                        std::fs::remove_dir_all(original)
+                    } else {
+                        std::fs::remove_file(original)
+                    }
+                    .with_context(|| format!("删除目标失败：{}", original.display()))?;
+                }
             }
         }
         next.save(records_path)?;

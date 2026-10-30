@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { type ArchiveStage, type Comic, commands } from '../../../bindings.ts'
 import { useStore } from '../../../store.ts'
-import { PhArchive, PhCheck, PhDotsThree, PhFolderOpen, PhImage } from '@phosphor-icons/vue'
+import { PhArchive, PhCheck, PhDotsThree, PhFolderOpen, PhImage, PhTrash } from '@phosphor-icons/vue'
 import { computed, h, onBeforeUnmount, ref } from 'vue'
 import { NDropdown, useMessage } from 'naive-ui'
 import { isMergeableComic, localChapters } from '../../../utils/mergeableComics.ts'
@@ -59,6 +59,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'toggle-check': [comic: Comic]
   'long-press': [comic: Comic]
+  delete: [comic: Comic]
 }>()
 
 function pickComic() {
@@ -135,6 +136,12 @@ const menuOptions = computed(() => [
     ? [{ label: archiving.value ? '正在整理…' : '整理为整本 CBZ', key: 'merge', disabled: archiving.value || merging.value, icon: () => h(PhArchive, { size: 16 }) }]
     : []),
   { label: '选择', key: 'select', icon: () => h(PhCheck, { size: 16 }) },
+  {
+    label: '删除',
+    key: 'delete',
+    icon: () => h(PhTrash, { size: 16 }),
+    props: { style: 'color: var(--jm-danger)' },
+  },
 ])
 
 function openMenu(event: MouseEvent) {
@@ -150,6 +157,10 @@ async function handleMenu(key: string) {
   menuOpen.value = false
   if (key === 'select') {
     emit('long-press', props.comic)
+    return
+  }
+  if (key === 'delete') {
+    emit('delete', props.comic)
     return
   }
   if (key === 'merge') {
