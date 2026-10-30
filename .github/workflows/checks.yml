@@ -1,0 +1,45 @@
+name: checks
+
+# 可复用的检查集合：PR 由 CI.yml 调用，main / 分支推送与手动打包由 Android Build
+# 在打包前调用。两处共用同一份定义，避免 PR、发版前的检查标准漂移。
+# 本地对应命令是 `pnpm check`（见 package.json 与 .githooks/pre-push）。
+on:
+  workflow_call:
+
+# 检查只读代码，不需要写权限；调用方（Android Build）的写权限不会被它继承使用。
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec eslint .
+      - run: pnpm test
+      - run: pnpm build
+
+  rust:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets

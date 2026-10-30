@@ -122,12 +122,13 @@ pnpm install
 # 2. 启动前端调试环境 (热重载)
 pnpm dev
 
-# 3. 运行代码检查与测试套件
-pnpm exec eslint .
-pnpm test
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+# 3. 运行与云端 CI 完全一致的检查（提交前建议先跑一遍）
+pnpm check
 
-# 4. 编译 Android arm64-v8a APK
+# 4. 启用 pre-push 钩子：推送到 main 前自动跑上面的检查
+pnpm setup:hooks
+
+# 5. 编译 Android arm64-v8a APK
 pnpm build:android
 ```
 
@@ -135,9 +136,12 @@ pnpm build:android
 
 推送到 `main` 即触发云端打包，无需本地改版本号：
 
-1. GitHub Actions 自动递增 patch 版本（`package.json`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`、README 徽章同步）。
-2. 编译并校验 arm64-v8a 签名 APK。
-3. 校验通过后把版本号提交回 `main`，创建 `vX.Y.Z` Release 并上传 APK，应用内「检查更新」即可发现新版本。
+1. 先跑与 PR、`pnpm check` 相同的检查（eslint、单元测试、前端构建、cargo fmt / clippy / test）。任何一项失败都会中止，不会打包，也不会发版。
+2. GitHub Actions 自动递增 patch 版本（`package.json`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`、README 徽章同步）。
+3. 编译并校验 arm64-v8a 签名 APK。
+4. 校验通过后把版本号提交回 `main`，创建 `vX.Y.Z` Release 并上传 APK，应用内「检查更新」即可发现新版本。
+
+> 打包成功后会有一个 `chore: 发布 vX.Y.Z [skip ci]` 提交写回 `main`。本地下次推送前先 `git pull --rebase`；启用 `pnpm setup:hooks` 后，推送时若落后会直接给出提示。
 
 需要升 minor/major 时，在 Actions 面板手动运行 **Android Build**，`version` 输入 `minor`、`major` 或明确的 `X.Y.Z`。
 本地仍可用 `pnpm bump <patch|minor|major|X.Y.Z>` 手动同步版本号。

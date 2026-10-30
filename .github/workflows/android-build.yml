@@ -21,7 +21,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 打包前先跑与 PR / 本地 `pnpm check` 相同的检查。检查失败就不打包、不发版，
+  # 避免 v0.3.5 那样 ci 红着仍然发布了 Release。
+  verify:
+    uses: ./.github/workflows/checks.yml
+
   build-android:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write

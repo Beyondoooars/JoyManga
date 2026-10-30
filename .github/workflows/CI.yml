@@ -1,45 +1,14 @@
 name: ci
 
+# main 推送的检查放在 Android Build 里，作为打包前的门禁（失败就不发版）；
+# 这里只负责 PR。两处共用 checks.yml，检查标准与本地 `pnpm check` 一致。
 on:
   pull_request:
-  push:
-    branches:
-      - main
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v6
-        with:
-          run_install: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: lts/*
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec eslint .
-      - run: pnpm test
-      - run: pnpm build
-
-  rust:
-    runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: src-tauri
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets
+  checks:
+    uses: ./.github/workflows/checks.yml
