@@ -60,6 +60,10 @@ jobs:
 
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
+          # 应用使用 compileSdk 35，Tauri 2.12 的 Android 库自身使用 compileSdk 36；
+          # 显式安装，避免依赖 runner 镜像里恰好存在哪个版本。
+          sdkmanager "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" > /dev/null
+
           if [ ! -d "$ANDROID_HOME/ndk" ] || [ -z "$(ls -A "$ANDROID_HOME"/ndk 2>/dev/null)" ]; then
             echo "Installing NDK..."
             sdkmanager "ndk;26.1.10909125"
@@ -107,7 +111,8 @@ jobs:
           targets: aarch64-linux-android
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk
+        # 固定版本，避免 CI 每次拿到不同的上游版本导致构建不可复现。
+        run: cargo install cargo-ndk --version 4.1.2 --locked
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
