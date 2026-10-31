@@ -18,6 +18,7 @@ repositories {
 
 dependencies {
     compileOnly(gradleApi())
-    implementation("com.android.tools.build:gradle:8.5.1")
+    // 与根 build.gradle.kts 的 AGP 版本保持一致。
+    implementation("com.android.tools.build:gradle:8.10.1")
 }
 

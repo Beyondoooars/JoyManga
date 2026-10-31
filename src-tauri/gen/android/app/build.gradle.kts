@@ -1,4 +1,5 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -42,7 +43,8 @@ val appVersionCode: Int = System.getenv("APP_VERSION_CODE")?.toIntOrNull()
     ?: maxOf(propVersionCode, defaultVersionCode)
 
 android {
-    compileSdk = 34
+    // Tauri 2.12 依赖的 androidx.core 1.16 要求 compileSdk 35。
+    compileSdk = 35
     namespace = "com.joymanga.app"
     defaultConfig {
         // release 包默认禁止明文 HTTP（应用只访问 HTTPS 接口）；debug 包在下方单独放开，
@@ -88,11 +90,14 @@ android {
             )
         }
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
     buildFeatures {
         buildConfig = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_1_8)
     }
 }
 
@@ -108,12 +113,12 @@ rust {
 }
 
 dependencies {
-    implementation("androidx.webkit:webkit:1.6.1")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.google.android.material:material:1.8.0")
+    implementation("androidx.webkit:webkit:1.18.0")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("com.google.android.material:material:1.14.0")
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.1.4")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }
 
 apply(from = "tauri.build.gradle.kts")
