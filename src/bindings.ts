@@ -542,11 +542,15 @@ export type CommandErrorKind =
 /**
  * 资源不存在（漫画被下架、章节被删）：重试无意义
  */
-"NotFound" | 
+"NotFound" |
+/**
+ * 用户主动取消，或登录期间网络设置改变：不应重试
+ */
+"Cancelled" |
 /**
  * 磁盘写入失败、空间不足、权限问题：建议清理空间或换目录
  */
-"Storage" | 
+"Storage" |
 /**
  * 其他未归类
  */

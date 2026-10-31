@@ -25,11 +25,14 @@ pub(crate) struct LibraryScan {
 #[tauri::command(async)]
 #[specta::specta]
 pub fn get_downloaded_comics(app: AppHandle) -> Vec<Comic> {
-    downloaded_library(&app).comics
+    downloaded_library(&app, false).comics
 }
 
 /// 读取本地书库（扫描结果 + 书库记录里的导入项）。
-pub(crate) fn downloaded_library(app: &AppHandle) -> LibraryScan {
+///
+/// `include_removed` 供删除流程使用：即使漫画已被“移除记录”隐藏，也要能解析到它，
+/// 这样只扫描一次即可，不必在 `local_comic` 失败后再全量扫描一遍。
+pub(crate) fn downloaded_library(app: &AppHandle, include_removed: bool) -> LibraryScan {
     let download_dir = app.get_config().read().download_dir.clone();
     let catalog = {
         let _guard = crate::library_catalog::CATALOG_LOCK.lock();
@@ -62,17 +65,26 @@ pub(crate) fn downloaded_library(app: &AppHandle) -> LibraryScan {
             }
         }
     }
-    scan.comics.retain(|comic| !removed.contains(&comic.id));
+    // 缓存只保存可见漫画：已移除的记录不能借缓存重新进入阅读器或删除逻辑。
+    let visible: Vec<Comic> = scan
+        .comics
+        .iter()
+        .filter(|comic| !removed.contains(&comic.id))
+        .cloned()
+        .collect();
     if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
         let mut map = std::collections::HashMap::new();
-        for comic in &scan.comics {
+        for comic in &visible {
             if let Some(dir) = &comic.comic_download_dir {
                 map.insert(comic.id, dir.clone());
             }
         }
         cache.set(map);
-        cache.set_comics(&download_dir, &scan.comics);
-        cache.set_scan(&download_dir, scan.comics.len(), scan.skipped.clone());
+        cache.set_comics(&download_dir, &visible);
+        cache.set_scan(&download_dir, visible.len(), scan.skipped.clone());
+    }
+    if !include_removed {
+        scan.comics.retain(|comic| !removed.contains(&comic.id));
     }
     scan
 }
@@ -212,7 +224,7 @@ pub fn diagnose_library(app: AppHandle) -> Option<LibraryDiagnosis> {
     {
         Some(summary) => summary,
         None => {
-            let scan = downloaded_library(&app);
+            let scan = downloaded_library(&app, false);
             (scan.comics.len(), scan.skipped)
         }
     };

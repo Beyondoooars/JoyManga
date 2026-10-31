@@ -16,13 +16,13 @@ pub(crate) struct RegisteredCbz {
     pub path: PathBuf,
 }
 
-#[derive(Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 struct RemovedRecord {
     root: String,
     id: i64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct LibraryCatalog {
     version: u8,
     imports: Vec<RegisteredCbz>,
@@ -95,6 +95,24 @@ impl LibraryCatalog {
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         atomic_fs::write(path, serde_json::to_vec_pretty(self)?)
+    }
+
+    /// 删除事务回滚/恢复使用：这些路径已在“隔离改名失败”分支被直接删除，
+    /// 不能再把它们的导入记录写回书库。
+    ///
+    /// 只丢弃当前确实不存在的路径：若崩溃发生在删除之前，文件仍在，记录必须保留。
+    pub fn forget_missing_paths(&mut self, paths: &[PathBuf]) {
+        let missing: Vec<&PathBuf> = paths.iter().filter(|path| !path.exists()).collect();
+        if missing.is_empty() {
+            return;
+        }
+        self.imports.retain(|record| {
+            let record_path =
+                std::fs::canonicalize(&record.path).unwrap_or_else(|_| record.path.clone());
+            !missing
+                .iter()
+                .any(|path| record_path == **path || record_path.starts_with(*path))
+        });
     }
 
     pub fn removed_ids(&self, root: &Path) -> HashSet<i64> {
@@ -240,6 +258,35 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
             .count();
         assert_eq!(backups, 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn forget_missing_paths_keeps_records_for_files_that_still_exist() {
+        let root = std::env::temp_dir().join(format!("jm-catalog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("kept.cbz");
+        let deleted = root.join("deleted.cbz");
+        std::fs::write(&kept, b"kept").unwrap();
+        std::fs::write(&deleted, b"deleted").unwrap();
+        let kept = std::fs::canonicalize(kept).unwrap();
+        let deleted = std::fs::canonicalize(deleted).unwrap();
+        let mut catalog = LibraryCatalog::default();
+        let (kept_id, _) = catalog.register(&root, &kept).unwrap();
+        let (deleted_id, _) = catalog.register(&root, &deleted).unwrap();
+        std::fs::remove_file(&deleted).unwrap();
+
+        catalog.forget_missing_paths(&[deleted]);
+        // 文件仍存在的路径不能误删记录（崩溃可能发生在真正删除之前）
+        catalog.forget_missing_paths(&[kept]);
+
+        let ids: Vec<i64> = catalog
+            .visible_imports(&root)
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(ids, vec![kept_id]);
+        assert!(!ids.contains(&deleted_id));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

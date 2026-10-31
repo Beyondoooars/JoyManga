@@ -262,21 +262,21 @@ impl DownloadManager {
                 ],
             );
         } else {
-            let mut snapshot = self
+            let Some(mut snapshot) = self
                 .snapshots()
                 .into_iter()
                 .find(|snapshot| snapshot.chapter_info.chapter_id == chapter_id)
-                .context("未找到要移除的下载任务")?;
-            // 只允许从可取消状态迁移：已完成的任务不能被“移除”改写成取消并从历史中消失
-            anyhow::ensure!(
-                matches!(
-                    snapshot.state,
-                    DownloadTaskState::Pending
-                        | DownloadTaskState::Paused
-                        | DownloadTaskState::Failed
-                ),
-                "该任务已结束，无需取消"
-            );
+            else {
+                // 任务可能在快照与取消之间完成并被清理；取消一个已结束的任务是幂等的。
+                return Ok(());
+            };
+            // 已完成/已取消的任务保持原状态：不能被“移除”改写成取消并从历史中消失。
+            if matches!(
+                snapshot.state,
+                DownloadTaskState::Completed | DownloadTaskState::Cancelled
+            ) {
+                return Ok(());
+            }
             snapshot.state = DownloadTaskState::Cancelled;
             if let Some(snapshot) = self.queue.update(snapshot) {
                 let _ = DownloadTaskEvent::Create(snapshot).emit(&self.app);

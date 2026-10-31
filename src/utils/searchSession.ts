@@ -71,9 +71,16 @@ export class SearchSession {
   private redirectComic: Comic | null = null
   private visibleCache: { filter: SearchFilter; length: number; items: ComicInSearch[] } | null = null
 
-  constructor(options: { keyword: string; sort: SearchSort; fetcher: DualSearchFetcher }) {
+  constructor(options: {
+    keyword: string
+    sort: SearchSort
+    filter?: SearchFilter
+    fetcher: DualSearchFetcher
+  }) {
     this.fetcher = options.fetcher
     this.orderMode = options.sort === 'Latest' ? 'updateAt' : 'alternate'
+    // 重建会话时可能沿用界面上的语言筛选；默认 all 只用于首次搜索。
+    this.filter = options.filter ?? 'all'
     this.streams = [this.createStream('original', options.keyword, 1)]
   }
 
@@ -149,9 +156,12 @@ export class SearchSession {
   }
 
   get fatalError(): string | null {
-    if (this.streams.length === 0) return null
+    if (this.streams.length === 0 || this.ordered.length > 0) return null
     if (this.streams.every((stream) => stream.failed)) {
-      return '原文与转换写法都加载失败，请稍后重试'
+      // 没有转换写法时只有原文一个流，不能声称“两种写法都失败”。
+      return this.streams.length === 1
+        ? '搜索加载失败，请稍后重试'
+        : '原文与转换写法都加载失败，请稍后重试'
     }
     return null
   }
@@ -268,8 +278,9 @@ export class SearchSession {
   private ensureConvertedStream(convertedKeyword: string | null): void {
     this.convertedKeyword = convertedKeyword
     if (convertedKeyword === null || this.stream('converted') !== undefined) return
-    // 第一页已经和原文变体一起取过，游标从第 2 页开始
-    this.streams.push(this.createStream('converted', convertedKeyword, 2))
+    // 第 1 页已经随首次请求一起取过，马上会交给 applyPage 并推进到第 2 页；
+    // 游标必须从 1 开始，否则第 2 页会被跳过。
+    this.streams.push(this.createStream('converted', convertedKeyword, 1))
   }
 
   private applyPage(key: StreamKey, page: SearchVariantPage | null): void {
@@ -289,7 +300,8 @@ export class SearchSession {
         this.redirectComic = page.comic
         for (const item of this.streams) item.exhausted = true
       } else {
-        this.pushWarning('转换写法的搜索结果被识别为漫画编号，已忽略')
+        // 与后端 warnings 使用同一文案，pushWarning 会去重。
+        this.pushWarning('转换后的关键词被识别为漫画编号，已忽略')
         stream.exhausted = true
       }
       return

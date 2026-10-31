@@ -16,29 +16,53 @@ use crate::extensions::AppHandleExt;
 use crate::types::{ArchiveStage, CbzMode, ChapterInfo, Comic, TaskStage};
 use crate::utils;
 
-/// 正在执行归档最终整合的漫画 ID 集合（同一本漫画同时只允许一个整合任务）。
+#[derive(Default)]
+struct FinalizeRuns {
+    /// 正在执行归档最终整合的漫画 ID。
+    running: HashSet<i64>,
+    /// 整合运行期间又被请求调度的漫画 ID：收尾后必须再跑一次。
+    rerun: HashSet<i64>,
+}
+
+/// 正在执行归档最终整合的漫画集合（同一本漫画同时只允许一个整合任务）。
 #[derive(Default)]
 pub struct ArchiveFinalizeState {
-    running: Mutex<HashSet<i64>>,
+    runs: Mutex<FinalizeRuns>,
 }
 
 impl ArchiveFinalizeState {
+    /// 开始一次整合；若同一本漫画正在整合，则记录“结束后重跑”并返回 false。
+    ///
+    /// 记录重跑与 `end` 读取重跑标记共用同一把锁，完成事件与收尾交错时也不会丢失。
     fn try_begin(&self, comic_id: i64) -> bool {
-        self.running.lock().insert(comic_id)
+        let mut runs = self.runs.lock();
+        if runs.running.insert(comic_id) {
+            true
+        } else {
+            runs.rerun.insert(comic_id);
+            false
+        }
     }
 
-    fn end(&self, comic_id: i64) {
-        self.running.lock().remove(&comic_id);
+    /// 结束整合；返回是否有等待中的重跑请求。
+    fn end(&self, comic_id: i64) -> bool {
+        let mut runs = self.runs.lock();
+        runs.running.remove(&comic_id);
+        runs.rerun.remove(&comic_id)
+    }
+
+    fn is_rerun_pending(&self, comic_id: i64) -> bool {
+        self.runs.lock().rerun.contains(&comic_id)
     }
 
     /// 该漫画当前是否正在整合（供新建下载任务前检查，避免与清理来源文件交叉）。
     pub fn is_running(&self, comic_id: i64) -> bool {
-        self.running.lock().contains(&comic_id)
+        self.runs.lock().running.contains(&comic_id)
     }
 
     /// 是否有任意漫画正在整合（供清理类命令判断）。
     pub fn is_any_running(&self) -> bool {
-        !self.running.lock().is_empty()
+        !self.runs.lock().running.is_empty()
     }
 }
 
@@ -51,7 +75,12 @@ struct FinalizeGuard {
 
 impl Drop for FinalizeGuard {
     fn drop(&mut self) {
-        self.app.state::<ArchiveFinalizeState>().end(self.comic_id);
+        let rerun = self.app.state::<ArchiveFinalizeState>().end(self.comic_id);
+        if rerun {
+            // 运行期间完成的章节被 try_begin 挡下并记了重跑；这里必须等 running
+            // 标记释放后再调度，否则新的 try_begin 仍会失败。
+            spawn_finalize_if_idle(&self.app, self.comic_id);
+        }
     }
 }
 
@@ -66,6 +95,8 @@ pub fn spawn_finalize_if_idle(app: &AppHandle, comic_id: i64) {
         return;
     }
     if !app.state::<ArchiveFinalizeState>().try_begin(comic_id) {
+        // 已在整合：try_begin 已记录重跑，FinalizeGuard 收尾时会自动补跑，
+        // 不会漏掉运行期间完成的章节。
         return;
     }
     let app = app.clone();
@@ -128,7 +159,12 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
         .has_active_tasks_for_comic(comic_id);
     match run_finalize(app, &comic, mode, &mut progress) {
         Ok(archive_path) => {
-            if !has_new_tasks {
+            // 运行期间有章节完成时会记录重跑；此时保留意图，让补跑继续使用用户
+            // 选择的整理方式，而不是退回配置默认值。
+            let rerun_pending = app
+                .state::<ArchiveFinalizeState>()
+                .is_rerun_pending(comic_id);
+            if !has_new_tasks && !rerun_pending {
                 // 运行期间用户可能重新选择了整理方式：只有仍与本次执行一致时才清除意图，
                 // 否则保留用户的新选择，交给下一次整合执行。
                 let intents = app.state::<ArchiveIntentStore>();
@@ -163,15 +199,9 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
         }
     }
 
-    // 整合期间若有新章节完成（完成事件被 try_begin 挡下），这里补一次调度，
-    // 避免“合并漏章且永不重试”。
-    if has_new_tasks
-        || app
-            .get_download_manager()
-            .has_active_tasks_for_comic(comic_id)
-    {
-        spawn_finalize_if_idle(app, comic_id);
-    }
+    // 不要在这里直接补调度：此时 FinalizeGuard 尚未释放 running 标记，
+    // try_begin 必然失败。运行期间完成的章节已在 try_begin 中记录重跑，
+    // 由 FinalizeGuard 收尾时补跑。
 }
 
 fn next_run_id() -> u64 {
@@ -628,5 +658,24 @@ mod tests {
         assert!(foreign.exists(), "其他漫画的文件不能被删除");
         assert!(target.exists(), "合并目标不能被删除");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_completion_during_finalize_requests_an_atomic_rerun() {
+        let state = ArchiveFinalizeState::default();
+        assert!(state.try_begin(7));
+        assert!(state.is_running(7));
+
+        // 运行期间章节完成：调度被挡下，但必须留下重跑请求
+        assert!(!state.try_begin(7));
+        assert!(state.is_rerun_pending(7));
+
+        // 收尾时在同一把锁内结束运行并取走重跑请求
+        assert!(state.end(7));
+        assert!(!state.is_running(7));
+        assert!(!state.is_rerun_pending(7));
+
+        // 没有新请求时再次收尾不会产生额外重跑
+        assert!(!state.end(7));
     }
 }

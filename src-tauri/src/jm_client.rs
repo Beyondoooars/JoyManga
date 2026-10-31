@@ -756,8 +756,8 @@ impl JmClient {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "登录在排队期间被取消"
             );
+            return Err(crate::errors::login_cancelled());
         }
-        anyhow::ensure!(generation == current_generation, "登录已取消");
         let config = self.app.get_config().read().clone();
         let result = tokio::select! {
             result = tokio::time::timeout(Duration::from_secs(35), self.login_candidates(&config, username, password, generation)) => {
@@ -769,7 +769,7 @@ impl JmClient {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "登录等待期间收到取消通知"
                 );
-                Err(anyhow!("登录已取消"))
+                Err(crate::errors::login_cancelled())
             },
         };
         match &result {
@@ -811,10 +811,9 @@ impl JmClient {
         let mut last_error = None;
         for (index, candidate) in candidates.iter().enumerate() {
             let attempt_started = Instant::now();
-            anyhow::ensure!(
-                generation == self.auth_generation.load(Ordering::SeqCst),
-                "登录已取消"
-            );
+            if generation != self.auth_generation.load(Ordering::SeqCst) {
+                return Err(crate::errors::login_cancelled());
+            }
             tracing::info!(
                 generation,
                 attempt = index + 1,
@@ -919,17 +918,16 @@ impl JmClient {
         let config = self.app.get_config();
         let (saved, epoch) = {
             let mut current = config.write();
-            anyhow::ensure!(
-                generation == self.auth_generation.load(Ordering::SeqCst),
-                "登录已取消"
-            );
-            anyhow::ensure!(
-                current.get_api_domain() == base.get_api_domain()
-                    && current.proxy_mode == base.proxy_mode
-                    && current.proxy_host == base.proxy_host
-                    && current.proxy_port == base.proxy_port,
-                "登录期间网络设置已改变，请重试"
-            );
+            if generation != self.auth_generation.load(Ordering::SeqCst) {
+                return Err(crate::errors::login_cancelled());
+            }
+            let network_unchanged = current.get_api_domain() == base.get_api_domain()
+                && current.proxy_mode == base.proxy_mode
+                && current.proxy_host == base.proxy_host
+                && current.proxy_port == base.proxy_port;
+            if !network_unchanged {
+                return Err(crate::errors::login_settings_changed());
+            }
             let mut next = current.clone();
             next.api_domain_mode = mode;
             let saved = if next.api_domain_mode != current.api_domain_mode {
