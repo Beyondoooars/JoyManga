@@ -6,6 +6,41 @@ use crate::types::{now_millis, truncate_failure_message, FailureKind, TaskFailur
 
 pub type CommandResult<T> = Result<T, CommandError>;
 
+/// 登录被新的登录请求取消。
+///
+/// 用独立类型而不是文案判断：前端/调用方需要可靠地知道“这不是网络失败”，
+/// 重试只会再次打断用户的登录。
+#[derive(Debug)]
+pub struct LoginCancelled;
+
+impl std::fmt::Display for LoginCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("登录已取消")
+    }
+}
+
+impl std::error::Error for LoginCancelled {}
+
+/// 登录期间网络设置发生变化，本次登录结果不再可信。
+#[derive(Debug)]
+pub struct LoginSettingsChanged;
+
+impl std::fmt::Display for LoginSettingsChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("登录期间网络设置已改变，请重试")
+    }
+}
+
+impl std::error::Error for LoginSettingsChanged {}
+
+pub(crate) fn login_cancelled() -> anyhow::Error {
+    anyhow::Error::new(LoginCancelled)
+}
+
+pub(crate) fn login_settings_changed() -> anyhow::Error {
+    anyhow::Error::new(LoginSettingsChanged)
+}
+
 /// 错误类别：前端据此决定给用户什么操作，而不是解析中文文案。
 ///
 /// 只做**决策相关**的粗分类；更细的定位仍看 `err_message`。
@@ -19,6 +54,8 @@ pub enum CommandErrorKind {
     Auth,
     /// 资源不存在（漫画被下架、章节被删）：重试无意义
     NotFound,
+    /// 用户主动取消，或登录期间网络设置改变：不应重试
+    Cancelled,
     /// 磁盘写入失败、空间不足、权限问题：建议清理空间或换目录
     Storage,
     /// 其他未归类
@@ -73,6 +110,11 @@ impl CommandError {
 /// 因为前端会按类别改变主操作按钮。
 pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
     for cause in error.chain() {
+        if cause.downcast_ref::<LoginCancelled>().is_some()
+            || cause.downcast_ref::<LoginSettingsChanged>().is_some()
+        {
+            return CommandErrorKind::Cancelled;
+        }
         if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
             if err.is_timeout() {
                 return CommandErrorKind::Timeout;
@@ -335,6 +377,18 @@ mod tests {
 
         let unknown = anyhow::anyhow!("序列化失败的奇怪问题");
         assert_eq!(classify(&unknown), CommandErrorKind::Unknown);
+    }
+
+    #[test]
+    fn login_cancellation_is_typed_and_not_network_retryable() {
+        let cancelled = CommandError::from("登录失败", login_cancelled());
+        assert_eq!(cancelled.kind, CommandErrorKind::Cancelled);
+        assert!(cancelled.err_message.contains("登录已取消"));
+
+        let settings = CommandError::from("登录失败", login_settings_changed());
+        assert_eq!(settings.kind, CommandErrorKind::Cancelled);
+        // 文案里带“登录”也必须是 Cancelled，而不是按文本兜底成 Auth。
+        assert!(settings.err_message.contains("登录期间网络设置已改变"));
     }
 
     #[test]

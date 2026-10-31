@@ -266,6 +266,8 @@ async function startSearch(keyword: string, sort: SearchSort, page = 1) {
   activeSession = new SearchSession({
     keyword,
     sort,
+    // 关键词没变时（例如切换排序）沿用界面上的语言筛选，避免筛选按钮与会话状态脱节。
+    filter: languageFilter.value,
     fetcher: (request) => fetchDual(keyword, sort, request),
   })
   sessionRevision.value++

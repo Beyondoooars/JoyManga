@@ -114,7 +114,11 @@ impl DownloadImgTask {
         let (img_data, format) = loop {
             match self.app.get_jm_client().get_img_data_and_format(url).await {
                 Ok(data) => break data,
-                Err(err) if attempt == 0 && !self.download_task.file_writes.is_cancelled() => {
+                Err(err)
+                    if attempt == 0
+                        && !self.download_task.file_writes.is_cancelled()
+                        && should_retry_image_error(&err) =>
+                {
                     attempt += 1;
                     self.download_task.attempts.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(
@@ -288,6 +292,12 @@ pub(crate) async fn save_img(
     });
     // 在tokio任务中等待rayon任务的完成，避免阻塞worker threads
     receiver.await?
+}
+
+/// 只有网络/上游错误值得额外重试一次；403/404 等业务错误和本地存储错误
+/// 重试只会重复失败并虚增尝试次数。
+fn should_retry_image_error(error: &anyhow::Error) -> bool {
+    classify_failure(error, TaskStage::Downloading).retryable
 }
 
 /// 图片线路只保留主机名，避免带签名的完整 URL 进入失败详情和诊断包。
@@ -522,6 +532,24 @@ mod gif_passthrough_tests {
         // GIF 原样保存，避免二次编码丢帧
         assert_eq!(std::fs::read(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::*;
+
+    #[test]
+    fn only_retryable_image_errors_get_the_extra_attempt() {
+        // 业务错误（403/404、内容下架）重试没有意义
+        let business = anyhow::anyhow!("章节不存在或已下架");
+        assert!(!should_retry_image_error(&business));
+        // 网络断流值得重试
+        let network = anyhow::anyhow!("连接被重置");
+        assert!(should_retry_image_error(&network));
+        // 存储/解析错误重试只会得到同样结果
+        let storage = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        assert!(!should_retry_image_error(&storage));
     }
 }
 

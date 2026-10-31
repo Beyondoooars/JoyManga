@@ -129,14 +129,12 @@ pub async fn search_dual(
     }
 
     if let Some(resp) = converted_resp {
+        // 转换变体的跳转没有意义：只有用户原文是 JM 号时才该跳转，
+        // 而纯数字关键词不会产生转换变体。返回 Comic 变体让前端把该流标记为
+        // 已结束（前端不会对 converted 的 Comic 触发跳转），而不是留下 null
+        // 被前端误判成“服务端未返回结果”。
+        let ignored_comic = matches!(&resp, Ok(SearchResp::ComicRespData(_)));
         match resp {
-            // 转换变体的跳转没有意义：只有用户原文是 JM 号时才该跳转，
-            // 而纯数字关键词不会产生转换变体。忽略并记录，避免误开漫画。
-            Ok(SearchResp::ComicRespData(_)) => {
-                result
-                    .warnings
-                    .push("转换后的关键词被识别为漫画编号，已忽略".to_string());
-            }
             Ok(resp) => {
                 let keyword_used = converted_keyword.as_deref().unwrap_or_default();
                 match SearchResultVariant::from_search_resp_with_map(
@@ -146,7 +144,14 @@ pub async fn search_dual(
                     keyword_used,
                     &id_to_dir_map,
                 ) {
-                    Ok(variant) => result.converted = Some(variant),
+                    Ok(variant) => {
+                        if ignored_comic {
+                            result
+                                .warnings
+                                .push("转换后的关键词被识别为漫画编号，已忽略".to_string());
+                        }
+                        result.converted = Some(variant);
+                    }
                     Err(err) => result.converted_error = Some(format!("{err:#}")),
                 }
             }

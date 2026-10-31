@@ -13,7 +13,7 @@ export function getErrorMessage(error: unknown): string {
   }
 }
 
-export type CommandErrorKind = 'Network' | 'Timeout' | 'Auth' | 'NotFound' | 'Storage' | 'Unknown'
+export type CommandErrorKind = 'Network' | 'Timeout' | 'Auth' | 'NotFound' | 'Cancelled' | 'Storage' | 'Unknown'
 
 interface CommandErrorLike {
   err_title?: string
@@ -27,6 +27,7 @@ const ACTION_HINTS: Record<CommandErrorKind, string | null> = {
   Timeout: '可以稍后重试；持续超时请更换线路',
   Auth: '登录已失效，请重新登录',
   NotFound: '内容可能已下架，重试通常无效',
+  Cancelled: null,
   Storage: '请检查磁盘空间与目录权限',
   Unknown: null,
 }

@@ -276,7 +276,7 @@ fn migrate_config_schema(value: &mut serde_json::Value) {
 /// 将配置序列化为磁盘存储格式。
 ///
 /// 登录账号与密码分别加密后写入，其余字段仍是明文 JSON（便于用户查看与自用）。
-fn serialize_config_for_storage(config: &Config) -> anyhow::Result<String> {
+pub(crate) fn serialize_config_for_storage(config: &Config) -> anyhow::Result<String> {
     let mut value = serde_json::to_value(config).context("序列化配置失败")?;
     // 加密失败时不能退回明文：宁可这次保存失败，也不要让凭据以明文落盘。
     let encrypted_username = crate::credential_cipher::encrypt_for_this_machine(&config.username)
@@ -313,6 +313,22 @@ fn decrypt_stored_credential(
         .with_context(|| format!("解密登录{label}失败"))?;
     value[field] = serde_json::Value::String(decrypted);
     Ok(())
+}
+
+/// 逐字段修复配置时的宽松解密：失败只清空该字段，保留其余有效配置。
+///
+/// 正常启动/备份恢复走 `deserialize_config_value` 的严格策略（凭据损坏直接报错）；
+/// 这里的 `merge_config` 本身就是容错路径，不能因为一个字段无法解密而整体回退。
+fn decrypt_stored_credential_lenient(value: &mut serde_json::Value, field: &str, label: &str) {
+    if let Err(error) = decrypt_stored_credential(value, field, label) {
+        tracing::warn!(
+            field,
+            label,
+            error = %error,
+            "保存的登录凭据无法解密，本次以空值启动"
+        );
+        value[field] = serde_json::Value::String(String::new());
+    }
 }
 
 /// 从 JSON 对象还原配置：磁盘读取与备份恢复共用同一套迁移、解密逻辑。
@@ -507,26 +523,7 @@ impl Config {
         // 当成账号或密码发出去。解密失败（换过机器、文件被改）时清空该字段，
         // 让用户重新登录；`Config::new` 会先把原配置备份到 `config.invalid-*.json`。
         for (field, label) in [("username", "账号"), ("password", "密码")] {
-            let Some(stored) = user_value
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            let decrypted = match crate::credential_cipher::decrypt_for_this_machine(&stored) {
-                Ok(decrypted) => decrypted,
-                Err(error) => {
-                    tracing::warn!(
-                        field = field,
-                        label = label,
-                        error = %error,
-                        "保存的登录凭据无法解密，本次以空值启动"
-                    );
-                    String::new()
-                }
-            };
-            user_value[field] = serde_json::Value::String(decrypted);
+            decrypt_stored_credential_lenient(&mut user_value, field, label);
         }
         let serde_json::Value::Object(user_map) = user_value else {
             return default_config;
@@ -887,6 +884,25 @@ mod tests {
 
         assert_eq!(merged.username, "alice");
         assert_eq!(merged.password, "plain-password");
+    }
+
+    #[test]
+    fn merge_config_clears_only_undecryptable_credentials() {
+        let app_data_dir = Path::new("test-app-data");
+        let mut config = Config::default(app_data_dir);
+        config.username = "alice".to_string();
+        config.password = "plain-password".to_string();
+        let mut stored: serde_json::Value =
+            serde_json::from_str(&serialize_config_for_storage(&config).unwrap()).unwrap();
+        stored["password"] = json!("enc:v1:not-a-valid-ciphertext");
+
+        let merged = Config::merge_config(&stored.to_string(), app_data_dir);
+
+        // 宽松策略：损坏的密码清空，账号仍然保留
+        assert_eq!(merged.username, "alice");
+        assert_eq!(merged.password, "");
+        // 正常读取仍走严格策略，凭据损坏必须报错而不是静默清空
+        assert!(deserialize_config_value(stored).is_err());
     }
 
     #[test]

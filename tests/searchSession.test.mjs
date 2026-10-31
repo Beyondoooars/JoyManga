@@ -101,6 +101,50 @@ test('dual variants alternate and never repeat across pages', async () => {
   assert.equal(new Set(ids(all)).size, 160)
 })
 
+test('converted stream resumes at page 2 after the shared first page', async () => {
+  const calls = []
+  const fetcher = async (request) => {
+    calls.push(request)
+    const original =
+      request.originalPage === null
+        ? null
+        : resultPage(range(request.originalPage * 100, request.originalPage * 100 + 79), true, 800)
+    const converted =
+      request.convertedPage === null
+        ? null
+        : resultPage(
+            range(request.convertedPage * 1000, request.convertedPage * 1000 + 79),
+            true,
+            800,
+          )
+    return { original, converted, convertedKeyword: '漫畫', warnings: [] }
+  }
+  const session = new SearchSession({ keyword: '漫画', sort: 'View', fetcher })
+
+  await session.ensureVisible(400)
+
+  assert.deepEqual(calls[0], { originalPage: 1, convertedPage: 1 })
+  const convertedPages = calls
+    .map((call) => call.convertedPage)
+    .filter((page) => page !== null)
+  // 第 1 页已随首次请求取过；之后必须依次取 2、3，不能跳过第 2 页。
+  assert.deepEqual(convertedPages, [1, 2, 3])
+})
+
+test('constructor keeps the current language filter', async () => {
+  const content = [comic(1, { name: '山间旅行' }), comic(2, { name: '[한글] 여름' })]
+  const fetcher = async (request) => ({
+    original: request.originalPage === null ? null : resultPage(content, false),
+    converted: null,
+    convertedKeyword: null,
+    warnings: [],
+  })
+  const session = new SearchSession({ keyword: '漫画', sort: 'Latest', filter: 'ko', fetcher })
+
+  await session.ensureVisible(1)
+  assert.deepEqual(ids(session.pageItems(1)), [2])
+})
+
 test('overlapping variants dedupe across pages and keep the original favorite flag', async () => {
   const fetcher = async (request) => {
     const original =
@@ -267,6 +311,64 @@ test('both variants failing is fatal', async () => {
   assert.equal(session.visibleCount, 0)
   assert.notEqual(session.fatalError, null)
   assert.equal(session.exhausted, true)
+})
+
+test('a later page failure keeps already loaded results visible', async () => {
+  let calls = 0
+  const fetcher = async () => {
+    calls++
+    return calls === 1
+      ? {
+          original: resultPage(range(1, 80), true, 160),
+          converted: null,
+          convertedKeyword: null,
+          warnings: [],
+        }
+      : {
+          original: { kind: 'error', message: '第二页失败' },
+          converted: null,
+          convertedKeyword: null,
+          warnings: [],
+        }
+  }
+  const session = new SearchSession({ keyword: '漫画', sort: 'Latest', fetcher })
+
+  await session.ensureVisible(80)
+  await session.ensureVisible(160)
+
+  assert.equal(session.visibleCount, 80)
+  assert.equal(session.fatalError, null)
+  assert.match(session.warningsList.join(' '), /原文加载失败/)
+})
+
+test('a single failed variant does not claim that both failed', async () => {
+  const fetcher = async () => ({
+    original: { kind: 'error', message: '原文失败' },
+    converted: null,
+    convertedKeyword: null,
+    warnings: [],
+  })
+  const session = new SearchSession({ keyword: '漫画', sort: 'Latest', fetcher })
+
+  await session.ensureVisible(80)
+  assert.equal(session.fatalError, '搜索加载失败，请稍后重试')
+})
+
+test('converted comic result is ignored without redirecting or failing', async () => {
+  const fetcher = async (request) => ({
+    original: request.originalPage === null ? null : resultPage(range(1, 80), true, 160),
+    converted: request.convertedPage === null ? null : { kind: 'comic', comic: { id: 999 } },
+    convertedKeyword: '漫畫',
+    warnings: ['转换后的关键词被识别为漫画编号，已忽略'],
+  })
+  const session = new SearchSession({ keyword: '漫画', sort: 'Latest', fetcher })
+
+  await session.ensureVisible(80)
+
+  assert.equal(session.redirect, null)
+  assert.equal(session.fatalError, null)
+  const warning = '转换后的关键词被识别为漫画编号，已忽略'
+  assert.equal(session.warningsList.filter((item) => item === warning).length, 1)
 })
 
 test('JM number redirect stops merging and exposes the comic', async () => {

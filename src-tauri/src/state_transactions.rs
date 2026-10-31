@@ -26,6 +26,10 @@ impl StateJournal {
 struct RemovalJournal {
     previous_catalog: serde_json::Value,
     moves: Vec<(PathBuf, PathBuf)>,
+    /// 隔离改名失败、已被直接删除的路径。回滚/恢复时不能把它们的书库记录写回去；
+    /// `serde(default)` 兼容旧版本没有该字段的事务日志。
+    #[serde(default)]
+    direct_deletes: Vec<PathBuf>,
     committed: bool,
 }
 
@@ -94,6 +98,7 @@ pub(crate) fn remove_with_catalog(
     let mut journal = RemovalJournal {
         previous_catalog: serde_json::to_value(previous)?,
         moves: Vec::new(),
+        direct_deletes: Vec::new(),
         committed: false,
     };
     for original in paths {
@@ -110,27 +115,39 @@ pub(crate) fn remove_with_catalog(
     }
     save_removal(&journal_path, &journal)?;
     let result = (|| -> anyhow::Result<()> {
-        for (original, staged) in &journal.moves {
-            if original.exists() {
-                // 阅读器缓存着这个 CBZ 的读句柄时，公共存储（FUSE）会拒绝改名；
-                // 拿替换锁后释放，避免释放与改名之间被重新打开
+        for index in 0..journal.moves.len() {
+            let original = journal.moves[index].0.clone();
+            let staged = journal.moves[index].1.clone();
+            if !original.exists() {
+                continue;
+            }
+            // 阅读器缓存着这个 CBZ 的读句柄时，公共存储（FUSE）会拒绝改名；
+            // 拿替换锁后释放，避免释放与改名之间被重新打开
+            let rename_result = {
                 let _guard = crate::atomic_fs::commit_guard();
-                crate::commands::reader_commands::release_handle_for(original);
-                if let Err(rename_error) = std::fs::rename(original, staged) {
-                    // Android 公共存储/FUSE 会拒绝改名正被媒体扫描或其它进程打开的文件。
-                    // 删除本身不需要改名，改名失败时直接删除，避免整本漫画因此删不掉。
-                    tracing::warn!(
-                        path = %original.display(),
-                        error = %rename_error,
-                        "隔离删除目标失败，改为直接删除"
-                    );
-                    if original.is_dir() {
-                        std::fs::remove_dir_all(original)
-                    } else {
-                        std::fs::remove_file(original)
-                    }
-                    .with_context(|| format!("删除目标失败：{}", original.display()))?;
+                crate::commands::reader_commands::release_handle_for(&original);
+                std::fs::rename(&original, &staged)
+            };
+            if let Err(rename_error) = rename_result {
+                // Android 公共存储/FUSE 会拒绝改名正被媒体扫描或其它进程打开的文件。
+                // 删除本身不需要改名，改名失败时直接删除，避免整本漫画因此删不掉。
+                tracing::warn!(
+                    path = %original.display(),
+                    error = %rename_error,
+                    "隔离删除目标失败，改为直接删除"
+                );
+                // 先持久化“该路径会被直接删除”，再执行删除：即使删除后进程崩溃，
+                // 恢复事务也不会把已不存在的文件记录写回书库。
+                journal.direct_deletes.push(original.clone());
+                save_removal(&journal_path, &journal)?;
+                let _guard = crate::atomic_fs::commit_guard();
+                crate::commands::reader_commands::release_handle_for(&original);
+                if original.is_dir() {
+                    std::fs::remove_dir_all(&original)
+                } else {
+                    std::fs::remove_file(&original)
                 }
+                .with_context(|| format!("删除目标失败：{}", original.display()))?;
             }
         }
         next.save(records_path)?;
@@ -140,7 +157,11 @@ pub(crate) fn remove_with_catalog(
     })();
     if let Err(error) = result {
         let rollback = (|| -> anyhow::Result<()> {
-            previous.save(records_path)?;
+            // 直接删除的文件已经无法恢复；回滚书库记录时要同步去掉这些条目，
+            // 否则书库会指向不存在的文件。
+            let mut restored = previous.clone();
+            restored.forget_missing_paths(&journal.direct_deletes);
+            restored.save(records_path)?;
             restore_moves(&journal.moves)?;
             std::fs::remove_file(&journal_path)?;
             Ok(())
@@ -207,7 +228,11 @@ fn recover_state_replace(config_path: &Path, state_path: &Path) -> anyhow::Resul
         let previous = serde_json::to_value(&journal.previous_config)?;
         let repaired = crate::config::Config::merge_config(&previous.to_string(), &base_dir);
         repaired.validate()?;
-        atomic_fs::write(config_path, serde_json::to_vec_pretty(&repaired)?)?;
+        // 必须使用存储序列化器：账号/密码在这里重新加密，不能把明文写回 config.json。
+        atomic_fs::write(
+            config_path,
+            crate::config::serialize_config_for_storage(&repaired)?,
+        )?;
         let queue_path = config_path.with_file_name("download-queue.json");
         if let Some(queue) = journal.previous_queue {
             atomic_fs::write(&queue_path, serde_json::to_vec_pretty(&queue)?)?;
@@ -216,11 +241,18 @@ fn recover_state_replace(config_path: &Path, state_path: &Path) -> anyhow::Resul
         }
         if journal.intents_managed {
             let intents_path = crate::archive_intents::intents_path(config_path);
-            crate::archive_intents::restore_intents_file(
+            if let Err(error) = crate::archive_intents::restore_intents_file(
                 &intents_path,
                 journal.previous_intents.as_ref(),
-            )
-            .context("恢复归档意图失败")?;
+            ) {
+                // 意图恢复失败不能让整个事务日志留下来：否则每次启动都会重复
+                // 回滚配置与队列，用户后续的修改会被反复覆盖。
+                tracing::warn!(
+                    error = %error,
+                    path = %intents_path.display(),
+                    "恢复归档意图失败，跳过该步骤以完成事务恢复"
+                );
+            }
         }
     }
     std::fs::remove_file(state_path)?;
@@ -249,8 +281,10 @@ fn recover_removal(records_path: &Path, entry: &std::fs::DirEntry) -> anyhow::Re
     if journal.committed {
         cleanup_moves(&journal.moves)?;
     } else {
-        let previous: crate::library_catalog::LibraryCatalog =
+        let mut previous: crate::library_catalog::LibraryCatalog =
             serde_json::from_value(journal.previous_catalog)?;
+        // 直接删除的文件无法随回滚恢复，书库记录也不能再保留它们。
+        previous.forget_missing_paths(&journal.direct_deletes);
         previous.save(records_path)?;
         restore_moves(&journal.moves)?;
     }
@@ -338,6 +372,69 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_state_replace_re_encrypts_credentials() {
+        let root = std::env::temp_dir().join(format!("jm-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.json");
+        let password = "test-password";
+        let mut previous = crate::config::Config::default(&root);
+        previous.username = "alice".to_string();
+        previous.password = password.to_string();
+        let journal = StateJournal {
+            previous_config: previous,
+            previous_queue: None,
+            previous_intents: None,
+            intents_managed: false,
+            committed: false,
+        };
+        journal.save(&root.join(".state-replace.json")).unwrap();
+
+        recover(&config_path);
+
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        assert!(stored["username"].as_str().unwrap().starts_with("enc:v1:"));
+        assert!(stored["password"].as_str().unwrap().starts_with("enc:v1:"));
+        assert!(!stored.to_string().contains(password));
+        let restored = crate::config::deserialize_config_value(stored).unwrap();
+        assert_eq!(restored.username, "alice");
+        assert_eq!(restored.password, password);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_archive_intents_do_not_block_state_recovery() {
+        let root = std::env::temp_dir().join(format!("jm-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.json");
+        let state_path = root.join(".state-replace.json");
+        let intents_path = crate::archive_intents::intents_path(&config_path);
+        let original = serde_json::json!({
+            "version": 1,
+            "entries": { "2": "perChapter" },
+        });
+        std::fs::write(&intents_path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let journal = StateJournal {
+            previous_config: crate::config::Config::default(&root),
+            previous_queue: None,
+            // 版本不受支持：恢复必然失败，但不应留下事务日志导致每次启动重复回滚。
+            previous_intents: Some(serde_json::json!({ "version": 99, "entries": {} })),
+            intents_managed: true,
+            committed: false,
+        };
+        journal.save(&state_path).unwrap();
+
+        recover(&config_path);
+
+        assert!(config_path.exists());
+        assert!(!state_path.exists(), "恢复失败不能留下事务日志");
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&intents_path).unwrap()).unwrap();
+        assert_eq!(stored, original, "恢复失败时应保持原意图文件不变");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn interrupted_removal_restores_original_and_catalog() {
         let root = std::env::temp_dir().join(format!("jm-removal-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -350,6 +447,7 @@ mod tests {
         let journal = RemovalJournal {
             previous_catalog: serde_json::to_value(&previous).unwrap(),
             moves: vec![(original.clone(), staged.clone())],
+            direct_deletes: Vec::new(),
             committed: false,
         };
         save_removal(
@@ -361,6 +459,51 @@ mod tests {
         recover(&root.join("config.json"));
         assert_eq!(std::fs::read(original).unwrap(), b"original");
         assert!(!staged.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_removal_drops_catalog_records_for_directly_deleted_files() {
+        let root = std::env::temp_dir().join(format!("jm-removal-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("kept.cbz");
+        let deleted = root.join("deleted.cbz");
+        std::fs::write(&kept, b"kept").unwrap();
+        std::fs::write(&deleted, b"deleted").unwrap();
+        let kept = std::fs::canonicalize(kept).unwrap();
+        let deleted = std::fs::canonicalize(deleted).unwrap();
+        let records = root.join(".library.json");
+        let mut catalog = crate::library_catalog::LibraryCatalog::default();
+        let (kept_id, _) = catalog.register(&root, &kept).unwrap();
+        let (deleted_id, _) = catalog.register(&root, &deleted).unwrap();
+        catalog.save(&records).unwrap();
+        // 模拟隔离改名失败后的直接删除：文件已不存在，事务日志记录了这个决定。
+        std::fs::remove_file(&deleted).unwrap();
+        let journal = RemovalJournal {
+            previous_catalog: serde_json::to_value(&catalog).unwrap(),
+            moves: vec![(
+                deleted.clone(),
+                deleted.with_file_name(format!(".deleted.cbz.trash-{}", uuid::Uuid::new_v4())),
+            )],
+            direct_deletes: vec![deleted.clone()],
+            committed: false,
+        };
+        save_removal(
+            &root.join(format!(".library-delete-{}.json", uuid::Uuid::new_v4())),
+            &journal,
+        )
+        .unwrap();
+
+        recover(&root.join("config.json"));
+
+        let restored = crate::library_catalog::LibraryCatalog::load(&records).unwrap();
+        let ids: Vec<i64> = restored
+            .visible_imports(&root)
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(ids, vec![kept_id]);
+        assert!(!ids.contains(&deleted_id));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

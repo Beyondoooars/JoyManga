@@ -119,12 +119,36 @@ pub(crate) fn local_comic(app: &AppHandle, comic_id: i64) -> CommandResult<Comic
     super::library_commands::get_downloaded_comics(app.clone())
         .into_iter()
         .find(|comic| comic.id == comic_id)
-        .ok_or_else(|| {
-            CommandError::from(
-                "读取本地漫画失败",
-                anyhow!("本地书库没有漫画ID `{comic_id}`"),
-            )
-        })
+        .ok_or_else(|| local_comic_missing(comic_id))
+}
+
+/// 删除流程专用：解析漫画时包含已被“移除记录”隐藏的条目。
+///
+/// 之前的实现先调用 `local_comic`（没有命中时会全量扫描并过滤 removed），
+/// 失败后再全量扫描一次；现在只需一次扫描即可找到“文件还在、记录已移除”的漫画。
+pub(crate) fn local_comic_including_removed(
+    app: &AppHandle,
+    comic_id: i64,
+) -> CommandResult<Comic> {
+    let root = app.get_config().read().download_dir.clone();
+    if let Some(comic) = app
+        .state::<utils::DownloadedLibraryCache>()
+        .comic(&root, comic_id)
+    {
+        return Ok(comic);
+    }
+    super::library_commands::downloaded_library(app, true)
+        .comics
+        .into_iter()
+        .find(|comic| comic.id == comic_id)
+        .ok_or_else(|| local_comic_missing(comic_id))
+}
+
+fn local_comic_missing(comic_id: i64) -> CommandError {
+    CommandError::from(
+        "读取本地漫画失败",
+        anyhow!("本地书库没有漫画ID `{comic_id}`"),
+    )
 }
 
 pub(crate) fn chapter_reader_data_from_comic(

@@ -327,6 +327,15 @@ impl DownloadedLibraryCache {
     }
 }
 
+/// 应用在书库里创建的隐藏工作目录（名字通常带前导 `.`）。
+///
+/// 只用于区分“应用临时目录”和“用户自己的隐藏漫画目录”，不要扩大成
+/// “所有隐藏目录”，否则旧书库中以 `.` 开头的漫画会被永久隐藏。
+fn is_app_work_dir_name(name: &str) -> bool {
+    let name = name.strip_prefix('.').unwrap_or(name);
+    name.starts_with("import-") || name.starts_with("downloading-") || name.contains(".trash-")
+}
+
 /// 智能遍历下载目录中的漫画元数据文件。
 /// 通过智能剪枝跳过包含章节元数据（即纯图片子目录）的深层递归，避免访问数万张图片文件。
 pub fn walk_comic_metadata_files(download_dir: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
@@ -335,10 +344,17 @@ pub fn walk_comic_metadata_files(download_dir: &Path) -> impl Iterator<Item = wa
         .filter_entry(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            // 隐藏目录都是应用自身的工作目录或删除残留（`.import-`、`.downloading-`、
-            // `.原名.trash-*`），扫描时一律跳过，避免残留被误识别成新漫画。
+            // 应用自己的工作目录与删除残留（`.import-`、`.downloading-`、
+            // `.原名.trash-*`）必须跳过，避免残留被误识别成新漫画。
+            // 但旧版书库允许漫画目录以 `.` 开头：只要它直接包含元数据，
+            // 仍按漫画继续扫描，否则这类漫画会从书库里消失且无法删除。
             if entry.depth() > 0 && name.starts_with('.') {
-                return false;
+                let is_app_work_dir = is_app_work_dir_name(&name);
+                let is_comic_dir =
+                    entry.file_type().is_dir() && entry.path().join("元数据.json").is_file();
+                if is_app_work_dir || !is_comic_dir {
+                    return false;
+                }
             }
             if entry.file_type().is_dir() {
                 // 如果当前目录是章节目录（包含章节元数据），则跳过下钻
@@ -778,6 +794,21 @@ mod tests {
         let entries: Vec<_> = super::walk_comic_metadata_files(sandbox.path()).collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path(), comic_dir.join("元数据.json"));
+    }
+
+    #[test]
+    fn walk_comic_metadata_files_keeps_legacy_hidden_comic_dirs() {
+        let sandbox = TestDir::new();
+        // 旧版书库允许漫画目录以 `.` 开头；它不是应用的临时目录，不能隐藏。
+        let hidden_comic = sandbox.path().join(".hack  G.U");
+        std::fs::create_dir_all(&hidden_comic).unwrap();
+        std::fs::write(hidden_comic.join("元数据.json"), b"{}").unwrap();
+        // 普通隐藏目录仍然剪枝，避免无谓下钻
+        std::fs::create_dir_all(sandbox.path().join(".cache")).unwrap();
+
+        let entries: Vec<_> = super::walk_comic_metadata_files(sandbox.path()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), hidden_comic.join("元数据.json"));
     }
 
     #[test]

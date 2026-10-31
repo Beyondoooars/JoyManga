@@ -86,7 +86,7 @@ test('auto login stays silent when a cancellation came from manual login', async
     password: 'secret',
     login: async () => {
       loggedIn = true
-      return { status: 'error', error: commandError('Auth', '登录已取消') }
+      return { status: 'error', error: commandError('Cancelled', '登录已取消') }
     },
     shouldStop: () => loggedIn,
   })
@@ -119,7 +119,9 @@ test('only network, timeout and unknown errors are retryable', () => {
   assert.equal(isRetryableAutoLoginError(commandError('Unknown')), true)
   assert.equal(isRetryableAutoLoginError(commandError('Auth')), false)
   assert.equal(isRetryableAutoLoginError(commandError('NotFound')), false)
-  assert.equal(isRetryableAutoLoginError(commandError('Unknown', '登录已取消')), false)
-  assert.equal(isRetryableAutoLoginError(commandError('Unknown', '登录期间网络设置已改变，请重试')), false)
+  // 取消只看类别，不再依赖文案：即使消息被改写也不应重试。
+  assert.equal(isRetryableAutoLoginError(commandError('Cancelled', '登录已取消')), false)
+  assert.equal(isRetryableAutoLoginError(commandError('Cancelled', '登录期间网络设置已改变，请重试')), false)
+  assert.equal(isRetryableAutoLoginError(commandError('Cancelled', '别的原因')), false)
   assert.equal(isRetryableAutoLoginError('抛出异常'), true)
 })

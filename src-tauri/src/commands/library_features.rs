@@ -161,16 +161,8 @@ pub fn remove_library_comic(
             .into_iter()
             .filter(|task| task.comic.id == comic_id)
         {
-            // 已完成/已取消的历史任务不需要取消：cancel_download_task 对已结束任务返回错误，
-            // 以前对全部任务都调用一遍，导致刚下载完的漫画在本次会话里始终删不掉。
-            if !matches!(
-                task.state,
-                crate::download_manager::DownloadTaskState::Pending
-                    | crate::download_manager::DownloadTaskState::Downloading
-                    | crate::download_manager::DownloadTaskState::Paused
-            ) {
-                continue;
-            }
+            // cancel_download_task 对已完成/已取消任务是无操作，这里不必再复制一份
+            // 可取消状态白名单（白名单漏掉 Failed 时会留下仍在重试的任务）。
             if let Err(error) = manager.cancel_download_task(task.chapter_info.chapter_id) {
                 // 取消失败不阻断删除：任务可能刚好在取消前完成，继续收集文件路径。
                 tracing::warn!(
@@ -216,20 +208,10 @@ pub fn remove_library_comic(
     Ok(())
 }
 
-/// 删除文件前解析漫画：优先用书库扫描缓存；缓存里没有时（例如之前只删过库存记录，
-/// 扫描结果被 removed 记录过滤）再直接扫一遍下载目录，避免「文件还在却再也删不掉」。
+/// 删除文件前解析漫画：优先用书库扫描缓存；缓存里没有时一次扫描即可，
+/// 并且包含已移除记录，避免「文件还在却再也删不掉」或重复全量扫描。
 fn resolve_comic_for_delete(app: &AppHandle, comic_id: i64) -> CommandResult<Comic> {
-    match super::reader_commands::local_comic(app, comic_id) {
-        Ok(comic) => Ok(comic),
-        Err(error) => {
-            let root = app.get_config().read().download_dir.clone();
-            super::library_commands::scan_downloaded_comics(&root)
-                .comics
-                .into_iter()
-                .find(|comic| comic.id == comic_id)
-                .ok_or(error)
-        }
-    }
+    super::reader_commands::local_comic_including_removed(app, comic_id)
 }
 
 fn collect_delete_paths(

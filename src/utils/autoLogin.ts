@@ -24,8 +24,8 @@ export type AutoLoginOutcome =
 /** 只有网络/超时/未归类错误值得重试；账号密码错误或资源不存在重试只会打扰用户。 */
 export function isRetryableAutoLoginError(error: CommandError | string): boolean {
   if (typeof error === 'string') return true
-  // 取消和“登录期间网络设置改变”都是用户/配置动作触发的，重试只会再次打断。
-  if (error.err_message.includes('登录已取消') || error.err_message.includes('登录期间网络设置已改变')) return false
+  // 取消和“登录期间网络设置改变”由后端归类为 Cancelled，都不应重试；
+  // 不再解析中文文案，避免文案调整后悄悄退化成可重试。
   return error.kind === 'Network' || error.kind === 'Timeout' || error.kind === 'Unknown'
 }
 
