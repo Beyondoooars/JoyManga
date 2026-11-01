@@ -23,7 +23,7 @@ tauri-plugin-opener = { version = "2" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
-yaserde = { version = "0.12.0", features = ["yaserde_derive"] }
+yaserde = { version = "0.13.2", features = ["yaserde_derive"] }
 
 specta = { version = "=2.0.0-rc.26", features = ["serde_json"] }
 tauri-specta = { version = "=2.0.0-rc.26", features = ["derive", "typescript"] }
