@@ -205,12 +205,11 @@ pub fn aes256_ecb_decrypt_base64(key: &[u8], data: &str) -> anyhow::Result<Vec<u
         ));
     }
 
-    let cipher = Aes256::new_from_slice(key)
-        .map_err(|_| anyhow!("AES密钥长度必须为32字节"))?;
+    let cipher = Aes256::new_from_slice(key).map_err(|_| anyhow!("AES密钥长度必须为32字节"))?;
     let mut decrypted = Vec::with_capacity(encrypted.len());
     for block in encrypted.chunks(16) {
-        let mut block = aes::cipher::Block::<Aes256>::try_from(block)
-            .expect("chunks(16) 保证块长度为16字节");
+        let mut block =
+            aes::cipher::Block::<Aes256>::try_from(block).expect("chunks(16) 保证块长度为16字节");
         cipher.decrypt_block(&mut block);
         decrypted.extend_from_slice(&block);
     }
