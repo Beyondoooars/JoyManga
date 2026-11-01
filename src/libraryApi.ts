@@ -5,7 +5,9 @@ async function call<T>(command: string, args: Record<string, unknown>): Promise<
   try { return await invoke<T>(command, args) }
   catch (error) {
     const detail = error as { err_title?: string; err_message?: string } | null
-    if (detail?.err_message) throw new Error(`${detail.err_title ?? '操作失败'}：${detail.err_message}`)
+    if (detail?.err_message) {
+      throw new Error(`${detail.err_title ?? '操作失败'}：${detail.err_message}`, { cause: error })
+    }
     throw error
   }
 }
