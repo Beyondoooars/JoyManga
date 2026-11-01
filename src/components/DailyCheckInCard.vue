@@ -119,7 +119,7 @@ async function signIn() {
 
 function dayClass(day: DailyCheckInRecordDay) {
   return {
-    'is-today': isTodayDate(day.date),
+    'is-today': isTodayDate(day.date ?? ''),
     'is-signed': day.signed === true,
     'is-missed': day.signed === false,
     'is-bonus': day.bonus,
