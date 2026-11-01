@@ -56,6 +56,11 @@ ring = "0.17"
 # 简繁转换：纯 Rust + 内嵌 OpenCC 词典（词典为 Apache-2.0，见 THIRD_PARTY_NOTICES.md）
 opencc-fmmseg = { version = "=0.13.0", default-features = false }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Android 无法直接使用 reqwest 0.13 默认的 rustls-platform-verifier（需要额外的
+# Kotlin 组件和运行时初始化），改用内置 Mozilla 根证书，见 src/tls.rs。
+webpki-root-certs = "1.0.11"
+
 [profile.release]
 strip = true
 lto = true
