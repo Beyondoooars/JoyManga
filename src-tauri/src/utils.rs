@@ -3,8 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, KeyInit};
 use aes::Aes256;
 use anyhow::{anyhow, ensure, Context};
 use base64::engine::general_purpose;
@@ -206,10 +205,12 @@ pub fn aes256_ecb_decrypt_base64(key: &[u8], data: &str) -> anyhow::Result<Vec<u
         ));
     }
 
-    let cipher = Aes256::new(GenericArray::from_slice(key));
+    let cipher = Aes256::new_from_slice(key)
+        .map_err(|_| anyhow!("AES密钥长度必须为32字节"))?;
     let mut decrypted = Vec::with_capacity(encrypted.len());
     for block in encrypted.chunks(16) {
-        let mut block = GenericArray::clone_from_slice(block);
+        let mut block = aes::cipher::Block::<Aes256>::try_from(block)
+            .expect("chunks(16) 保证块长度为16字节");
         cipher.decrypt_block(&mut block);
         decrypted.extend_from_slice(&block);
     }
