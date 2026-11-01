@@ -54,7 +54,7 @@ pub(crate) fn package_chapter_to_cbz(
 
     // 写入 ComicInfo.xml
     let mut comic_info = ComicInfo::from(comic, chapter_info);
-    comic_info.page_count = i64::try_from(image_paths.len()).unwrap_or(0);
+    comic_info.page_count = i64::try_from(image_paths.len()).unwrap_or(0).into();
     let cfg = yaserde::ser::Config {
         perform_indent: true,
         ..Default::default()

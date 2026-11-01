@@ -19,6 +19,7 @@ pub struct GetUserProfileRespData {
     pub gender: String,
     pub message: Option<String>,
     #[serde(deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub coin: i64,
     #[serde(rename = "album_favorites")]
     pub album_favorites: i64,

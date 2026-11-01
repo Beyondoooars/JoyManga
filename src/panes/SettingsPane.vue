@@ -4,10 +4,10 @@ import { PhArrowClockwise, PhBookOpenText, PhCaretRight, PhDatabase, PhFolderSim
 import PageHeader from '../components/PageHeader.vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
-import { commands, type CbzMode, type ImageDomainPreset, type JsonValue, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode } from '../bindings.ts'
+import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode, type Value } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
-import { useIsMobile } from '../composables/useIsMobile.ts'
+import { isAndroid as isAndroidDevice } from '../composables/useIsMobile.ts'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
 import { withAndroidSelection, exportToAndroidDownloads, isUnderPublicDownloads } from '../utils/androidStorage.ts'
 import { getErrorMessage } from '../utils/errors.ts'
@@ -18,7 +18,8 @@ import ThirdPartyNoticesDialog from '../dialogs/ThirdPartyNoticesDialog.vue'
 const store = useStore()
 const message = useMessage()
 const dialog = useDialog()
-const { isAndroid } = useIsMobile()
+// 包装成 computed 让模板的自动解包与类型检查保持一致
+const isAndroid = computed(() => isAndroidDevice)
 const emit = defineEmits<{ (e: 'back'): void }>()
 
 const showStoragePicker = ref(false)
@@ -139,6 +140,19 @@ const proxyMode = computed({
   get: () => store.config?.proxyMode ?? 'System',
   set: (value: ProxyMode) => {
     if (store.config) store.config.proxyMode = value
+  },
+})
+// 代理输入框通过计算属性读写，避免模板里对可能为空的 store.config 直接取属性
+const proxyHost = computed({
+  get: () => store.config?.proxyHost ?? '',
+  set: (value: string) => {
+    if (store.config) store.config.proxyHost = value
+  },
+})
+const proxyPort = computed({
+  get: () => store.config?.proxyPort ?? 7890,
+  set: (value: number) => {
+    if (store.config) store.config.proxyPort = value
   },
 })
 const cbzModeOptions = [
@@ -263,7 +277,7 @@ async function dataAction(name: string, action: () => Promise<void>) {
 async function backup() {
   await dataAction('backup', async () => {
     await store.saveConfigNow()
-    const readingState: JsonValue = JSON.parse(JSON.stringify(toRaw(store.readingState)))
+    const readingState: Value = JSON.parse(JSON.stringify(toRaw(store.readingState)))
     const result = await commands.backupAppData(readingState)
     if (result.status === 'error') throw new Error(result.error.err_message)
     // 书库本身就在公共下载时，备份文件已经可见；再发布只会产生「xxx (1).json」副本
@@ -546,8 +560,8 @@ const readingSummary = computed(() => {
           <div v-if="advancedNetwork" class="field-stack">
             <n-select v-model:value="proxyMode" :options="proxyOptions" />
             <div v-if="proxyMode === 'Custom'" class="proxy-grid">
-              <div class="field"><label class="field-label">主机</label><n-input v-model:value="store.config.proxyHost" placeholder="127.0.0.1" /></div>
-              <div class="field"><label class="field-label">端口</label><n-input-number :value="store.config.proxyPort" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
+              <div class="field"><label class="field-label">主机</label><n-input v-model:value="proxyHost" placeholder="127.0.0.1" /></div>
+              <div class="field"><label class="field-label">端口</label><n-input-number :value="proxyPort" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
             </div>
             <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN 后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断包 会记录当时是否识别到 VPN、用的是哪条线路。</p>
           </div>

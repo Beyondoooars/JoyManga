@@ -47,7 +47,7 @@ pub async fn check(
     config.validate()?;
     let client = config
         .apply_proxy(
-            reqwest::Client::builder()
+            crate::tls::client_builder()
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(8)),
         )?

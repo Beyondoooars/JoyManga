@@ -126,17 +126,17 @@ pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
                 return kind_for_status(status);
             }
         }
-        if let Some(reqwest_middleware::Error::Reqwest(err)) =
-            cause.downcast_ref::<reqwest_middleware::Error>()
-        {
-            if err.is_timeout() {
-                return CommandErrorKind::Timeout;
-            }
-            if err.is_connect() {
-                return CommandErrorKind::Network;
-            }
-            if let Some(status) = err.status() {
-                return kind_for_status(status);
+        if let Some(err) = cause.downcast_ref::<reqwest_middleware::Error>() {
+            if let Some(err) = reqwest_error_in_middleware(err) {
+                if err.is_timeout() {
+                    return CommandErrorKind::Timeout;
+                }
+                if err.is_connect() || err.is_request() {
+                    return CommandErrorKind::Network;
+                }
+                if let Some(status) = err.status() {
+                    return kind_for_status(status);
+                }
             }
         }
         if let Some(io) = cause.downcast_ref::<std::io::Error>() {
@@ -178,7 +178,7 @@ fn kind_for_status(status: reqwest::StatusCode) -> CommandErrorKind {
         401 | 403 => CommandErrorKind::Auth,
         404 | 410 => CommandErrorKind::NotFound,
         408 | 504 => CommandErrorKind::Timeout,
-        500..=599 => CommandErrorKind::Network,
+        429 | 500..=599 => CommandErrorKind::Network,
         _ => CommandErrorKind::Unknown,
     }
 }
@@ -225,16 +225,34 @@ pub fn is_retryable(kind: FailureKind, stage: TaskStage) -> bool {
     }
 }
 
+/// 从 reqwest-middleware 的错误里取出底层的 reqwest 错误。
+///
+/// reqwest-retry 0.9 会把最终失败包成 `RetryError::WithRetries { err }` / `RetryError::Error(err)`，
+/// 外层 `Error::Middleware(_)` 的 `is_timeout()` / `status()` 恒为 false / None；
+/// 若不沿包装链解包，超时、连接失败和 429 都会被误归为 Unknown。
+pub(crate) fn reqwest_error_in_middleware(
+    error: &reqwest_middleware::Error,
+) -> Option<&reqwest::Error> {
+    match error {
+        reqwest_middleware::Error::Reqwest(error) => Some(error),
+        reqwest_middleware::Error::Middleware(error) => {
+            let retry = error.downcast_ref::<reqwest_retry::RetryError>()?;
+            match retry {
+                reqwest_retry::RetryError::WithRetries { err, .. }
+                | reqwest_retry::RetryError::Error(err) => reqwest_error_in_middleware(err),
+            }
+        }
+    }
+}
+
 fn failure_kind(error: &anyhow::Error) -> FailureKind {
     for cause in error.chain() {
         if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
             return failure_kind_for_reqwest(err);
         }
         if let Some(err) = cause.downcast_ref::<reqwest_middleware::Error>() {
-            return match err {
-                reqwest_middleware::Error::Reqwest(err) => failure_kind_for_reqwest(err),
-                reqwest_middleware::Error::Middleware(_) => FailureKind::Unknown,
-            };
+            return reqwest_error_in_middleware(err)
+                .map_or(FailureKind::Unknown, failure_kind_for_reqwest);
         }
         if let Some(err) = cause.downcast_ref::<std::io::Error>() {
             return failure_kind_for_io(err.kind());
@@ -350,6 +368,7 @@ fn failure_kind_from_message(message: &str) -> FailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn io_errors_map_to_actionable_kinds() {
@@ -453,5 +472,95 @@ mod tests {
         assert_eq!(failure.stage, TaskStage::Downloading);
         assert!(failure.at > 0);
         assert_eq!(failure.attempts, 1);
+    }
+
+    fn wrap_with_retries(error: reqwest_middleware::Error) -> reqwest_middleware::Error {
+        reqwest_middleware::Error::Middleware(
+            reqwest_retry::RetryError::WithRetries {
+                retries: 2,
+                err: error,
+            }
+            .into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn retry_middleware_errors_keep_transport_classification() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // 连接失败：指向本机未监听的端口，确保是 is_connect。
+        let connect = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("本机 1 端口不应有服务");
+        assert!(connect.is_connect());
+        let wrapped = anyhow::Error::from(wrap_with_retries(reqwest_middleware::Error::Reqwest(
+            connect,
+        )));
+        assert_eq!(classify(&wrapped), CommandErrorKind::Network);
+        assert_eq!(
+            classify_failure(&wrapped, TaskStage::Downloading).kind,
+            FailureKind::Network
+        );
+
+        // 超时：本地连接成功后不返回响应，客户端 100ms 超时。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let timeout = reqwest::Client::builder()
+            .timeout(Duration::from_millis(100))
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("服务端不响应时应超时");
+        server.abort();
+        assert!(timeout.is_timeout());
+        let wrapped = anyhow::Error::from(wrap_with_retries(reqwest_middleware::Error::Reqwest(
+            timeout,
+        )));
+        assert_eq!(classify(&wrapped), CommandErrorKind::Timeout);
+        assert_eq!(
+            classify_failure(&wrapped, TaskStage::Downloading).kind,
+            FailureKind::Network
+        );
+
+        // 429：上游限流必须保留状态码，不能被包装成 Unknown。
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let error = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .expect_err("429 应被 error_for_status 视为错误");
+        server.await.unwrap();
+        assert_eq!(error.status(), Some(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        let wrapped =
+            anyhow::Error::from(wrap_with_retries(reqwest_middleware::Error::Reqwest(error)));
+        assert_eq!(classify(&wrapped), CommandErrorKind::Network);
+        assert_eq!(
+            classify_failure(&wrapped, TaskStage::Downloading).kind,
+            FailureKind::Upstream
+        );
     }
 }

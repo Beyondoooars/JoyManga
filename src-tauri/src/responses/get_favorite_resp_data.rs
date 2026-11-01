@@ -11,8 +11,10 @@ pub struct GetFavoriteRespData {
     #[serde(default, rename = "folder_list")]
     pub folder_list: Vec<FavoriteFolderRespData>,
     #[serde(deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub total: i64,
     #[serde(default, deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub count: i64,
 }
 
@@ -20,6 +22,7 @@ pub struct GetFavoriteRespData {
 #[serde(rename_all = "camelCase")]
 pub struct ComicInFavoriteRespData {
     #[serde(deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub id: i64,
     pub author: String,
     pub description: Option<String>,

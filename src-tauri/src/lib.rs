@@ -41,6 +41,7 @@ mod page_size;
 mod responses;
 mod search_variants;
 mod state_transactions;
+mod tls;
 mod types;
 mod utils;
 mod zip_limits;
@@ -51,6 +52,8 @@ fn generate_context() -> tauri::Context<Wry> {
 
 fn ipc_builder() -> tauri_specta::Builder<Wry> {
     tauri_specta::Builder::<Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        .disable_serde_phases()
         .commands(tauri_specta::collect_commands![
             get_config,
             get_api_domain_presets,
@@ -123,16 +126,15 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
         ])
 }
 
+/// TypeScript 绑定的导出配置；契约测试也用它，保证两边生成的是同一份文件。
+fn typescript_exporter() -> specta_typescript::Typescript {
+    specta_typescript::Typescript::default().header("// @ts-nocheck")
+}
+
 #[cfg(feature = "bindings")]
 pub fn export_bindings(path: &std::path::Path) -> anyhow::Result<()> {
     ipc_builder()
-        .export(
-            specta_typescript::Typescript::default()
-                .bigint(specta_typescript::BigIntExportBehavior::Number)
-                .formatter(specta_typescript::formatter::prettier)
-                .header("// @ts-nocheck"),
-            path,
-        )
+        .export(typescript_exporter(), path)
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     Ok(())
 }
@@ -253,34 +255,154 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    /// 去掉注释和纯排版差异，用于比较生成器输出与 prettier 格式化后的 bindings.ts。
+    /// prettier 会重排换行、引号、分号、括号，并把多行联合类型写成前导 `|`。
+    fn canonical_typescript(source: &str) -> String {
+        let mut without_block_comments = String::with_capacity(source.len());
+        let mut rest = source;
+        loop {
+            let Some(start) = rest.find("/*") else {
+                without_block_comments.push_str(rest);
+                break;
+            };
+            without_block_comments.push_str(&rest[..start]);
+            let Some(end) = rest[start + 2..].find("*/") else {
+                break;
+            };
+            rest = &rest[start + 2 + end + 2..];
+        }
+
+        let compact = without_block_comments
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.chars().chain(['\n']))
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+
+        let mut without_leading_unions = String::with_capacity(compact.len());
+        let mut previous = '\0';
+        for c in compact.chars() {
+            if c == '|' && matches!(previous, '=' | ':' | ',' | '<' | '[' | '{') {
+                continue;
+            }
+            without_leading_unions.push(c);
+            previous = c;
+        }
+
+        without_leading_unions
+            .chars()
+            .filter(|c| !matches!(c, ';' | ',' | '\'' | '"' | '`' | '(' | ')'))
+            .collect()
+    }
+
+    /// 用与 `export_bindings` 相同的导出器渲染指定类型（不经过 `ipc_builder()`：
+    /// 它在 libtest 里会拉起 Wry 的 DLL 依赖，测试进程启动就失败）。
+    fn export_typescript_types(mut types: specta::Types) -> String {
+        use tauri_specta::LanguageExt;
+
+        let mut config = tauri_specta::BuilderConfiguration::default();
+        config.dangerously_cast_bigints_to_number = true;
+        config.disable_serde_phases = true;
+        types.register_mut::<super::download_queue::DownloadTaskSnapshot>();
+        types.register_mut::<super::events::DownloadTaskEvent>();
+        types.register_mut::<super::commands::RestoreOutcome>();
+        config.types = types;
+
+        let dir = std::env::temp_dir().join(format!("joymanga-bindings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let path = dir.join("bindings.ts");
+        LanguageExt::export(super::typescript_exporter(), &config, &path)
+            .expect("导出 TypeScript 类型");
+        let source = std::fs::read_to_string(&path).expect("读取导出的类型");
+        let _ = std::fs::remove_dir_all(&dir);
+        source
+    }
+
     #[test]
     fn ipc_contract_exports_recoverable_tasks_and_failure_details() {
-        let config = specta_typescript::Typescript::default()
-            .bigint(specta_typescript::BigIntExportBehavior::Number);
-        let snapshot =
-            specta_typescript::export::<super::download_queue::DownloadTaskSnapshot>(&config)
-                .unwrap();
-        let event = specta_typescript::export::<super::events::DownloadTaskEvent>(&config).unwrap();
-        let restore_outcome =
-            specta_typescript::export::<super::commands::RestoreOutcome>(&config).unwrap();
-        let normalize = |source: &str| {
-            source
-                .chars()
-                .filter(|c| !c.is_whitespace() && *c != ';')
-                .collect::<String>()
-        };
-        let bindings = normalize(include_str!("../../src/bindings.ts"));
-        assert!(
-            bindings.contains(&normalize(&snapshot)),
-            "快照类型需要重新生成：{snapshot}"
-        );
-        assert!(
-            bindings.contains(&normalize(&event)),
-            "事件类型需要重新生成：{event}"
-        );
-        assert!(
-            bindings.contains(&normalize(&restore_outcome)),
-            "恢复结果类型需要重新生成：{restore_outcome}"
+        // 与 `pnpm gen:bindings` 走同一条导出管线，把代表性类型的声明与 bindings.ts
+        // 逐字比对：字段、可空性和枚举分支的变化都不能只改 Rust。
+        let generated = export_typescript_types(specta::Types::default());
+        let bindings = canonical_typescript(include_str!("../../src/bindings.ts"));
+
+        let mut declarations = 0;
+        // 导出文件里的每段 `export type/interface/enum` 都应在 bindings.ts 中出现；
+        // 末尾的运行时代码（commands/events 包装）不参与比对。
+        for chunk in generated.split("\nexport ").skip(1) {
+            if !(chunk.starts_with("type ")
+                || chunk.starts_with("interface ")
+                || chunk.starts_with("enum "))
+            {
+                continue;
+            }
+            let chunk = format!("export {chunk}");
+            let declaration = canonical_typescript(&chunk);
+            assert!(
+                declaration.contains('='),
+                "类型声明未能正确规范化：\n{chunk}"
+            );
+            assert!(
+                bindings.contains(&declaration),
+                "bindings.ts 缺少或过期的类型声明，请运行 pnpm gen:bindings：\n{chunk}"
+            );
+            declarations += 1;
+        }
+        assert!(declarations >= 3, "只检查到 {declarations} 个类型声明");
+        for name in [
+            "DownloadTaskSnapshot",
+            "DownloadTaskEvent",
+            "RestoreOutcome",
+        ] {
+            assert!(
+                generated.contains(&format!("export type {name}")),
+                "导出的 bindings 缺少 {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn bindings_cover_registered_commands_and_events() {
+        // 契约测试覆盖类型声明；这里再确认每个注册的命令/事件都在 bindings.ts 里有
+        // 对应入口，避免新增命令后只更新了类型、忘了导出调用封装。
+        let source = include_str!("lib.rs");
+        let bindings = include_str!("../../src/bindings.ts");
+
+        let commands = source
+            .split("collect_commands![")
+            .nth(1)
+            .and_then(|tail| tail.split("])").next())
+            .expect("lib.rs 缺少 collect_commands 注册块");
+        let mut command_count = 0;
+        for line in commands.lines() {
+            let name = line.trim().trim_end_matches(',');
+            if name.is_empty() || name.starts_with("//") {
+                continue;
+            }
+            assert!(
+                bindings.contains(&format!("(\"{name}\""))
+                    || bindings.contains(&format!("('{name}'")),
+                "bindings.ts 缺少命令：{name}"
+            );
+            command_count += 1;
+        }
+        assert!(command_count > 50, "只检查到 {command_count} 个命令");
+
+        let events = source
+            .split("collect_events![")
+            .nth(1)
+            .and_then(|tail| tail.split("])").next())
+            .expect("lib.rs 缺少 collect_events 注册块");
+        let event_count = events
+            .lines()
+            .filter(|line| {
+                let name = line.trim().trim_end_matches(',');
+                !name.is_empty() && !name.starts_with("//")
+            })
+            .count();
+        assert_eq!(
+            bindings.matches(": makeEvent<").count(),
+            event_count,
+            "bindings.ts 的事件数量与 collect_events 不一致"
         );
     }
 

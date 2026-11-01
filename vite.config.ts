@@ -36,6 +36,10 @@ export default defineConfig(async ({ command }) => ({
   //
   // 1. prevent vite from obscuring rust errors
   clearScreen: false,
+  build: {
+    // Vite 8 默认目标是 Chrome 111；Android 7 的旧 WebView 可能更低，显式降级以保证可运行。
+    target: 'chrome87',
+  },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 5005,

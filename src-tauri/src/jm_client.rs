@@ -168,10 +168,12 @@ fn is_route_unreachable(error: &anyhow::Error) -> bool {
         if let Some(e) = cause.downcast_ref::<reqwest::Error>() {
             return e.is_connect() || e.is_timeout();
         }
-        if let Some(reqwest_middleware::Error::Reqwest(e)) =
-            cause.downcast_ref::<reqwest_middleware::Error>()
-        {
-            return e.is_connect() || e.is_timeout();
+        if let Some(e) = cause.downcast_ref::<reqwest_middleware::Error>() {
+            // 不能只看 `Error::Reqwest`：reqwest-retry 0.9 在首次尝试就耗尽重试预算时
+            // 返回 `Middleware(RetryError::Error(..))`，而 `RetryError::Error` 是
+            // transparent 的，`source()` 会跳过内层错误。
+            return crate::errors::reqwest_error_in_middleware(e)
+                .is_some_and(|e| e.is_connect() || e.is_timeout());
         }
         false
     })
@@ -593,7 +595,9 @@ impl JmClient {
         let http_resp = match send_result {
             Ok(http_resp) => http_resp,
             Err(e) => {
-                return Err(if e.is_timeout() {
+                let timed_out = crate::errors::reqwest_error_in_middleware(&e)
+                    .is_some_and(|error| error.is_timeout());
+                return Err(if timed_out {
                     anyhow::Error::from(e).context("网络请求超时，请检查网络或线路后重试")
                 } else {
                     anyhow::Error::from(e)
@@ -1369,7 +1373,9 @@ impl JmClient {
 }
 
 fn image_request_error(error: reqwest_middleware::Error) -> anyhow::Error {
-    if error.is_timeout() {
+    let timed_out =
+        crate::errors::reqwest_error_in_middleware(&error).is_some_and(|error| error.is_timeout());
+    if timed_out {
         anyhow::Error::from(error).context("图片请求超时，请检查网络或线路后重试")
     } else {
         anyhow::Error::from(error).context("图片请求失败")
@@ -1440,7 +1446,7 @@ async fn read_limited_image_body(http_resp: reqwest::Response) -> anyhow::Result
 }
 
 fn timed_client_builder(total_timeout: Duration) -> reqwest::ClientBuilder {
-    reqwest::ClientBuilder::new()
+    crate::tls::client_builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
         .timeout(total_timeout)
@@ -1756,6 +1762,24 @@ mod tests {
         // 登录失效不换线路
         let auth = api_failure(StatusCode::FORBIDDEN, Some(401), "未登录");
         assert!(!is_route_unreachable(&auth));
+    }
+
+    #[tokio::test]
+    async fn route_unreachable_unwraps_retry_error_without_retries() {
+        // reqwest-retry 在首次尝试就超过重试总时长时返回
+        // `Middleware(RetryError::Error(..))`；`RetryError::Error` 是 transparent 的，
+        // 普通 `source()` 链会跳过内层的 `Error::Reqwest`，必须用 helper 解包。
+        let connect = reqwest::Client::new()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("本机 1 端口不应有服务");
+        assert!(connect.is_connect());
+
+        let middle = reqwest_middleware::Error::Reqwest(connect);
+        let retry =
+            reqwest_middleware::Error::Middleware(reqwest_retry::RetryError::Error(middle).into());
+        assert!(is_route_unreachable(&anyhow::Error::from(retry)));
     }
 
     #[test]
