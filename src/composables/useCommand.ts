@@ -1,12 +1,14 @@
 import { useMessage } from 'naive-ui'
-import type { Result, CommandError } from '../bindings.ts'
+import type { CommandError } from '../bindings.ts'
 import { formatCommandError, getErrorMessage } from '../utils/errors.ts'
+
+type CommandResult<T> = { status: 'ok'; data: T } | { status: 'error'; error: CommandError }
 
 export function useCommand() {
   const message = useMessage()
 
   async function execute<T>(
-    commandFn: () => Promise<Result<T, CommandError>>,
+    commandFn: () => Promise<CommandResult<T>>,
     fallbackTitle = '操作失败',
   ): Promise<T | null> {
     try {

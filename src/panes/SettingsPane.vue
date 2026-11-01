@@ -4,7 +4,7 @@ import { PhArrowClockwise, PhBookOpenText, PhCaretRight, PhDatabase, PhFolderSim
 import PageHeader from '../components/PageHeader.vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
-import { commands, type CbzMode, type ImageDomainPreset, type JsonValue, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode } from '../bindings.ts'
+import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode, type Value } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { isAndroid as isAndroidDevice } from '../composables/useIsMobile.ts'
@@ -277,7 +277,7 @@ async function dataAction(name: string, action: () => Promise<void>) {
 async function backup() {
   await dataAction('backup', async () => {
     await store.saveConfigNow()
-    const readingState: JsonValue = JSON.parse(JSON.stringify(toRaw(store.readingState)))
+    const readingState: Value = JSON.parse(JSON.stringify(toRaw(store.readingState)))
     const result = await commands.backupAppData(readingState)
     if (result.status === 'error') throw new Error(result.error.err_message)
     // 书库本身就在公共下载时，备份文件已经可见；再发布只会产生「xxx (1).json」副本

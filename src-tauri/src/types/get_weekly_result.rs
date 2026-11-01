@@ -41,6 +41,7 @@ impl GetWeeklyResult {
 #[serde(default)]
 pub struct ComicInWeekly {
     #[serde(deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub id: i64,
     pub author: String,
     pub description: String,

@@ -32,6 +32,7 @@ pub struct SearchRespData {
     #[serde(rename = "search_query")]
     pub search_query: String,
     #[serde(deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub total: i64,
     pub content: Vec<ComicInSearchRespData>,
 }

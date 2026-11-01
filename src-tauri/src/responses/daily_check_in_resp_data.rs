@@ -13,6 +13,7 @@ use super::string_to_i64;
 pub struct DailyCheckInRespData {
     /// 签到活动 ID，打卡时需要原样回传
     #[serde(rename = "daily_id", deserialize_with = "string_to_i64")]
+    #[specta(type = i64)]
     pub daily_id: i64,
     #[serde(rename = "event_name")]
     pub event_name: String,

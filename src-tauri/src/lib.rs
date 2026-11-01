@@ -51,6 +51,8 @@ fn generate_context() -> tauri::Context<Wry> {
 
 fn ipc_builder() -> tauri_specta::Builder<Wry> {
     tauri_specta::Builder::<Wry>::new()
+        .dangerously_cast_bigints_to_number()
+        .disable_serde_phases()
         .commands(tauri_specta::collect_commands![
             get_config,
             get_api_domain_presets,
@@ -127,10 +129,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
 pub fn export_bindings(path: &std::path::Path) -> anyhow::Result<()> {
     ipc_builder()
         .export(
-            specta_typescript::Typescript::default()
-                .bigint(specta_typescript::BigIntExportBehavior::Number)
-                .formatter(specta_typescript::formatter::prettier)
-                .header("// @ts-nocheck"),
+            specta_typescript::Typescript::default().header("// @ts-nocheck"),
             path,
         )
         .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -254,33 +253,49 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn ipc_contract_exports_recoverable_tasks_and_failure_details() {
-        let config = specta_typescript::Typescript::default()
-            .bigint(specta_typescript::BigIntExportBehavior::Number);
-        let snapshot =
-            specta_typescript::export::<super::download_queue::DownloadTaskSnapshot>(&config)
-                .unwrap();
-        let event = specta_typescript::export::<super::events::DownloadTaskEvent>(&config).unwrap();
-        let restore_outcome =
-            specta_typescript::export::<super::commands::RestoreOutcome>(&config).unwrap();
-        let normalize = |source: &str| {
-            source
-                .chars()
-                .filter(|c| !c.is_whitespace() && *c != ';')
-                .collect::<String>()
-        };
-        let bindings = normalize(include_str!("../../src/bindings.ts"));
-        assert!(
-            bindings.contains(&normalize(&snapshot)),
-            "快照类型需要重新生成：{snapshot}"
-        );
-        assert!(
-            bindings.contains(&normalize(&event)),
-            "事件类型需要重新生成：{event}"
-        );
-        assert!(
-            bindings.contains(&normalize(&restore_outcome)),
-            "恢复结果类型需要重新生成：{restore_outcome}"
+    fn bindings_cover_registered_commands_and_events() {
+        // 不在测试里调用 ipc_builder()：它会拉起 Wry 的 GUI 依赖，而 libtest 生成的
+        // 测试二进制没有主程序的 Windows manifest，启动时会因 comctl32 入口点缺失而失败。
+        // 这里从源码里提取注册项，与 bindings.ts 中的 IPC 名称做交叉检查。
+        let source = include_str!("lib.rs");
+        let bindings = include_str!("../../src/bindings.ts");
+
+        let commands = source
+            .split("collect_commands![")
+            .nth(1)
+            .and_then(|tail| tail.split("])").next())
+            .expect("lib.rs 缺少 collect_commands 注册块");
+        let mut command_count = 0;
+        for line in commands.lines() {
+            let name = line.trim().trim_end_matches(',');
+            if name.is_empty() || name.starts_with("//") {
+                continue;
+            }
+            assert!(
+                bindings.contains(&format!("(\"{name}\""))
+                    || bindings.contains(&format!("('{name}'")),
+                "bindings.ts 缺少命令：{name}"
+            );
+            command_count += 1;
+        }
+        assert!(command_count > 50, "只检查到 {command_count} 个命令");
+
+        let events = source
+            .split("collect_events![")
+            .nth(1)
+            .and_then(|tail| tail.split("])").next())
+            .expect("lib.rs 缺少 collect_events 注册块");
+        let event_count = events
+            .lines()
+            .filter(|line| {
+                let name = line.trim().trim_end_matches(',');
+                !name.is_empty() && !name.starts_with("//")
+            })
+            .count();
+        assert_eq!(
+            bindings.matches(": makeEvent<").count(),
+            event_count,
+            "bindings.ts 的事件数量与 collect_events 不一致"
         );
     }
 
