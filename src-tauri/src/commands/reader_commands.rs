@@ -206,7 +206,7 @@ pub(crate) fn chapter_reader_data_from_comic(
             let mut img_names: Vec<String> = (0..archive.len())
                 .filter_map(|i| {
                     let entry = archive.by_index(i).ok()?;
-                    let name = entry.name().to_string();
+                    let name = entry.name().ok()?.to_string();
                     if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_')
                     {
                         Some(name)
