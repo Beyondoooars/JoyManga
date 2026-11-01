@@ -64,15 +64,14 @@ jobs:
           # 显式安装，避免依赖 runner 镜像里恰好存在哪个版本。
           sdkmanager "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" > /dev/null
 
-          if [ ! -d "$ANDROID_HOME/ndk" ] || [ -z "$(ls -A "$ANDROID_HOME"/ndk 2>/dev/null)" ]; then
-            echo "Installing NDK..."
-            sdkmanager "ndk;26.1.10909125"
+          # 16 KB 页对齐需要 NDK r28+；固定版本，避免 runner 镜像差异导致产物不一致。
+          NDK_VERSION="29.0.14206865"
+          if [ ! -d "$ANDROID_HOME/ndk/$NDK_VERSION" ]; then
+            echo "Installing NDK $NDK_VERSION..."
+            sdkmanager "ndk;$NDK_VERSION"
           fi
 
-          NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -n 1)
-          if [ -d "$ANDROID_HOME/ndk/26.1.10909125" ]; then
-            NDK_DIR="$ANDROID_HOME/ndk/26.1.10909125"
-          fi
+          NDK_DIR="$ANDROID_HOME/ndk/$NDK_VERSION"
           echo "Using Android NDK: $NDK_DIR"
           echo "NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
