@@ -468,7 +468,8 @@ fn validate_archive_structure(path: &Path) -> anyhow::Result<()> {
             entry.enclosed_name().is_some(),
             "压缩包包含不安全的文件路径"
         );
-        if Path::new(entry.name()).is_img() {
+        let entry_name = entry.name()?;
+        if Path::new(entry_name.as_ref()).is_img() {
             ensure!(entry.size() <= MAX_PAGE_BYTES, "压缩包中的图片过大");
             pages += 1;
         }

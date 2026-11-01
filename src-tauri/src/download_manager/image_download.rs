@@ -410,7 +410,7 @@ pub(crate) fn seed_valid_pages(source: &Path, temp: &Path, expected: usize) -> a
         let Ok(entry) = zip.by_index(index) else {
             continue;
         };
-        let name = entry.name().to_owned();
+        let name = entry.name()?.into_owned();
         let path = Path::new(&name);
         let Some(ext) = path
             .extension()

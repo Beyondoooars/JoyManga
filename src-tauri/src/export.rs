@@ -326,7 +326,7 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
             let mut img_names: Vec<String> = (0..archive.len())
                 .filter_map(|index| {
                     let entry = archive.by_index(index).ok()?;
-                    let name = entry.name().to_string();
+                    let name = entry.name().ok()?.to_string();
                     (Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_'))
                         .then_some(name)
                 })
@@ -671,7 +671,7 @@ pub(crate) fn write_merged_cbz_archive(
             let mut img_names: Vec<String> = (0..archive.len())
                 .filter_map(|i| {
                     let entry = archive.by_index(i).ok()?;
-                    let name = entry.name().to_string();
+                    let name = entry.name().ok()?.to_string();
                     if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_')
                     {
                         Some(name)
@@ -946,7 +946,7 @@ mod tests {
 
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&save_path).unwrap()).unwrap();
         let entry_names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect();
         assert!(
             entry_names.contains(&"[01] 第1话/0001.png".to_string()),
@@ -1053,7 +1053,7 @@ mod tests {
         let file = std::fs::File::open(&save_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let entry_names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect();
 
         assert!(entry_names.contains(&"ComicInfo.xml".to_string()));
@@ -1218,7 +1218,7 @@ mod tests {
         let file = std::fs::File::open(&final_path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let entry_names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect();
         let count_prefix =
             |prefix: &str| entry_names.iter().filter(|n| n.starts_with(prefix)).count();
