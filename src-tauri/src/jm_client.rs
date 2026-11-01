@@ -593,7 +593,9 @@ impl JmClient {
         let http_resp = match send_result {
             Ok(http_resp) => http_resp,
             Err(e) => {
-                return Err(if e.is_timeout() {
+                let timed_out = crate::errors::reqwest_error_in_middleware(&e)
+                    .is_some_and(|error| error.is_timeout());
+                return Err(if timed_out {
                     anyhow::Error::from(e).context("网络请求超时，请检查网络或线路后重试")
                 } else {
                     anyhow::Error::from(e)
@@ -1369,7 +1371,9 @@ impl JmClient {
 }
 
 fn image_request_error(error: reqwest_middleware::Error) -> anyhow::Error {
-    if error.is_timeout() {
+    let timed_out =
+        crate::errors::reqwest_error_in_middleware(&error).is_some_and(|error| error.is_timeout());
+    if timed_out {
         anyhow::Error::from(error).context("图片请求超时，请检查网络或线路后重试")
     } else {
         anyhow::Error::from(error).context("图片请求失败")
