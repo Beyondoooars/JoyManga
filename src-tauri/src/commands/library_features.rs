@@ -347,7 +347,7 @@ fn source_id(source: &Path) -> anyhow::Result<i64> {
             }
         }
     }
-    let key = format!("{:x}", fingerprint.compute());
+    let key = format!("{:x}", fingerprint.finalize());
     Ok(-i64::from_str_radix(&key[..13], 16)?.max(1))
 }
 
