@@ -1,8 +1,77 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::io::{Read, Write};
 use yaserde::{YaDeserialize, YaSerialize};
 
 use super::{ChapterInfo, Comic};
+
+/// `ComicInfo.xml` 里的整数。第三方工具生成的包可能把它写成空元素
+/// （`<PageCount/>`）、非数字文本（`N/A`）或整个省略：yaserde 0.13 起这几种情况会
+/// 让反序列化失败（0.12 只是忽略该字段），而扫描外部 CBZ 时一次失败就会丢掉整本
+/// 漫画。这里对无法解析的值统一按 0 兜底，保留其余元数据。
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub struct LenientI64(i64);
+
+impl LenientI64 {
+    fn parse(text: &str) -> Self {
+        Self(text.trim().parse().unwrap_or_default())
+    }
+}
+
+impl From<i64> for LenientI64 {
+    fn from(value: i64) -> Self {
+        Self(value)
+    }
+}
+
+impl std::ops::Deref for LenientI64 {
+    type Target = i64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl YaSerialize for LenientI64 {
+    fn serialize<W: Write>(&self, writer: &mut yaserde::ser::Serializer<W>) -> yaserde::Result<()> {
+        yaserde::primitives::serialize_primitives(self, "PageCount", writer, |value| {
+            value.0.to_string()
+        })
+    }
+
+    fn serialize_attributes(
+        &self,
+        attributes: Vec<yaserde::__xml::attribute::OwnedAttribute>,
+        namespace: yaserde::__xml::namespace::Namespace,
+    ) -> yaserde::Result<(
+        Vec<yaserde::__xml::attribute::OwnedAttribute>,
+        yaserde::__xml::namespace::Namespace,
+    )> {
+        Ok((attributes, namespace))
+    }
+}
+
+impl YaDeserialize for LenientI64 {
+    fn deserialize<R: Read>(reader: &mut yaserde::de::Deserializer<R>) -> yaserde::Result<Self> {
+        use yaserde::__xml::reader::XmlEvent;
+
+        if !matches!(reader.next_event()?, XmlEvent::StartElement { .. }) {
+            return Err(yaserde::Error::custom("期望开始标签"));
+        }
+        let event = reader.peek()?.to_owned();
+        match event {
+            XmlEvent::Characters(text) => {
+                let value = Self::parse(&text);
+                // 只消费文本，结束标签留给父结构读取（与派生实现里结构体字段的约定一致）
+                reader.next_event()?;
+                Ok(value)
+            }
+            XmlEvent::EndElement { .. } => Ok(Self::default()),
+            event => Err(yaserde::Error::custom(format!("无法从 {event:?} 解析整数"))),
+        }
+    }
+}
 
 /// ComicInfo.xml 字段说明（anansi 规范）：<https://anansi-project.github.io/docs/comicinfo/documentation>
 /// 兼容性参考：Kavita `ComicInfo.cs`、Komga `ComicInfoProvider.kt`
@@ -39,8 +108,8 @@ pub struct ComicInfo {
     #[yaserde(rename = "Number")]
     pub number: Option<String>,
     /// 该章节有多少页
-    #[yaserde(rename = "PageCount", default = "default_page_count")]
-    pub page_count: i64,
+    #[yaserde(rename = "PageCount", default = "default_zero")]
+    pub page_count: LenientI64,
     /// 语言（BCP 47，如 `zh`），供 Komga/Kavita 做语言筛选
     #[yaserde(rename = "LanguageISO", default = "default_empty")]
     pub language_iso: String,
@@ -51,8 +120,8 @@ pub struct ComicInfo {
     /// - `0` => Ongoing
     /// - `非零`且与`Number`或`Volume`一致 => Completed
     /// - `其他非零值` => Ended
-    #[yaserde(rename = "Count")]
-    pub count: i64,
+    #[yaserde(rename = "Count", default = "default_zero")]
+    pub count: LenientI64,
 }
 
 impl ComicInfo {
@@ -74,10 +143,10 @@ impl ComicInfo {
             summary: comic.description.clone(),
             title: chapter_info.chapter_title.clone(),
             number,
-            page_count: 0,
+            page_count: LenientI64::default(),
             language_iso: Self::DEFAULT_LANGUAGE.to_string(),
             web: comic_source_url(comic.id),
-            count,
+            count: count.into(),
         }
     }
 }
@@ -93,8 +162,8 @@ fn default_empty() -> String {
     String::new()
 }
 
-fn default_page_count() -> i64 {
-    0
+fn default_zero() -> LenientI64 {
+    LenientI64::default()
 }
 
 #[cfg(test)]
@@ -156,17 +225,17 @@ mod tests {
         let info = ComicInfo::from(&comic, &comic.chapter_infos[1]);
         assert_eq!(info.language_iso, "zh");
         assert_eq!(info.web, "https://18comic.vip/album/123456");
-        assert_eq!(info.count, 2);
+        assert_eq!(*info.count, 2);
         assert_eq!(info.number.as_deref(), Some("2"));
         // 页数由调用方在打包时按实际图片数回填，默认 0 表示未知
-        assert_eq!(info.page_count, 0);
+        assert_eq!(*info.page_count, 0);
     }
 
     #[test]
     fn serialized_xml_contains_new_elements() {
         let comic = sample_comic();
         let mut info = ComicInfo::from(&comic, &comic.chapter_infos[0]);
-        info.page_count = 12;
+        info.page_count = 12.into();
         info.genre = "同人".to_string();
         let xml = yaserde::ser::to_string(&info).unwrap();
         for tag in [
@@ -193,7 +262,7 @@ mod tests {
     fn metadata_round_trips_through_old_and_new_xml() {
         let comic = sample_comic();
         let mut info = ComicInfo::from(&comic, &comic.chapter_infos[0]);
-        info.page_count = 24;
+        info.page_count = 24.into();
         let xml = yaserde::ser::to_string(&info).unwrap();
         let parsed: ComicInfo = yaserde::de::from_str(&xml).unwrap();
         assert_eq!(parsed, info);
@@ -206,7 +275,33 @@ mod tests {
         </ComicInfo>"#;
         let parsed: ComicInfo = yaserde::de::from_str(minimal).unwrap();
         assert_eq!(parsed.manga, "Yes");
-        assert_eq!(parsed.page_count, 0);
+        assert_eq!(*parsed.page_count, 0);
         assert_eq!(parsed.language_iso, "");
+    }
+
+    #[test]
+    fn lenient_integers_do_not_abort_third_party_metadata() {
+        // 第三方工具常把数值字段写成空元素或非数字文本；扫描外部 CBZ 时不能因此整本失败
+        let xml = r#"<ComicInfo>
+            <Manga>Yes</Manga><Series>示例包</Series><Publisher>JoyManga</Publisher>
+            <Writer>作者</Writer><Tags>标签</Tags><Summary>简介</Summary>
+            <Title>第1话</Title><Number>1</Number>
+            <PageCount></PageCount><Count>N/A</Count>
+        </ComicInfo>"#;
+        let parsed: ComicInfo = yaserde::de::from_str(xml).unwrap();
+        assert_eq!(*parsed.page_count, 0);
+        assert_eq!(*parsed.count, 0);
+        assert_eq!(parsed.series, "示例包");
+        assert_eq!(parsed.title, "第1话");
+
+        // 自闭合元素和缺失元素同样按 0 处理
+        let xml = r#"<ComicInfo>
+            <Manga>Yes</Manga><Series>示例包</Series><Publisher>JoyManga</Publisher>
+            <Writer>作者</Writer><Tags>标签</Tags><Summary>简介</Summary>
+            <Title>第1话</Title><Number>1</Number><PageCount/>
+        </ComicInfo>"#;
+        let parsed: ComicInfo = yaserde::de::from_str(xml).unwrap();
+        assert_eq!(*parsed.page_count, 0);
+        assert_eq!(*parsed.count, 0);
     }
 }

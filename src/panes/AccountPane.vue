@@ -20,6 +20,8 @@ import {
 
 const store = useStore()
 const message = useMessage()
+// 模板里通过这个计算属性读取资料，避免 vue-tsc 3 在嵌套分支中丢失非空收窄
+const userProfile = computed(() => store.userProfile)
 
 /** 金币与等级经验都挂在用户资料上，签到成功后后端会重新拉取资料并经会话事件推回来 */
 const exp = computed(() => expProgress(store.userProfile))
@@ -162,6 +164,10 @@ async function cancelLogin() {
   await commands.cancelLogin()
 }
 
+function openSettings() {
+  store.openSettings()
+}
+
 async function clearUsernameAndPasswordInConfig() {
   if (store.config === undefined) return
   store.config.username = ''
@@ -179,23 +185,23 @@ async function clearUsernameAndPasswordInConfig() {
 <template>
   <div class="profile-page jm-scroll">
     <!-- 已登录：资料卡 + 快捷入口 + 签到 + 阅读数据 -->
-    <template v-if="store.userProfile !== undefined && !showLoginForm">
+    <template v-if="userProfile !== undefined && !showLoginForm">
       <section class="profile-hero">
         <div class="hero-top">
           <n-avatar
             round
             :size="58"
-            :src="store.userProfile.photo"
+            :src="userProfile?.photo"
             fallback-src="https://cdn-msp.18comic.vip/templates/frontend/airav/img/title-png/more-ms-jm.webp?v=2"
             class="hero-avatar" />
           <div class="hero-identity">
             <div class="name-row">
-              <strong class="hero-name">{{ store.userProfile.username }}</strong>
-              <span v-if="store.userProfile.level_name || store.userProfile.level" class="level-badge">
-                {{ store.userProfile.level_name || `Lv.${store.userProfile.level}` }}
+              <strong class="hero-name">{{ userProfile?.username }}</strong>
+              <span v-if="userProfile?.level_name || userProfile?.level" class="level-badge">
+                {{ userProfile?.level_name || `Lv.${userProfile?.level}` }}
               </span>
             </div>
-            <span class="hero-uid">UID {{ store.userProfile.uid }} · 云端已同步</span>
+            <span class="hero-uid">UID {{ userProfile?.uid }} · 云端已同步</span>
           </div>
           <button
             type="button"
@@ -210,7 +216,7 @@ async function clearUsernameAndPasswordInConfig() {
           <div class="hero-stat">
             <span class="stat-value">
               <PhCoin :size="15" weight="duotone" class="stat-coin" />
-              {{ compactNumber(store.userProfile.coin) }}
+              {{ compactNumber(userProfile?.coin ?? 0) }}
             </span>
             <span class="stat-label">金币</span>
           </div>
@@ -226,7 +232,7 @@ async function clearUsernameAndPasswordInConfig() {
           <div class="hero-stat">
             <span class="stat-value">
               <PhHeart :size="15" weight="duotone" class="stat-heart" />
-              {{ compactNumber(store.userProfile.album_favorites) }}
+              {{ compactNumber(userProfile?.album_favorites ?? 0) }}
             </span>
             <span class="stat-label">云端收藏</span>
           </div>
@@ -254,7 +260,7 @@ async function clearUsernameAndPasswordInConfig() {
         </span>
         <strong>登录 JoyManga</strong>
         <p>登录后同步云端收藏，在「发现」里一键收藏喜欢的漫画。</p>
-        <p v-if="store.userProfile !== undefined" class="relogin-tip">当前会话已失效，重新登录后可继续使用在线收藏。</p>
+        <p v-if="userProfile !== undefined" class="relogin-tip">当前会话已失效，重新登录后可继续使用在线收藏。</p>
       </section>
 
       <section class="login-card">
@@ -276,11 +282,11 @@ async function clearUsernameAndPasswordInConfig() {
           立即登录
         </n-button>
         <n-button v-if="loggingIn" size="small" quaternary @click="cancelLogin">取消登录</n-button>
-        <n-button v-if="store.userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">返回我的</n-button>
+        <n-button v-if="userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">返回我的</n-button>
         <p class="privacy-note">账号信息只保存在本机；退出登录会一并清除记住的账密。</p>
       </section>
 
-      <button type="button" class="settings-row" @click="store.openSettings()">
+      <button type="button" class="settings-row" @click="openSettings">
         <PhGearSix :size="18" />
         <span>设置</span>
         <PhCaretRight :size="16" class="row-chevron" />

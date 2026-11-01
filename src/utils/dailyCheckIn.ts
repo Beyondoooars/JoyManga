@@ -28,7 +28,7 @@ export function isSignedToday(state: DailyCheckInState | undefined, now: Date = 
   const today = dayOfMonth(now)
   for (const week of state.record) {
     for (const day of week) {
-      if (normalizeDay(day.date) === today) return day.signed === true
+      if (normalizeDay(day.date ?? '') === today) return day.signed === true
     }
   }
   return false
@@ -61,7 +61,7 @@ export function buildCalendarWeeks(
   const byDay = new Map<number, DailyCheckInRecordDay>()
   for (const week of state.record) {
     for (const day of week) {
-      const value = Number.parseInt(day.date, 10)
+      const value = Number.parseInt(day.date ?? '', 10)
       if (Number.isSafeInteger(value) && value >= 1 && value <= 31) byDay.set(value, day)
     }
   }

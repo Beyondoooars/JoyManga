@@ -385,7 +385,7 @@ pub async fn test_domain_latency(app: AppHandle, domain: String) -> CommandResul
         return Err(CommandError::from("测速失败", anyhow!("域名格式无效")));
     }
 
-    let builder = reqwest::Client::builder()
+    let builder = crate::tls::client_builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(4));
 

@@ -73,7 +73,7 @@ pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
         let mut img_names: Vec<String> = (0..archive.len())
             .filter_map(|i| {
                 let entry = archive.by_index(i).ok()?;
-                let name = entry.name().to_string();
+                let name = entry.name().ok()?.to_string();
                 if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_') {
                     Some(name)
                 } else {
@@ -647,10 +647,13 @@ fn archive_has_chapter_layout<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
 ) -> bool {
     (0..archive.len()).any(|index| {
-        archive
-            .by_index(index)
-            .ok()
-            .is_some_and(|entry| bracket_order(entry.name()).is_some())
+        archive.by_index(index).ok().is_some_and(|entry| {
+            entry
+                .name()
+                .ok()
+                .and_then(|name| bracket_order(name.as_ref()))
+                .is_some()
+        })
     })
 }
 

@@ -213,6 +213,7 @@ function toVariantPage(
   if (variant === null) return null
   if ('SearchResult' in variant) {
     const page = variant.SearchResult
+    if (page === undefined) return null
     return { kind: 'result', content: page.content, total: page.total, hasMore: page.hasMore }
   }
   return { kind: 'comic', comic: variant.Comic }

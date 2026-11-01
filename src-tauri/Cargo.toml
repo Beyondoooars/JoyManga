@@ -23,29 +23,29 @@ tauri-plugin-opener = { version = "2" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
-yaserde = { version = "0.12.0", features = ["yaserde_derive"] }
+yaserde = { version = "0.13.2", features = ["yaserde_derive"] }
 
-specta = { version = "2.0.0-rc", features = ["serde_json"] }
-tauri-specta = { version = "2.0.0-rc", features = ["derive", "typescript"] }
-specta-typescript = { version = "0.0.7" }
+specta = { version = "=2.0.0-rc.26", features = ["serde_json"] }
+tauri-specta = { version = "=2.0.0-rc.26", features = ["derive", "typescript"] }
+specta-typescript = { version = "0.0.13" }
 
-reqwest = { version = "0.12.15", default-features = false, features = ["json", "cookies", "rustls-tls"] }
-reqwest-retry = { version = "0.6.1" }
-reqwest-middleware = { version = "0.3.3 " }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "cookies", "rustls", "query", "form"] }
+reqwest-retry = { version = "0.9.1" }
+reqwest-middleware = { version = "0.5.2", features = ["query", "form"] }
 
-base64 = { version = "0.22" }
+base64 = { version = "0.23.1" }
 percent-encoding = { version = "2.3.1" }
-md5 = { version = "0.7.0" }
-aes = { version = "0.8.4" }
+md5 = { version = "0.8.1" }
+aes = { version = "0.9.3" }
 
 anyhow = { version = "1" }
 tokio = { version = "1.40.0", features = ["full"] }
 bytes = { version = "1.7.2" }
 image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
-parking_lot = { version = "0.12.3", features = ["send_guard"] }
+parking_lot = { version = "0.13.0", features = ["send_guard"] }
 rayon = { version = "1.10.0" }
 uuid = { version = "1.15.1", features = ["v4"] }
-zip = { version = "3.0.0", default-features = false, features = ["deflate"] }
+zip = { version = "=9.2.1", default-features = false, features = ["deflate"] }
 tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.19", features = ["json", "time", "local-time"] }
 tracing-appender = { version = "0.2.3" }
@@ -55,6 +55,11 @@ indexmap = { version = "2.10.0", features = ["serde"] }
 ring = "0.17"
 # 简繁转换：纯 Rust + 内嵌 OpenCC 词典（词典为 Apache-2.0，见 THIRD_PARTY_NOTICES.md）
 opencc-fmmseg = { version = "=0.13.0", default-features = false }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# Android 无法直接使用 reqwest 0.13 默认的 rustls-platform-verifier（需要额外的
+# Kotlin 组件和运行时初始化），改用内置 Mozilla 根证书，见 src/tls.rs。
+webpki-root-certs = "1.0.11"
 
 [profile.release]
 strip = true

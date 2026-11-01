@@ -56,15 +56,15 @@ onMounted(async () => {
   }
 
   // 按照需求：仅保留韩漫和日漫，删除其他
-  const filteredTypes = result.data.type.filter((t) => t.id === 'manga' || t.id === 'hanman')
+  const filteredTypes = (result.data.type ?? []).filter((t) => t.id === 'manga' || t.id === 'hanman')
 
   weeklyInfo.value = { ...result.data, type: filteredTypes }
   infoLoading.value = false
 
-  const firstCategory = result.data.categories[0]
+  const firstCategory = result.data.categories?.[0]
   const defaultType = filteredTypes.find((t) => t.id === 'manga') ?? filteredTypes[0]
 
-  if (firstCategory === undefined || defaultType === undefined) {
+  if (firstCategory?.id === undefined || defaultType?.id === undefined) {
     message.warning('每周必看暂时没有可用分类')
     infoUnavailable.value = true
     return
@@ -120,7 +120,10 @@ async function getWeekly() {
 
     store.getWeeklyResult = result.data
     store.weeklyResultEpoch = epoch
-    for (const comic of result.data.list) store.recordFavorite(comic.id, comic.is_favorite, epoch, observedRevision)
+    for (const comic of result.data.list) {
+      if (comic.id === undefined) continue
+      store.recordFavorite(comic.id, comic.is_favorite === true, epoch, observedRevision)
+    }
   } catch (error) {
     if (!isMounted || generation !== requestGeneration) return
     console.error(error)
@@ -204,7 +207,7 @@ async function getWeekly() {
             type="button"
             class="filter-chip"
             :class="{ 'is-active': currentWeeklyTypeId === weeklyType.id }"
-            @click="currentWeeklyTypeId = weeklyType.id">
+            @click="currentWeeklyTypeId = weeklyType.id ?? ''">
             {{ weeklyType.title }}
           </button>
         </div>
@@ -236,15 +239,15 @@ async function getWeekly() {
           <ComicCard
             v-for="comic in store.getWeeklyResult.list"
             :key="comic.id"
-            :comic-id="comic.id"
-            :comic-favorite="comic.is_favorite"
+            :comic-id="comic.id ?? 0"
+            :comic-favorite="comic.is_favorite ?? false"
             :favorite-epoch="store.weeklyResultEpoch"
-            :comic-title="comic.name"
-            :comic-author="comic.author"
-            :comic-category="comic.category"
-            :comic-category-sub="comic.category_sub"
-            :comic-downloaded="comic.is_downloaded"
-            :comic-download-dir="comic.comic_download_dir" />
+            :comic-title="comic.name ?? ''"
+            :comic-author="comic.author ?? ''"
+            :comic-category="comic.category ?? { id: null, title: null }"
+            :comic-category-sub="comic.category_sub ?? { id: null, title: null }"
+            :comic-downloaded="comic.is_downloaded ?? false"
+            :comic-download-dir="comic.comic_download_dir ?? ''" />
         </div>
       </div>
     </div>
