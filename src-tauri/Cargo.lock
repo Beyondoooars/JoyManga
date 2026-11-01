@@ -2222,6 +2222,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "webpki-root-certs",
  "yaserde",
  "zip",
 ]

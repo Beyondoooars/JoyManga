@@ -18,7 +18,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
-    "gen:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings --features bindings --locked --offline",
+    "gen:bindings": "cargo run --manifest-path src-tauri/Cargo.toml --bin export-bindings --features bindings --locked --offline && pnpm exec prettier --write src/bindings.ts",
     "gen:icons": "tauri icon src-tauri/icons/icon-manifest.json -o src-tauri/icons",
     "preview": "vite preview",
     "tauri": "tauri",
