@@ -15,7 +15,7 @@ use zip::{write::SimpleFileOptions, ZipWriter};
 use crate::{
     atomic_fs,
     events::ExportCbzEvent,
-    extensions::{AnyhowErrorToStringChain, AppHandleExt, PathIsImg},
+    extensions::{AnyhowErrorToStringChain, AppHandleExt},
     types::{ChapterInfo, Comic, ComicInfo},
     utils,
 };
@@ -323,14 +323,7 @@ pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let mut img_names: Vec<String> = (0..archive.len())
-                .filter_map(|index| {
-                    let entry = archive.by_index(index).ok()?;
-                    let name = entry.name().ok()?.to_string();
-                    (Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_'))
-                        .then_some(name)
-                })
-                .collect();
+            let mut img_names = crate::comic_scanner::image_entry_names(&mut archive);
             img_names = crate::comic_scanner::select_chapter_pages(&img_names, chapter_info.order)
                 .with_context(|| {
                     format!(
@@ -615,15 +608,7 @@ pub(crate) fn write_merged_cbz_archive(
         .iter()
         .map(|chapter| (**chapter).clone())
         .collect();
-    comic_clone.is_favorite = false;
-    comic_clone.liked = false;
-    comic_clone.is_downloaded = None;
-    comic_clone.comic_download_dir = None;
-    comic_clone.local_cover_data = None;
-    for ch in &mut comic_clone.chapter_infos {
-        ch.is_downloaded = None;
-        ch.chapter_download_dir = None;
-    }
+    comic_clone.sanitized_for_archive();
     let comic_json = serde_json::to_string_pretty(&comic_clone)
         .map_err(|err| anyhow!("序列化`元数据.json`失败: {err}"))?;
     zip_writer
@@ -668,18 +653,7 @@ pub(crate) fn write_merged_cbz_archive(
                 chapter_download_dir.display()
             ))?;
 
-            let mut img_names: Vec<String> = (0..archive.len())
-                .filter_map(|i| {
-                    let entry = archive.by_index(i).ok()?;
-                    let name = entry.name().ok()?.to_string();
-                    if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_')
-                    {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let mut img_names = crate::comic_scanner::image_entry_names(&mut archive);
             // 来源是独立章节文件时使用全部图片；来源是整本归档（无本章身份）时按话切片，
             // 避免把其他话的页面重复写入合并结果。
             let is_own_chapter_file =

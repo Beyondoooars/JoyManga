@@ -443,7 +443,8 @@ export const useStore = defineStore('store', () => {
     chapterDetailShowing.value = true
   }
 
-  async function openComic(comicId: number) {
+  /** 拉取指定漫画并更新详情数据；`revealDetail` 决定是否同时打开详情页。 */
+  async function fetchPickedComic(comicId: number, revealDetail: boolean) {
     const generation = ++pickedComicRequestGeneration
     const epoch = sessionEpoch.value
     const observedRevision = favoriteRevision.value
@@ -458,8 +459,14 @@ export const useStore = defineStore('store', () => {
     pickedComic.value = result.data
     pickedComicFavoriteEpoch.value = epoch
     recordFavorite(comicId, result.data.is_favorite, epoch, observedRevision)
-    chapterDetailShowing.value = true
+    if (revealDetail) {
+      chapterDetailShowing.value = true
+    }
     return result
+  }
+
+  async function openComic(comicId: number) {
+    return fetchPickedComic(comicId, true)
   }
 
   function closeComicDetail() {
@@ -472,22 +479,9 @@ export const useStore = defineStore('store', () => {
     if (comicId === undefined) {
       return { status: 'stale' } as const
     }
-
-    const generation = ++pickedComicRequestGeneration
-    const epoch = sessionEpoch.value
-    const observedRevision = favoriteRevision.value
-    const result = await commands.getComic(comicId)
-    if (generation !== pickedComicRequestGeneration || pickedComic.value?.id !== comicId) {
-      return { status: 'stale' } as const
-    }
-    if (result.status === 'error') {
-      return result
-    }
-
-    pickedComic.value = result.data
-    pickedComicFavoriteEpoch.value = epoch
-    recordFavorite(comicId, result.data.is_favorite, epoch, observedRevision)
-    return result
+    // 刷新只更新详情数据，不改变可见性：请求期间用户可能已跳转到搜索结果，
+    // 完成后不能把已关闭的详情页重新打开。
+    return fetchPickedComic(comicId, false)
   }
 
   async function refreshDownloadedComics() {

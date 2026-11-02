@@ -19,7 +19,7 @@ import {
   PhCornersOut,
 } from '@phosphor-icons/vue'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
-import { useIsMobile } from '../composables/useIsMobile.ts'
+import { isAndroid } from '../composables/useIsMobile.ts'
 import {
   onVolumeKeyPage,
   setImmersiveMode,
@@ -48,7 +48,6 @@ import {
 const store = useStore()
 const message = useMessage()
 
-const { isAndroid } = useIsMobile()
 const hudVisible = ref(true)
 
 // 全屏：进入阅读器默认沉浸式（隐藏状态栏/导航栏），头部按钮可切回

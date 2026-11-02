@@ -30,13 +30,6 @@ const manualNetwork = ref(false)
 const advancedNetwork = ref(false)
 const advancedData = ref(false)
 
-// 输入框被清空时 naive-ui 会给出 null；null 进入配置会让 Rust 的 u16 反序列化失败，
-// 导致此后每一次保存/检查连接都报“设置格式无效”。这里兜底为默认端口。
-function updateProxyPort(value: number | null) {
-  if (!store.config) return
-  store.config.proxyPort = value === null || !Number.isFinite(value) ? 7890 : value
-}
-
 // 与后端 LogLevel 枚举保持一致：恢复备份或手工编辑配置可能带入 TRACE/DEBUG，
 // 选项缺失时 naive-ui 只能回退显示原始字符串。
 const logLevelOptions: Array<{ label: string; value: LogLevel }> = [
@@ -149,10 +142,12 @@ const proxyHost = computed({
     if (store.config) store.config.proxyHost = value
   },
 })
-const proxyPort = computed({
+// 输入框被清空时 naive-ui 会给出 null；null 进入配置会让 Rust 的 u16 反序列化失败，
+// 导致此后每一次保存/检查连接都报“设置格式无效”。这里兜底为默认端口。
+const proxyPort = computed<number | null>({
   get: () => store.config?.proxyPort ?? 7890,
-  set: (value: number) => {
-    if (store.config) store.config.proxyPort = value
+  set: (value) => {
+    if (store.config) store.config.proxyPort = value === null || !Number.isFinite(value) ? 7890 : value
   },
 })
 const cbzModeOptions = [
@@ -561,7 +556,7 @@ const readingSummary = computed(() => {
             <n-select v-model:value="proxyMode" :options="proxyOptions" />
             <div v-if="proxyMode === 'Custom'" class="proxy-grid">
               <div class="field"><label class="field-label">主机</label><n-input v-model:value="proxyHost" placeholder="127.0.0.1" /></div>
-              <div class="field"><label class="field-label">端口</label><n-input-number :value="proxyPort" :min="1" :max="65535" :show-button="false" @update:value="updateProxyPort" /></div>
+              <div class="field"><label class="field-label">端口</label><n-input-number v-model:value="proxyPort" :min="1" :max="65535" :show-button="false" /></div>
             </div>
             <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN 后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断包 会记录当时是否识别到 VPN、用的是哪条线路。</p>
           </div>
