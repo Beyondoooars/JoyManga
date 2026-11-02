@@ -313,6 +313,29 @@ pub async fn get_api_domain_status(
     ))
 }
 
+#[tauri::command(async)]
+#[specta::specta]
+pub async fn test_image_download_speed(
+    config: crate::config::Config,
+    comic_id: i64,
+) -> CommandResult<crate::network_check::ImageSpeedReport> {
+    let result = crate::network_check::image_speed_test(config, comic_id)
+        .await
+        .map_err(|error| CommandError::from("图片线路测速失败", error))?;
+    for item in &result.results {
+        tracing::info!(
+            domain = item.domain,
+            bytes = item.bytes,
+            elapsed_ms = item.elapsed_ms,
+            bytes_per_second = item.bytes_per_second.unwrap_or(0.0),
+            error = item.error.as_deref().unwrap_or(""),
+            vpn = result.vpn_active,
+            "image_speed_test"
+        );
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn get_image_domain_presets() -> Vec<crate::config::ImageDomainPreset> {

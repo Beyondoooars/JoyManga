@@ -287,10 +287,19 @@ impl JmClient {
     }
 
     pub fn reload_client(&self) {
+        self.reload_client_for_network_change(false);
+    }
+
+    /// VPN 改变了实际网络路径：旧路径的延迟与冷却记录不再适用于新路径。
+    pub fn reload_client_for_network_change(&self, network_changed: bool) {
         let (api_client, api_client_without_retry) = create_api_clients(&self.app);
         *self.api_client.write() = api_client;
         *self.api_client_without_retry.write() = api_client_without_retry;
         *self.img_client.write() = create_img_client(&self.app);
+        if network_changed {
+            *self.last_success_domain.write() = None;
+            self.domain_health.clear();
+        }
     }
 
     /// 从官方地址动态获取最新的移动端 API 域名列表（10 分钟内只刷新一次）。
@@ -1478,7 +1487,11 @@ fn create_api_reqwest_client(app: &AppHandle) -> reqwest::Client {
 }
 
 pub fn create_img_client(app: &AppHandle) -> ClientWithMiddleware {
-    let builder = timed_client_builder(Duration::from_secs(120));
+    let builder = timed_client_builder(Duration::from_secs(120))
+        // 默认 4/8 并发下不需要每个域名保留 100 条空闲连接。
+        // VPN 切换由 set_network_vpn 重建客户端，避免复用旧路径的连接。
+        .pool_max_idle_per_host(16)
+        .tcp_nodelay(true);
     let builder = app
         .get_config()
         .read()

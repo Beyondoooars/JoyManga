@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -77,6 +77,7 @@ pub(crate) struct DownloadTask {
     pub(crate) event_lock: Arc<Mutex<()>>,
     pub(crate) file_writes: Arc<TaskFileWrites>,
     pub(crate) settings: DownloadSettings,
+    pub(crate) downloaded_bytes: Arc<AtomicU64>,
 }
 
 impl DownloadTask {
@@ -115,6 +116,7 @@ impl DownloadTask {
             event_lock: Arc::new(Mutex::new(())),
             file_writes: Arc::default(),
             settings,
+            downloaded_bytes: Arc::new(AtomicU64::new(0)),
         };
 
         Ok(task)
@@ -163,6 +165,8 @@ impl DownloadTask {
         // 恢复时先显示上次进度，开始执行后按实际有效图片重新计数。
         self.downloaded_img_count.store(0, Ordering::Relaxed);
         self.total_img_count.store(0, Ordering::Relaxed);
+        self.downloaded_bytes.store(0, Ordering::Relaxed);
+        let transfer_started = Instant::now();
         self.set_stage(TaskStage::FetchMeta);
         let comic_title = &self.comic.name;
         let chapter_title = &self.chapter_info.chapter_title;
@@ -238,6 +242,19 @@ impl DownloadTask {
             self.fail_with_error("图片任务异常退出".to_string(), &error);
             return;
         }
+        let network_elapsed = transfer_started.elapsed();
+        tracing::info!(
+            task_id = %self.task_id,
+            comic_id = self.comic.id,
+            chapter_id = self.chapter_info.chapter_id,
+            bytes = self.downloaded_bytes.load(Ordering::Relaxed),
+            elapsed_ms = u64::try_from(network_elapsed.as_millis()).unwrap_or(u64::MAX),
+            bytes_per_second = self.downloaded_bytes.load(Ordering::Relaxed) as f64 / network_elapsed.as_secs_f64().max(0.001),
+            img_concurrency = self.app.get_config().read().img_concurrency,
+            chapter_concurrency = self.app.get_config().read().chapter_concurrency,
+            vpn = crate::network_state::is_vpn_active(),
+            "chapter_transfer_completed"
+        );
         tracing::trace!(comic_title, chapter_title, "所有图片下载任务完成");
         self.set_stage(TaskStage::Verifying);
         // 检查此章节的图片是否全部下载成功
@@ -258,6 +275,7 @@ impl DownloadTask {
 
         // 图片全部下载并反混淆校验完成，打包为CBZ并清理临时散图目录
         self.set_stage(TaskStage::Archiving);
+        let archive_started = Instant::now();
         if let Err(err) = self.file_writes.run(|| {
             package_chapter_to_cbz(
                 &self.comic,
@@ -277,6 +295,14 @@ impl DownloadTask {
         }
 
         tracing::info!(comic_title, chapter_title, "章节下载与打包成功");
+        tracing::info!(
+            task_id = %self.task_id,
+            comic_id = self.comic.id,
+            chapter_id = self.chapter_info.chapter_id,
+            archive_ms = u64::try_from(archive_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            total_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "chapter_download_completed"
+        );
         self.clear_recorded_failure();
         self.set_stage(TaskStage::Done);
 
