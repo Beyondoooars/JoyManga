@@ -71,7 +71,8 @@ const checkResult = ref<NetworkCheckReport>()
 const networkError = ref('')
 const dataBusy = ref('')
 const dataError = ref('')
-let generation = 0
+let checkGeneration = 0
+let speedGeneration = 0
 let disposed = false
 
 const domainStatus = ref<NetworkProbe>()
@@ -105,12 +106,14 @@ useBackHandler(() => {
 
 onBeforeUnmount(() => {
   disposed = true
-  generation++
+  checkGeneration++
+  speedGeneration++
 })
 // 设置页被 KeepAlive 缓存：离开后 onBeforeUnmount 不会触发，在途请求的回调
 // 仍会写进这份状态。失活时同样作废代数，重新进入时再刷新一次。
 onDeactivated(() => {
-  generation++
+  checkGeneration++
+  speedGeneration++
   checking.value = false
   speedTesting.value = false
 })
@@ -262,8 +265,10 @@ const networkKey = computed(() => {
     : ''
 })
 watch(networkKey, () => {
-  generation++
+  checkGeneration++
+  speedGeneration++
   checking.value = false
+  speedTesting.value = false
   speedReport.value = undefined
   speedError.value = ''
   checkResult.value = undefined
@@ -273,7 +278,7 @@ watch(networkKey, () => {
 
 async function testImageSpeed() {
   if (!store.config || speedTesting.value) return
-  const current = ++generation
+  const current = ++speedGeneration
   speedTesting.value = true
   speedReport.value = undefined
   speedError.value = ''
@@ -281,13 +286,13 @@ async function testImageSpeed() {
     const sampleId = store.pickedComic?.id ?? store.searchResult?.content[0]?.id ?? store.getWeeklyResult?.list[0]?.id
     if (!sampleId || sampleId <= 0) throw new Error('先打开一本在线漫画或加载每周必看，再测速')
     const result = await commands.testImageDownloadSpeed(structuredClone(toRaw(store.config)), sampleId)
-    if (disposed || current !== generation) return
+    if (disposed || current !== speedGeneration) return
     if (result.status === 'error') speedError.value = result.error.err_message
     else speedReport.value = result.data
   } catch (error) {
-    if (current === generation) speedError.value = getErrorMessage(error)
+    if (current === speedGeneration && !disposed) speedError.value = getErrorMessage(error)
   } finally {
-    if (current === generation) speedTesting.value = false
+    if (current === speedGeneration) speedTesting.value = false
   }
 }
 
@@ -305,7 +310,7 @@ function formatSpeed(bytesPerSecond: number) {
 
 async function checkNetwork() {
   if (!store.config || checking.value) return
-  const current = ++generation
+  const current = ++checkGeneration
   checking.value = true
   checkResult.value = undefined
   networkError.value = ''
@@ -315,13 +320,13 @@ async function checkNetwork() {
       structuredClone(toRaw(store.config)),
       sampleId && sampleId > 0 ? sampleId : null,
     )
-    if (disposed || current !== generation) return
+    if (disposed || current !== checkGeneration) return
     if (result.status === 'error') networkError.value = result.error.err_message
     else checkResult.value = result.data
   } catch (error) {
-    if (current === generation) networkError.value = getErrorMessage(error)
+    if (current === checkGeneration && !disposed) networkError.value = getErrorMessage(error)
   } finally {
-    if (current === generation) checking.value = false
+    if (current === checkGeneration) checking.value = false
   }
 }
 
