@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::errors::{CommandError, CommandResult};
-use crate::extensions::{mime_for_image, AppHandleExt, PathIsImg};
+use crate::extensions::{mime_for_image, AppHandleExt};
 use crate::types::Comic;
 use crate::utils;
 
@@ -203,18 +203,7 @@ pub(crate) fn chapter_reader_data_from_comic(
                 .context(format!("解析章节CBZ文件`{}`失败", chapter_target.display()))
                 .map_err(|err| CommandError::from("读取章节图片失败", err))?;
 
-            let mut img_names: Vec<String> = (0..archive.len())
-                .filter_map(|i| {
-                    let entry = archive.by_index(i).ok()?;
-                    let name = entry.name().ok()?.to_string();
-                    if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_')
-                    {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            let mut img_names = crate::comic_scanner::image_entry_names(&mut archive);
 
             // 独立章节文件直接使用全部页面；整本合并归档按话切片，只显示本章的页面。
             let is_own_chapter_file =

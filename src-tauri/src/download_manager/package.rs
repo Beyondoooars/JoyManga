@@ -70,15 +70,7 @@ pub(crate) fn package_chapter_to_cbz(
 
     // 写入 元数据.json
     let mut comic_clone = comic.clone();
-    comic_clone.is_downloaded = None;
-    comic_clone.comic_download_dir = None;
-    comic_clone.local_cover_data = None;
-    comic_clone.is_favorite = false;
-    comic_clone.liked = false;
-    for ch in &mut comic_clone.chapter_infos {
-        ch.is_downloaded = None;
-        ch.chapter_download_dir = None;
-    }
+    comic_clone.sanitized_for_archive();
     let comic_json = serde_json::to_string_pretty(&comic_clone)
         .map_err(|err| anyhow!("序列化`元数据.json`失败: {err}"))?;
     zip_writer

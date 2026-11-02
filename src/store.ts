@@ -472,22 +472,8 @@ export const useStore = defineStore('store', () => {
     if (comicId === undefined) {
       return { status: 'stale' } as const
     }
-
-    const generation = ++pickedComicRequestGeneration
-    const epoch = sessionEpoch.value
-    const observedRevision = favoriteRevision.value
-    const result = await commands.getComic(comicId)
-    if (generation !== pickedComicRequestGeneration || pickedComic.value?.id !== comicId) {
-      return { status: 'stale' } as const
-    }
-    if (result.status === 'error') {
-      return result
-    }
-
-    pickedComic.value = result.data
-    pickedComicFavoriteEpoch.value = epoch
-    recordFavorite(comicId, result.data.is_favorite, epoch, observedRevision)
-    return result
+    // 详情页本身已显示，openComic 的 generation/epoch 校验足以覆盖切换漫画与关闭详情。
+    return openComic(comicId)
   }
 
   async function refreshDownloadedComics() {

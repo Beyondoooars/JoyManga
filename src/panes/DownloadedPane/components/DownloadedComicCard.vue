@@ -5,7 +5,6 @@ import { PhArchive, PhCheck, PhDotsThree, PhFolderOpen, PhImage, PhTrash } from 
 import { computed, h, onBeforeUnmount, ref } from 'vue'
 import { NDropdown, useMessage } from 'naive-ui'
 import { isMergeableComic, localChapters } from '../../../utils/mergeableComics.ts'
-import { useIsMobile } from '../../../composables/useIsMobile.ts'
 import { formatCommandError, getErrorMessage } from '../../../utils/errors.ts'
 import { failureKindLabels } from '../../../utils/downloadProgress.ts'
 
@@ -122,16 +121,15 @@ function endPress() {
   clearPress()
 }
 
-// ── 更多菜单：桌面端没有长按习惯，键盘也无法长按；封面墙省掉了原来的整行按钮，
-// 用右上角一个 ⋯ 把「打开目录 / 整理 / 选择」收进去。
-const { isMobile } = useIsMobile()
+// ── 更多菜单：封面墙省掉了原来的整行按钮，用右上角一个 ⋯ 把
+//「复制目录 / 整理 / 选择」收进去。
 const menuOpen = ref(false)
 const menuX = ref(0)
 const menuY = ref(0)
 const merging = ref(false)
 
 const menuOptions = computed(() => [
-  { label: isMobile.value ? '复制下载目录' : '打开下载目录', key: 'dir', icon: () => h(PhFolderOpen, { size: 16 }) },
+  { label: '复制下载目录', key: 'dir', icon: () => h(PhFolderOpen, { size: 16 }) },
   ...(isMergeableComic(props.comic)
     ? [{ label: archiving.value ? '正在整理…' : '整理为整本 CBZ', key: 'merge', disabled: archiving.value || merging.value, icon: () => h(PhArchive, { size: 16 }) }]
     : []),
@@ -173,17 +171,12 @@ async function handleMenu(key: string) {
 async function showComicDownloadDirInFileManager() {
   const dir = props.comic.comicDownloadDir
   if (!dir) return
-  if (isMobile.value) {
-    try {
-      await navigator.clipboard.writeText(dir)
-      message.success('已复制到剪贴板')
-    } catch {
-      message.error('复制失败，请重试')
-    }
-    return
+  try {
+    await navigator.clipboard.writeText(dir)
+    message.success('已复制到剪贴板')
+  } catch {
+    message.error('复制失败，请重试')
   }
-  const result = await commands.showPathInFileManager(dir)
-  if (result.status === 'error') message.error(getErrorMessage(result.error))
 }
 
 async function handleMergeCbz() {

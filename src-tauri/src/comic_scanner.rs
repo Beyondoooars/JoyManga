@@ -1,38 +1,45 @@
+use std::io::{Read, Seek};
 use std::path::Path;
 
 use anyhow::{anyhow, ensure, Context};
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use zip::ZipArchive;
 
 use crate::{
     atomic_fs,
-    extensions::{mime_for_image, PathIsImg},
+    extensions::{mime_for_image, PathIsCbz, PathIsImg},
     types::{ChapterInfo, Comic, ComicInfo},
     utils,
 };
 
+/// CBZ 条目是否为可展示的漫画页：图片扩展名，且不是隐藏/系统条目。
+pub(crate) fn is_page_image(name: &str) -> bool {
+    Path::new(name).is_img() && !name.starts_with('.') && !name.starts_with('_')
+}
+
+/// 收集归档内所有漫画页条目名（不排序，调用方按需排序/切片）。
+pub(crate) fn image_entry_names<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Vec<String> {
+    (0..archive.len())
+        .filter_map(|index| {
+            let entry = archive.by_index(index).ok()?;
+            let name = entry.name().ok()?.to_string();
+            is_page_image(&name).then_some(name)
+        })
+        .collect()
+}
+
 pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
     let mut cbz_files = Vec::new();
     if comic_download_dir.is_file() {
-        if comic_download_dir
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_lowercase)
-            == Some("cbz".to_string())
-        {
+        if comic_download_dir.is_cbz() {
             cbz_files.push(comic_download_dir.to_path_buf());
         }
     } else {
         if let Ok(entries) = std::fs::read_dir(comic_download_dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-                if path.is_file()
-                    && path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(str::to_lowercase)
-                        == Some("cbz".to_string())
-                {
+                if path.is_file() && path.is_cbz() {
                     cbz_files.push(path);
                 }
             }
@@ -42,13 +49,7 @@ pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
             if let Ok(entries) = std::fs::read_dir(&cbz_sub) {
                 for entry in entries.filter_map(Result::ok) {
                     let path = entry.path();
-                    if path.is_file()
-                        && path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .map(str::to_lowercase)
-                            == Some("cbz".to_string())
-                    {
+                    if path.is_file() && path.is_cbz() {
                         cbz_files.push(path);
                     }
                 }
@@ -70,17 +71,7 @@ pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
             continue;
         };
 
-        let mut img_names: Vec<String> = (0..archive.len())
-            .filter_map(|i| {
-                let entry = archive.by_index(i).ok()?;
-                let name = entry.name().ok()?.to_string();
-                if Path::new(&name).is_img() && !name.starts_with('.') && !name.starts_with('_') {
-                    Some(name)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut img_names = image_entry_names(&mut archive);
 
         img_names.sort_by(|a, b| utils::natural_cmp(a, b));
 
@@ -465,13 +456,7 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-                if path.is_file()
-                    && path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .map(str::to_lowercase)
-                        == Some("cbz".to_string())
-                {
+                if path.is_file() && path.is_cbz() {
                     cbz_files.push(path);
                 }
             }
@@ -820,6 +805,28 @@ mod new_storage_tests {
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod page_entry_tests {
+    use super::is_page_image;
+
+    #[test]
+    fn page_image_filter_skips_hidden_and_non_image_entries() {
+        for (name, expected) in [
+            ("001.jpg", true),
+            ("dir/002.PNG", true),
+            ("003.webp", true),
+            ("004.gif", true),
+            ("005.jpeg", true),
+            (".hidden.jpg", false),
+            ("_cover.jpg", false),
+            ("ComicInfo.xml", false),
+            ("chapter.json", false),
+        ] {
+            assert_eq!(is_page_image(name), expected, "{name}");
+        }
     }
 }
 

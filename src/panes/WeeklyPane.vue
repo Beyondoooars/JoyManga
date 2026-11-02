@@ -246,8 +246,7 @@ async function getWeekly() {
             :comic-author="comic.author ?? ''"
             :comic-category="comic.category ?? { id: null, title: null }"
             :comic-category-sub="comic.category_sub ?? { id: null, title: null }"
-            :comic-downloaded="comic.is_downloaded ?? false"
-            :comic-download-dir="comic.comic_download_dir ?? ''" />
+            :comic-downloaded="comic.is_downloaded ?? false" />
         </div>
       </div>
     </div>

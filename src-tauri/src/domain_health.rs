@@ -88,8 +88,7 @@ impl DomainHealthStore {
             .enumerate()
             .map(|(index, domain)| (index, rank_of(domain), domain.clone()))
             .collect();
-        // 先按索引稳定排序，再按健康度排序，保证同分时保持原顺序
-        ranked.sort_by_key(|(index, _, _)| *index);
+        // `ranked` 已按候选顺序构建，`sort_by_key` 是稳定排序：同分时自然保持原有顺序。
         ranked.sort_by_key(|(_, rank, _)| *rank);
         for (slot, (_, _, domain)) in candidates.iter_mut().zip(ranked) {
             *slot = domain;

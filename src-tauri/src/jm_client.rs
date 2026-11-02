@@ -256,9 +256,8 @@ pub struct JmClient {
 
 impl JmClient {
     pub fn new(app: AppHandle) -> Self {
-        let api_client = create_api_client(&app);
+        let (api_client, api_client_without_retry) = create_api_clients(&app);
         let api_client = Arc::new(RwLock::new(api_client));
-        let api_client_without_retry = create_api_client_without_retry(&app);
         let api_client_without_retry = Arc::new(RwLock::new(api_client_without_retry));
 
         let img_client = create_img_client(&app);
@@ -288,8 +287,9 @@ impl JmClient {
     }
 
     pub fn reload_client(&self) {
-        *self.api_client.write() = create_api_client(&self.app);
-        *self.api_client_without_retry.write() = create_api_client_without_retry(&self.app);
+        let (api_client, api_client_without_retry) = create_api_clients(&self.app);
+        *self.api_client.write() = api_client;
+        *self.api_client_without_retry.write() = api_client_without_retry;
         *self.img_client.write() = create_img_client(&self.app);
     }
 
@@ -1452,20 +1452,20 @@ fn timed_client_builder(total_timeout: Duration) -> reqwest::ClientBuilder {
         .timeout(total_timeout)
 }
 
-pub fn create_api_client(app: &AppHandle) -> ClientWithMiddleware {
+/// 构建共享同一连接池/TLS 会话的两套 API 客户端：
+/// 普通请求带重试，登录等需要精确控制请求次数的路径不带重试。
+pub fn create_api_clients(app: &AppHandle) -> (ClientWithMiddleware, ClientWithMiddleware) {
     let client = create_api_reqwest_client(app);
     let retry_policy = ExponentialBackoff::builder()
         .base(1) // 指数为1，保证重试间隔为1秒不变
         .jitter(Jitter::Bounded) // 重试间隔在1秒左右波动
         .build_with_total_retry_duration(Duration::from_secs(5)); // 重试总时长为5秒
 
-    reqwest_middleware::ClientBuilder::new(client)
+    let with_retry = reqwest_middleware::ClientBuilder::new(client.clone())
         .with(RetryTransientMiddleware::new_with_policy(retry_policy))
-        .build()
-}
-
-fn create_api_client_without_retry(app: &AppHandle) -> ClientWithMiddleware {
-    reqwest_middleware::ClientBuilder::new(create_api_reqwest_client(app)).build()
+        .build();
+    let without_retry = reqwest_middleware::ClientBuilder::new(client).build();
+    (with_retry, without_retry)
 }
 
 fn create_api_reqwest_client(app: &AppHandle) -> reqwest::Client {

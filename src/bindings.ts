@@ -23,7 +23,6 @@ export const commands = {
     ),
   clearLogs: () => typedError<null, CommandError>(__TAURI_INVOKE('clear_logs')),
   clearCache: () => typedError<null, CommandError>(__TAURI_INVOKE('clear_cache')),
-  clearAllDownloads: () => typedError<null, CommandError>(__TAURI_INVOKE('clear_all_downloads')),
   resetAppState: () => typedError<Config, CommandError>(__TAURI_INVOKE('reset_app_state')),
   backupAppData: (readingState: Value | null) =>
     typedError<string, CommandError>(__TAURI_INVOKE('backup_app_data', { readingState })),
@@ -73,7 +72,6 @@ export const commands = {
     typedError<null, CommandError>(__TAURI_INVOKE('download_comic', { aid, cbzMode })),
   downloadAllFavorites: (folderId: number | null) =>
     typedError<null, CommandError>(__TAURI_INVOKE('download_all_favorites', { folderId })),
-  updateDownloadedComics: () => typedError<null, CommandError>(__TAURI_INVOKE('update_downloaded_comics')),
   showPathInFileManager: (path: string) =>
     typedError<null, CommandError>(__TAURI_INVOKE('show_path_in_file_manager', { path })),
   syncFavoriteFolder: () => typedError<null, CommandError>(__TAURI_INVOKE('sync_favorite_folder')),
@@ -141,9 +139,6 @@ export const events = {
   favoriteChangedEvent: makeEvent<FavoriteChangedEvent, FavoriteChangedEvent>('favorite-changed-event'),
   logEvent: makeEvent<LogEvent, LogEvent>('log-event'),
   sessionChangedEvent: makeEvent<SessionChangedEvent, SessionChangedEvent>('session-changed-event'),
-  updateDownloadedComicsEvent: makeEvent<UpdateDownloadedComicsEvent, UpdateDownloadedComicsEvent>(
-    'update-downloaded-comics-event',
-  ),
 }
 
 /* Types */
@@ -806,44 +801,6 @@ export type TaskFailure = {
 
 /**  任务当前正在执行的步骤。与 `DownloadTaskState`（生命周期）互补，不互相替代。 */
 export type TaskStage = 'queued' | 'fetchMeta' | 'downloading' | 'verifying' | 'archiving' | 'done'
-
-export type UpdateDownloadedComicsEvent =
-  | {
-      event: 'GetComicStart'
-      data: {
-        total: number
-      }
-    }
-  | {
-      event: 'GetComicProgress'
-      data: {
-        current: number
-        total: number
-      }
-    }
-  | {
-      event: 'CreateDownloadTasksStart'
-      data: {
-        comicId: number
-        comicTitle: string
-        current: number
-        total: number
-      }
-    }
-  | {
-      event: 'CreateDownloadTaskProgress'
-      data: {
-        comicId: number
-        current: number
-      }
-    }
-  | {
-      event: 'CreateDownloadTasksEnd'
-      data: {
-        comicId: number
-      }
-    }
-  | { event: 'GetComicEnd' }
 
 export type ValidatedDownloadDir = {
   canonicalPath: string

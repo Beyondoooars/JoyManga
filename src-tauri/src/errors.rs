@@ -116,26 +116,14 @@ pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
             return CommandErrorKind::Cancelled;
         }
         if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
-            if err.is_timeout() {
-                return CommandErrorKind::Timeout;
-            }
-            if err.is_connect() || err.is_request() {
-                return CommandErrorKind::Network;
-            }
-            if let Some(status) = err.status() {
-                return kind_for_status(status);
+            if let Some(kind) = kind_for_reqwest_error(err) {
+                return kind;
             }
         }
         if let Some(err) = cause.downcast_ref::<reqwest_middleware::Error>() {
             if let Some(err) = reqwest_error_in_middleware(err) {
-                if err.is_timeout() {
-                    return CommandErrorKind::Timeout;
-                }
-                if err.is_connect() || err.is_request() {
-                    return CommandErrorKind::Network;
-                }
-                if let Some(status) = err.status() {
-                    return kind_for_status(status);
+                if let Some(kind) = kind_for_reqwest_error(err) {
+                    return kind;
                 }
             }
         }
@@ -171,6 +159,16 @@ pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
         return CommandErrorKind::NotFound;
     }
     CommandErrorKind::Unknown
+}
+
+fn kind_for_reqwest_error(err: &reqwest::Error) -> Option<CommandErrorKind> {
+    if err.is_timeout() {
+        return Some(CommandErrorKind::Timeout);
+    }
+    if err.is_connect() || err.is_request() {
+        return Some(CommandErrorKind::Network);
+    }
+    err.status().map(kind_for_status)
 }
 
 fn kind_for_status(status: reqwest::StatusCode) -> CommandErrorKind {

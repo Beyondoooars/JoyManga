@@ -10,7 +10,7 @@ import type { CurrentTabName } from './types.ts'
 import { getErrorMessage } from './utils/errors.ts'
 import { runAutoLogin } from './utils/autoLogin.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
-import { useIsMobile } from './composables/useIsMobile.ts'
+import { isAndroid } from './composables/useIsMobile.ts'
 import { useAppUpdate } from './composables/useAppUpdate.ts'
 import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered, watchNetworkVpn } from './utils/androidStorage.ts'
 import { onOpenExternalComic } from './libraryApi.ts'
@@ -23,9 +23,7 @@ const ChapterPane = defineAsyncComponent(() => import('./panes/ChapterPane.vue')
 const pageComponents: Record<CurrentTabName, Component> = {
   search: defineAsyncComponent(() => import('./panes/SearchPane.vue')),
   favorite: defineAsyncComponent(() => import('./panes/FavoritePane.vue')),
-  weekly: defineAsyncComponent(() => import('./panes/WeeklyPane.vue')),
   downloaded: defineAsyncComponent(() => import('./panes/DownloadedPane/DownloadedPane.vue')),
-  chapter: defineAsyncComponent(() => import('./panes/ChapterPane.vue')),
   account: defineAsyncComponent(() => import('./panes/AccountPane.vue')),
   settings: defineAsyncComponent(() => import('./panes/SettingsPane.vue')),
 }
@@ -33,7 +31,6 @@ const pageComponents: Record<CurrentTabName, Component> = {
 const store = useStore()
 const message = useMessage()
 const notification = useNotification()
-const { isAndroid } = useIsMobile()
 const { checkForUpdates } = useAppUpdate()
 
 /** 底部导航的四个一级页面；其余（详情、设置）是压栈的二级页面 */
@@ -66,10 +63,6 @@ function navigateToTab(tab: CurrentTabName) {
   if (tab === 'account') {
     // 走 openAccount：记录来处以便返回，并按最新配置重置登录表单
     store.openAccount()
-    return
-  }
-  if (tab === 'settings') {
-    store.openSettings()
     return
   }
   store.closeComicDetail()

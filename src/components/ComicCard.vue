@@ -23,7 +23,6 @@ const props = defineProps<{
   comicFavorite?: boolean
   favoriteEpoch?: number
   comicDownloaded: boolean
-  comicDownloadDir: string
 }>()
 
 async function pickComic() {

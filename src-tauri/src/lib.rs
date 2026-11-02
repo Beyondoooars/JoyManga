@@ -1,7 +1,6 @@
 use anyhow::Context;
 use events::{
     DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent, ExportCbzEvent, LogEvent,
-    UpdateDownloadedComicsEvent,
 };
 use parking_lot::RwLock;
 use tauri::{Manager, WebviewWindowBuilder, Wry};
@@ -67,7 +66,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             set_favorite_comic,
             clear_logs,
             clear_cache,
-            clear_all_downloads,
             reset_app_state,
             backup_app_data,
             restore_app_data,
@@ -89,7 +87,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             cancel_download_task,
             download_comic,
             download_all_favorites,
-            update_downloaded_comics,
             show_path_in_file_manager,
             sync_favorite_folder,
             get_downloaded_comics,
@@ -116,7 +113,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             DownloadSpeedEvent,
             DownloadTaskEvent,
             DownloadAllFavoritesEvent,
-            UpdateDownloadedComicsEvent,
             ExportCbzEvent,
             LogEvent,
             crate::events::ConfigChangedEvent,

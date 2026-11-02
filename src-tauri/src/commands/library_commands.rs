@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::errors::{CommandError, CommandResult};
 use crate::export;
-use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
+use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt, PathIsCbz};
 use crate::types::{Comic, ComicInFavorite, ComicInSearch, ComicInWeekly};
 use crate::utils;
 
@@ -80,8 +80,9 @@ pub(crate) fn downloaded_library(app: &AppHandle, include_removed: bool) -> Libr
             }
         }
         cache.set(map);
-        cache.set_comics(&download_dir, &visible);
-        cache.set_scan(&download_dir, visible.len(), scan.skipped.clone());
+        let visible_count = visible.len();
+        cache.set_comics(&download_dir, visible);
+        cache.set_scan(&download_dir, visible_count, scan.skipped.clone());
     }
     if !include_removed {
         scan.comics.retain(|comic| !removed.contains(&comic.id));
@@ -95,13 +96,7 @@ pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> LibraryScan {
     if let Ok(entries) = std::fs::read_dir(download_dir) {
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_lowercase)
-                    == Some("cbz".to_string())
-            {
+            if path.is_file() && path.is_cbz() {
                 let modify_time = path
                     .metadata()
                     .and_then(|m| m.modified())
