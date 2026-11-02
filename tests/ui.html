@@ -4,11 +4,34 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- https: 与 http://jmimg.localhost 仅为让封面/书页请求进入 tests/mock-sw.js 由本地生成，不会真正联网 -->
-    <meta http-equiv="Content-Security-Policy" content="img-src 'self' data: blob: https: http://jmimg.localhost; connect-src 'self' ws:;" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="img-src 'self' data: blob: https: http://jmimg.localhost; connect-src 'self' ws:;" />
     <title>下载器界面测试（模拟数据）</title>
   </head>
   <body>
     <div id="app"></div>
+    <script>
+      // 在 Vue/Tauri 模块执行前安装测试桩，不继承或修改真实 WebView IPC。
+      const callbacks = new Map()
+      window.__TAURI_INTERNALS__ = {
+        invoke: (command, args) => window.__uiFixtureInvoke(command, args),
+        metadata: {
+          currentWindow: { label: 'main' },
+          currentWebview: { windowLabel: 'main', label: 'main' },
+        },
+        transformCallback: (callback, once = false) => {
+          const id = window.crypto.getRandomValues(new Uint32Array(1))[0]
+          window[`_${id}`] = (data) => {
+            if (once) delete window[`_${id}`]
+            return callback?.(data)
+          }
+          callbacks.set(id, callback)
+          return id
+        },
+      }
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {}
+    </script>
     <script type="module" src="/tests/ui.mjs"></script>
   </body>
 </html>

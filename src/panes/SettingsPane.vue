@@ -1,10 +1,30 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, toRaw, watch } from 'vue'
-import { PhArrowClockwise, PhBookOpenText, PhCaretRight, PhDatabase, PhFolderSimple, PhInfo, PhWifiHigh } from '@phosphor-icons/vue'
+import {
+  PhArrowClockwise,
+  PhBookOpenText,
+  PhCaretRight,
+  PhDatabase,
+  PhFolderSimple,
+  PhInfo,
+  PhWifiHigh,
+} from '@phosphor-icons/vue'
 import PageHeader from '../components/PageHeader.vue'
 import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
-import { commands, type CbzMode, type ImageDomainPreset, type LogLevel, type NetworkCheckReport, type NetworkProbe, type ProxyMode, type ReadingDirection, type ReadingMode, type Value } from '../bindings.ts'
+import {
+  commands,
+  type CbzMode,
+  type ImageDomainPreset,
+  type ImageSpeedReport,
+  type LogLevel,
+  type NetworkCheckReport,
+  type NetworkProbe,
+  type ProxyMode,
+  type ReadingDirection,
+  type ReadingMode,
+  type Value,
+} from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { isAndroid as isAndroidDevice } from '../composables/useIsMobile.ts'
@@ -44,6 +64,9 @@ const logsDirSize = ref<number | undefined>(undefined)
 const logsSizeLoading = ref(false)
 const imagePresets = ref<ImageDomainPreset[]>([])
 const checking = ref(false)
+const speedTesting = ref(false)
+const speedReport = ref<ImageSpeedReport>()
+const speedError = ref('')
 const checkResult = ref<NetworkCheckReport>()
 const networkError = ref('')
 const dataBusy = ref('')
@@ -89,6 +112,7 @@ onBeforeUnmount(() => {
 onDeactivated(() => {
   generation++
   checking.value = false
+  speedTesting.value = false
 })
 onActivated(() => {
   if (disposed) return
@@ -100,7 +124,8 @@ onMounted(() => {
     if (!disposed) appVersion.value = value
   })
 })
-void commands.getImageDomainPresets()
+void commands
+  .getImageDomainPresets()
   .then((value) => {
     if (!disposed) imagePresets.value = value
   })
@@ -215,26 +240,68 @@ const chapterConcurrency = computed({
   },
 })
 const imgConcurrency = computed({
-  get: () => store.config?.imgConcurrency ?? 4,
+  get: () => store.config?.imgConcurrency ?? 8,
   set: (value: number | null) => {
     if (!store.config) return
-    const next = value === null || !Number.isFinite(value) ? 4 : Math.round(value)
+    const next = value === null || !Number.isFinite(value) ? 8 : Math.round(value)
     store.config.imgConcurrency = Math.min(50, Math.max(1, next))
   },
 })
 const networkKey = computed(() => {
   const config = store.config
   return config
-    ? JSON.stringify([config.apiDomainMode, config.customApiDomain, config.imageDomainMode, config.customImageDomain, config.proxyMode, config.proxyHost, config.proxyPort])
+    ? JSON.stringify([
+        config.apiDomainMode,
+        config.customApiDomain,
+        config.imageDomainMode,
+        config.customImageDomain,
+        config.proxyMode,
+        config.proxyHost,
+        config.proxyPort,
+      ])
     : ''
 })
 watch(networkKey, () => {
   generation++
   checking.value = false
+  speedReport.value = undefined
+  speedError.value = ''
   checkResult.value = undefined
   networkError.value = ''
   void refreshDomainStatus()
 })
+
+async function testImageSpeed() {
+  if (!store.config || speedTesting.value) return
+  const current = ++generation
+  speedTesting.value = true
+  speedReport.value = undefined
+  speedError.value = ''
+  try {
+    const sampleId = store.pickedComic?.id ?? store.searchResult?.content[0]?.id ?? store.getWeeklyResult?.list[0]?.id
+    if (!sampleId || sampleId <= 0) throw new Error('先打开一本在线漫画或加载每周必看，再测速')
+    const result = await commands.testImageDownloadSpeed(structuredClone(toRaw(store.config)), sampleId)
+    if (disposed || current !== generation) return
+    if (result.status === 'error') speedError.value = result.error.err_message
+    else speedReport.value = result.data
+  } catch (error) {
+    if (current === generation) speedError.value = getErrorMessage(error)
+  } finally {
+    if (current === generation) speedTesting.value = false
+  }
+}
+
+async function applyFastestImageDomain() {
+  const best = speedReport.value?.best
+  if (!best || !store.config) return
+  store.config.imageDomainMode = best
+  await store.saveConfigNow()
+  message.success('已使用本次测速最快的图片线路；VPN 切换后可重新测速')
+}
+
+function formatSpeed(bytesPerSecond: number) {
+  return `${(bytesPerSecond / 1024 / 1024).toFixed(2)} MB/s`
+}
 
 async function checkNetwork() {
   if (!store.config || checking.value) return
@@ -244,7 +311,10 @@ async function checkNetwork() {
   networkError.value = ''
   try {
     const sampleId = store.pickedComic?.id ?? store.searchResult?.content[0]?.id ?? store.getWeeklyResult?.list[0]?.id
-    const result = await commands.checkNetwork(structuredClone(toRaw(store.config)), sampleId && sampleId > 0 ? sampleId : null)
+    const result = await commands.checkNetwork(
+      structuredClone(toRaw(store.config)),
+      sampleId && sampleId > 0 ? sampleId : null,
+    )
     if (disposed || current !== generation) return
     if (result.status === 'error') networkError.value = result.error.err_message
     else checkResult.value = result.data
@@ -294,24 +364,26 @@ function restore() {
     // 确认后先选文件：Android 的导入文件会在选择回调返回后清理，
     // 若把确认框放进回调里等用户点击，恢复时文件可能已经被删掉。
     onPositiveClick: () => {
-      void withAndroidSelection('backup', (paths) => dataAction('restore', async () => {
-        await store.saveConfigNow()
-        const result = await store.runConfigMaintenance(() => commands.restoreAppData(paths[0]))
-        if (result.status === 'error') throw new Error(result.error.err_message)
-        const outcome = result.data
-        store.applyConfig(outcome.config, true)
-        store.applySession(await commands.getSession())
-        store.progresses.clear()
-        let readingNotice = ''
-        if (outcome.readingState !== null) {
-          const imported = store.importReadingStateSnapshot(outcome.readingState)
-          if (imported === 'invalid') readingNotice = '；阅读记录格式无效，已跳过'
-          else if (imported === 'write-failed') readingNotice = '；阅读记录未能保存到本地'
-        }
-        await store.reloadTasks()
-        await store.refreshDownloadedComics()
-        message.success(readingNotice ? `备份已恢复${readingNotice}` : '备份已恢复')
-      })).catch((error) => {
+      void withAndroidSelection('backup', (paths) =>
+        dataAction('restore', async () => {
+          await store.saveConfigNow()
+          const result = await store.runConfigMaintenance(() => commands.restoreAppData(paths[0]))
+          if (result.status === 'error') throw new Error(result.error.err_message)
+          const outcome = result.data
+          store.applyConfig(outcome.config, true)
+          store.applySession(await commands.getSession())
+          store.progresses.clear()
+          let readingNotice = ''
+          if (outcome.readingState !== null) {
+            const imported = store.importReadingStateSnapshot(outcome.readingState)
+            if (imported === 'invalid') readingNotice = '；阅读记录格式无效，已跳过'
+            else if (imported === 'write-failed') readingNotice = '；阅读记录未能保存到本地'
+          }
+          await store.reloadTasks()
+          await store.refreshDownloadedComics()
+          message.success(readingNotice ? `备份已恢复${readingNotice}` : '备份已恢复')
+        }),
+      ).catch((error) => {
         dataError.value = getErrorMessage(error)
       })
     },
@@ -447,7 +519,10 @@ const readingSummary = computed(() => {
 
 <template>
   <div v-if="store.config" class="settings-page">
-    <PageHeader :title="panelTitle" :subtitle="openPanel === null ? '调整下载、网络与阅读习惯' : undefined" @back="goBack" />
+    <PageHeader
+      :title="panelTitle"
+      :subtitle="openPanel === null ? '调整下载、网络与阅读习惯' : undefined"
+      @back="goBack" />
 
     <div class="settings-scroll">
       <!-- 一级：分类列表 -->
@@ -455,17 +530,26 @@ const readingSummary = computed(() => {
         <div class="group">
           <button type="button" class="nav-row" @click="openPanel = 'storage'">
             <span class="row-icon is-brand"><PhFolderSimple :size="19" weight="duotone" /></span>
-            <div class="nav-copy"><strong>下载与保存</strong><span>{{ store.config.downloadDir }}</span></div>
+            <div class="nav-copy">
+              <strong>下载与保存</strong>
+              <span>{{ store.config.downloadDir }}</span>
+            </div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'network'">
             <span class="row-icon is-accent"><PhWifiHigh :size="19" weight="duotone" /></span>
-            <div class="nav-copy"><strong>网络</strong><span>{{ domainStatus ? domainStatus.message : '正在读取线路状态…' }}</span></div>
+            <div class="nav-copy">
+              <strong>网络</strong>
+              <span>{{ domainStatus ? domainStatus.message : '正在读取线路状态…' }}</span>
+            </div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'reading'">
             <span class="row-icon is-brand"><PhBookOpenText :size="19" weight="duotone" /></span>
-            <div class="nav-copy"><strong>阅读</strong><span>{{ readingSummary }}</span></div>
+            <div class="nav-copy">
+              <strong>阅读</strong>
+              <span>{{ readingSummary }}</span>
+            </div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
         </div>
@@ -473,12 +557,18 @@ const readingSummary = computed(() => {
         <div class="group">
           <button type="button" class="nav-row" @click="openPanel = 'data'">
             <span class="row-icon is-neutral"><PhDatabase :size="19" weight="duotone" /></span>
-            <div class="nav-copy"><strong>数据</strong><span>备份、缓存与诊断包</span></div>
+            <div class="nav-copy">
+              <strong>数据</strong>
+              <span>备份、缓存与诊断包</span>
+            </div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
           <button type="button" class="nav-row" @click="openPanel = 'about'">
             <span class="row-icon is-neutral"><PhInfo :size="19" weight="duotone" /></span>
-            <div class="nav-copy"><strong>关于</strong><span>{{ appVersion ? 'v' + appVersion : 'JoyManga' }}</span></div>
+            <div class="nav-copy">
+              <strong>关于</strong>
+              <span>{{ appVersion ? 'v' + appVersion : 'JoyManga' }}</span>
+            </div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
         </div>
@@ -499,13 +589,25 @@ const readingSummary = computed(() => {
           <p v-if="isAndroid" class="note">公共下载书库（Download/JoyManga）卸载后保留；应用专用书库会随卸载清理。</p>
           <div class="field">
             <label class="field-label">章节并发数</label>
-            <n-slider v-model:value="chapterConcurrency" :min="1" :max="10" :step="1" :marks="{ 1: '1', 3: '3', 10: '10' }" />
-            <span class="field-hint">同时下载几话。网速不稳定时调低更稳，默认 1。</span>
+            <n-slider
+              v-model:value="chapterConcurrency"
+              :min="1"
+              :max="10"
+              :step="1"
+              :marks="{ 1: '1', 3: '3', 10: '10' }" />
+            <span class="field-hint">同时下载几话。新配置默认 2；网络不稳定时调低更稳。</span>
           </div>
           <div class="field">
             <label class="field-label">单话图片并发数</label>
-            <n-slider v-model:value="imgConcurrency" :min="1" :max="50" :step="1" :marks="{ 1: '1', 10: '10', 50: '50' }" />
-            <span class="field-hint">同一话内同时下载几张图。网络易超时时调低，默认 4。</span>
+            <n-slider
+              v-model:value="imgConcurrency"
+              :min="1"
+              :max="50"
+              :step="1"
+              :marks="{ 1: '1', 10: '10', 50: '50' }" />
+            <span class="field-hint">
+              同一话内同时下载几张图。所有章节共用此总上限；新配置默认 8，网络易超时时调低。
+            </span>
           </div>
           <StorageLocationDialog v-model:show="showStoragePicker" @select="chooseDownloadDir" />
         </section>
@@ -518,20 +620,59 @@ const readingSummary = computed(() => {
             <span>域名自动更新</span>
             <span class="row-value">{{ domainStatus ? domainStatus.message : '正在读取…' }}</span>
           </div>
-          <button type="button" class="nav-row inner" :aria-expanded="manualNetwork" @click="manualNetwork = !manualNetwork">
-            <div class="nav-copy"><strong>手动设置线路</strong><span>加载异常时更换</span></div>
+          <button
+            type="button"
+            class="nav-row inner"
+            :aria-expanded="manualNetwork"
+            @click="manualNetwork = !manualNetwork">
+            <div class="nav-copy">
+              <strong>手动设置线路</strong>
+              <span>加载异常时更换</span>
+            </div>
             <PhCaretRight :size="16" class="chevron" :class="{ expanded: manualNetwork }" aria-hidden="true" />
           </button>
           <div v-if="manualNetwork" class="field-stack">
+            <div class="speed-test">
+              <div class="row-copy">
+                <strong>图片线路测速</strong>
+                <span>
+                  每条线路并发下载同一封面 {{ speedReport?.sampleRequests ?? 4 }} 次，比较实际吞吐。连接或断开 VPN
+                  后重新测速，不保证 VPN 一定提速。
+                </span>
+              </div>
+              <n-button secondary :loading="speedTesting" @click="testImageSpeed">测速全部图片线路</n-button>
+            </div>
+            <n-alert v-if="speedError" type="error" :show-icon="false">{{ speedError }}</n-alert>
+            <div v-if="speedReport" class="speed-results">
+              <p class="note">
+                {{ speedReport.vpnActive ? '当前已识别到系统 VPN' : '当前未识别到系统 VPN' }}；以下为本次实际结果。
+              </p>
+              <div v-for="result in speedReport.results" :key="result.mode" class="speed-result">
+                <span>{{ result.label }} · {{ result.domain }}</span>
+                <strong v-if="result.bytesPerSecond != null">
+                  {{ formatSpeed(result.bytesPerSecond) }} · {{ result.elapsedMs }} ms
+                </strong>
+                <span v-else class="speed-error">{{ result.error }}</span>
+              </div>
+              <n-button v-if="speedReport.best" type="primary" block @click="applyFastestImageDomain">
+                使用最快线路
+              </n-button>
+            </div>
             <div class="field">
               <label class="field-label">漫画信息</label>
               <n-select v-model:value="store.config.apiDomainMode" :options="apiOptions" />
-              <n-input v-if="store.config.apiDomainMode === 'Custom'" v-model:value="store.config.customApiDomain" placeholder="服务器域名，不含 https://" />
+              <n-input
+                v-if="store.config.apiDomainMode === 'Custom'"
+                v-model:value="store.config.customApiDomain"
+                placeholder="服务器域名，不含 https://" />
             </div>
             <div class="field">
               <label class="field-label">图片下载</label>
               <n-select v-model:value="store.config.imageDomainMode" :options="imageOptions" />
-              <n-input v-if="store.config.imageDomainMode === 'Custom'" v-model:value="store.config.customImageDomain" placeholder="图片服务器域名，不含 https://" />
+              <n-input
+                v-if="store.config.imageDomainMode === 'Custom'"
+                v-model:value="store.config.customImageDomain"
+                placeholder="图片服务器域名，不含 https://" />
             </div>
             <n-button secondary :loading="checking" @click="checkNetwork">
               <template #icon><PhArrowClockwise :size="16" aria-hidden="true" /></template>
@@ -539,8 +680,18 @@ const readingSummary = computed(() => {
             </n-button>
             <n-alert v-if="networkError" type="error" :show-icon="false">{{ networkError }}</n-alert>
             <div v-if="checkResult" class="probe-list" aria-live="polite">
-              <div v-for="probe in [checkResult.api, checkResult.image, checkResult.domain]" :key="probe.label" class="probe" :data-state="probe.state">
-                <div><strong>{{ probe.label }}</strong><span>{{ probe.state === 'Passed' ? '正常' : probe.state === 'Skipped' ? '未检查' : '连接异常' }}<template v-if="probe.elapsedMs !== null"> · {{ probe.elapsedMs }} ms</template></span></div>
+              <div
+                v-for="probe in [checkResult.api, checkResult.image, checkResult.domain]"
+                :key="probe.label"
+                class="probe"
+                :data-state="probe.state">
+                <div>
+                  <strong>{{ probe.label }}</strong>
+                  <span>
+                    {{ probe.state === 'Passed' ? '正常' : probe.state === 'Skipped' ? '未检查' : '连接异常' }}
+                    <template v-if="probe.elapsedMs !== null">· {{ probe.elapsedMs }} ms</template>
+                  </span>
+                </div>
                 <p>{{ probe.message }}</p>
               </div>
             </div>
@@ -548,17 +699,37 @@ const readingSummary = computed(() => {
         </section>
 
         <section class="group">
-          <button type="button" class="nav-row inner" :aria-expanded="advancedNetwork" @click="advancedNetwork = !advancedNetwork">
-            <div class="nav-copy"><strong>代理</strong><span>{{ proxyMode === 'Custom' ? '手动 HTTP 代理' : proxyMode === 'NoProxy' ? '直接连接' : '跟随系统' }}</span></div>
+          <button
+            type="button"
+            class="nav-row inner"
+            :aria-expanded="advancedNetwork"
+            @click="advancedNetwork = !advancedNetwork">
+            <div class="nav-copy">
+              <strong>代理</strong>
+              <span>
+                {{ proxyMode === 'Custom' ? '手动 HTTP 代理' : proxyMode === 'NoProxy' ? '直接连接' : '跟随系统' }}
+              </span>
+            </div>
             <PhCaretRight :size="16" class="chevron" :class="{ expanded: advancedNetwork }" aria-hidden="true" />
           </button>
           <div v-if="advancedNetwork" class="field-stack">
             <n-select v-model:value="proxyMode" :options="proxyOptions" />
             <div v-if="proxyMode === 'Custom'" class="proxy-grid">
-              <div class="field"><label class="field-label">主机</label><n-input v-model:value="proxyHost" placeholder="127.0.0.1" /></div>
-              <div class="field"><label class="field-label">端口</label><n-input-number v-model:value="proxyPort" :min="1" :max="65535" :show-button="false" /></div>
+              <div class="field">
+                <label class="field-label">主机</label>
+                <n-input v-model:value="proxyHost" placeholder="127.0.0.1" />
+              </div>
+              <div class="field">
+                <label class="field-label">端口</label>
+                <n-input-number v-model:value="proxyPort" :min="1" :max="65535" :show-button="false" />
+              </div>
             </div>
-            <p class="note">VPN 由系统接管流量。检测到系统 VPN 时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN 后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断包 会记录当时是否识别到 VPN、用的是哪条线路。</p>
+            <p class="note">
+              VPN 由系统接管流量。检测到系统 VPN
+              时，应用会暂时忽略这里的手动代理直连，避免继续连接本机代理端口导致无法联网。开 VPN
+              后仍连不上时，先用「跟随系统」或「直接连接」判断是不是线路本身的问题；设置 → 数据 → 导出诊断包
+              会记录当时是否识别到 VPN、用的是哪条线路。
+            </p>
           </div>
         </section>
       </template>
@@ -580,11 +751,17 @@ const readingSummary = computed(() => {
             <n-switch v-model:value="keepScreenOn" aria-label="阅读时屏幕常亮" />
           </div>
           <div v-if="isAndroid" class="row">
-            <div class="row-copy"><strong>音量键翻页</strong><span>音量减为下一页</span></div>
+            <div class="row-copy">
+              <strong>音量键翻页</strong>
+              <span>音量减为下一页</span>
+            </div>
             <n-switch v-model:value="volumeKeyPaging" aria-label="音量键翻页" />
           </div>
           <div v-if="isAndroid" class="row">
-            <div class="row-copy"><strong>仅 Wi-Fi 下载</strong><span>移动数据下无法新建下载</span></div>
+            <div class="row-copy">
+              <strong>仅 Wi-Fi 下载</strong>
+              <span>移动数据下无法新建下载</span>
+            </div>
             <n-switch v-model:value="downloadOnlyWifi" aria-label="仅 Wi-Fi 下载" />
           </div>
         </section>
@@ -594,30 +771,49 @@ const readingSummary = computed(() => {
       <template v-else-if="openPanel === 'data'">
         <section class="group">
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="backup">
-            <div class="nav-copy"><strong>导出备份</strong><span>设置、任务、阅读进度与书签，不含漫画文件和账号密码</span></div>
+            <div class="nav-copy">
+              <strong>导出备份</strong>
+              <span>设置、任务、阅读进度与书签，不含漫画文件和账号密码</span>
+            </div>
             <PhCaretRight v-if="dataBusy !== 'backup'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="restore">
-            <div class="nav-copy"><strong>恢复备份</strong><span>从备份还原设置、任务、阅读进度与归档设置</span></div>
+            <div class="nav-copy">
+              <strong>恢复备份</strong>
+              <span>从备份还原设置、任务、阅读进度与归档设置</span>
+            </div>
             <PhCaretRight v-if="dataBusy !== 'restore'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="clearCache">
-            <div class="nav-copy"><strong>清理缓存</strong><span>漫画与阅读记录保留</span></div>
+            <div class="nav-copy">
+              <strong>清理缓存</strong>
+              <span>漫画与阅读记录保留</span>
+            </div>
             <PhCaretRight v-if="dataBusy !== 'cache'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
           <button type="button" class="nav-row" :disabled="!!dataBusy" @click="exportLogs">
-            <div class="nav-copy"><strong>导出诊断包</strong><span>日志、任务与脱敏配置，保存到书库 logs</span></div>
+            <div class="nav-copy">
+              <strong>导出诊断包</strong>
+              <span>日志、任务与脱敏配置，保存到书库 logs</span>
+            </div>
             <PhCaretRight v-if="dataBusy !== 'logs'" :size="16" aria-hidden="true" />
             <n-spin v-else :size="16" />
           </button>
         </section>
 
         <section class="group">
-          <button type="button" class="nav-row inner" :aria-expanded="advancedData" @click="advancedData = !advancedData">
-            <div class="nav-copy"><strong>更多维护</strong><span>日志等级、清理日志、重置设置</span></div>
+          <button
+            type="button"
+            class="nav-row inner"
+            :aria-expanded="advancedData"
+            @click="advancedData = !advancedData">
+            <div class="nav-copy">
+              <strong>更多维护</strong>
+              <span>日志等级、清理日志、重置设置</span>
+            </div>
             <PhCaretRight :size="16" class="chevron" :class="{ expanded: advancedData }" aria-hidden="true" />
           </button>
           <div v-if="advancedData" class="field-stack">
@@ -627,7 +823,9 @@ const readingSummary = computed(() => {
             </div>
             <div class="row">
               <span class="row-value">{{ logsSizeText }}</span>
-              <n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs-clear'" @click="clearLogsAction">清理日志</n-button>
+              <n-button :disabled="!!dataBusy" :loading="dataBusy === 'logs-clear'" @click="clearLogsAction">
+                清理日志
+              </n-button>
             </div>
             <p class="note">滚动日志按天保存，保留 7 天、上限 20MB；「清理日志」同时清除已导出的诊断包。</p>
             <n-button type="error" secondary :disabled="!!dataBusy" @click="resetSettings">重置设置</n-button>
@@ -642,12 +840,23 @@ const readingSummary = computed(() => {
           <div class="brand-row">
             <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
               <rect width="48" height="48" rx="12" fill="#241C2B" />
-              <g transform="translate(24 24) scale(0.78) translate(-24 -24)" stroke="#FFFFFF" stroke-width="1.6" stroke-linejoin="round">
-                <path d="M3.5 5.5H15C20.5228 5.5 25 9.97715 25 15.5V40.5C25 36.0817 21.4183 32.5 17 32.5H3.5V5.5Z" fill="#FB7299" />
-                <path d="M44.5 5.5H33C27.4772 5.5 23 9.97715 23 15.5V40.5C23 36.0817 26.5817 32.5 31 32.5H44.5V5.5Z" fill="#00AEEC" />
+              <g
+                transform="translate(24 24) scale(0.78) translate(-24 -24)"
+                stroke="#FFFFFF"
+                stroke-width="1.6"
+                stroke-linejoin="round">
+                <path
+                  d="M3.5 5.5H15C20.5228 5.5 25 9.97715 25 15.5V40.5C25 36.0817 21.4183 32.5 17 32.5H3.5V5.5Z"
+                  fill="#FB7299" />
+                <path
+                  d="M44.5 5.5H33C27.4772 5.5 23 9.97715 23 15.5V40.5C23 36.0817 26.5817 32.5 31 32.5H44.5V5.5Z"
+                  fill="#00AEEC" />
               </g>
             </svg>
-            <div class="brand-copy"><strong>JoyManga</strong><span>下载 · 归档 · 阅读</span></div>
+            <div class="brand-copy">
+              <strong>JoyManga</strong>
+              <span>下载 · 归档 · 阅读</span>
+            </div>
           </div>
           <div class="row">
             <span>当前版本</span>
@@ -659,12 +868,19 @@ const readingSummary = computed(() => {
               <span v-if="updateHasUpdate" class="update-new">发现新版 v{{ updateLatestVersion }}</span>
               <span v-else-if="updateError" class="update-error">{{ updateError }}</span>
               <span v-else-if="!updateChecking && updateLatestVersion" class="update-ok">已是最新</span>
-              <n-button v-if="updateHasUpdate" type="primary" size="small" @click="showUpdateDialog = true">查看新版</n-button>
-              <n-button size="small" secondary :loading="updateChecking" @click="checkForUpdates(false)">检查更新</n-button>
+              <n-button v-if="updateHasUpdate" type="primary" size="small" @click="showUpdateDialog = true">
+                查看新版
+              </n-button>
+              <n-button size="small" secondary :loading="updateChecking" @click="checkForUpdates(false)">
+                检查更新
+              </n-button>
             </div>
           </div>
           <button type="button" class="nav-row inner" @click="showThirdPartyNotices = true">
-            <div class="nav-copy"><strong>开源许可</strong><span>第三方组件与许可证全文</span></div>
+            <div class="nav-copy">
+              <strong>开源许可</strong>
+              <span>第三方组件与许可证全文</span>
+            </div>
             <PhCaretRight :size="16" aria-hidden="true" />
           </button>
         </section>
@@ -826,6 +1042,37 @@ const readingSummary = computed(() => {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 120px;
   gap: 8px;
+}
+
+.speed-test,
+.speed-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.speed-result {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--jm-line);
+  font-size: var(--jm-fs-xs);
+}
+
+.speed-result > span:first-child,
+.speed-error {
+  overflow-wrap: anywhere;
+}
+
+.speed-result strong {
+  flex-shrink: 0;
+  color: var(--jm-brand);
+}
+
+.speed-error {
+  color: var(--jm-danger);
 }
 
 .proxy-grid .field {

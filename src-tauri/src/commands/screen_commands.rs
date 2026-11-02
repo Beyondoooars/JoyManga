@@ -26,7 +26,7 @@ pub fn set_network_metered(metered: bool) -> CommandResult<()> {
 pub fn set_network_vpn(app: tauri::AppHandle, active: bool) -> CommandResult<()> {
     if crate::network_state::set_vpn(active) {
         tracing::info!(active, "VPN 状态已变化，重建 HTTP 客户端");
-        app.get_jm_client().reload_client();
+        app.get_jm_client().reload_client_for_network_change(true);
     }
     Ok(())
 }

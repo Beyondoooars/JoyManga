@@ -181,7 +181,10 @@ impl DownloadImgTask {
             save_path.display()
         );
 
-        // 记录下载字节数
+        // 统计实际网络接收量；命中本地页面的任务保持为 0，便于对比下载吞吐。
+        self.download_task
+            .downloaded_bytes
+            .fetch_add(img_data_len, Ordering::Relaxed);
         self.download_manager
             .byte_per_sec
             .fetch_add(img_data_len, Ordering::Relaxed);

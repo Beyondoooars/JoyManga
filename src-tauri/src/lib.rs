@@ -58,6 +58,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             get_api_domain_presets,
             get_image_domain_presets,
             check_network,
+            test_image_download_speed,
             get_api_domain_status,
             initialize_android_storage,
             get_session,
