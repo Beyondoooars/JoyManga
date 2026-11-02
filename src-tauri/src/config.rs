@@ -24,6 +24,21 @@ const IMAGE_DOMAIN_6: &str = "cdn-msp3.jmapinodeudzn.net";
 
 const CONFIG_FILE_NAME: &str = "config.json";
 
+/// 判断候选路径是否为公共默认书库：以 `Download/JoyManga` 结尾且位于
+/// `/storage` 之下，兼容 SD 卡等不同存储卷的 `/storage/<volume>/Download/JoyManga` 布局。
+///
+/// 用 `Path` 组件比较而不是字符串后缀：`/storage/x/NotDownload/JoyManga` 不会被误判，
+/// 尾随分隔符（`…/JoyManga/`）也能正常匹配。
+///
+/// 只有 Android 的初始化流程会调用；桌面构建用 `test` 分支保留单元测试。
+#[cfg(any(test, target_os = "android"))]
+pub fn is_public_library_dir(candidate: &Path) -> bool {
+    let Ok(relative) = candidate.strip_prefix("/storage") else {
+        return false;
+    };
+    relative.ends_with(Path::new("Download").join("JoyManga")) && relative.components().count() >= 3
+}
+
 const LOGS_DIR_NAME: &str = "日志";
 
 #[derive(Debug)]
@@ -725,9 +740,9 @@ pub enum ImageDomainMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        deserialize_config_from_storage, deserialize_config_value, serialize_config_for_storage,
-        ApiDomainMode, Config, ConfigStorage, ImageDomainMode, API_DOMAIN_2, CONFIG_FILE_NAME,
-        IMAGE_DOMAIN_3,
+        deserialize_config_from_storage, deserialize_config_value, is_public_library_dir,
+        serialize_config_for_storage, ApiDomainMode, Config, ConfigStorage, ImageDomainMode,
+        API_DOMAIN_2, CONFIG_FILE_NAME, IMAGE_DOMAIN_3,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -737,6 +752,25 @@ mod tests {
             std::env::temp_dir().join(format!("joymanga-config-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn public_library_path_detection_uses_path_components() {
+        assert!(is_public_library_dir(Path::new(
+            "/storage/emulated/0/Download/JoyManga"
+        )));
+        assert!(is_public_library_dir(Path::new(
+            "/storage/1234-ABCD/Download/JoyManga/"
+        )));
+        assert!(!is_public_library_dir(Path::new(
+            "/storage/emulated/0/NotDownload/JoyManga"
+        )));
+        assert!(!is_public_library_dir(Path::new(
+            "/storage/Download/JoyManga"
+        )));
+        assert!(!is_public_library_dir(Path::new(
+            "/data/data/com.joymanga.app/files/library"
+        )));
     }
 
     #[test]
