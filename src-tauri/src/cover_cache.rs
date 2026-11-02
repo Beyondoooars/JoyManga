@@ -16,6 +16,10 @@ static CACHE_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 
 /// 缓存目录上限（个）。缩略图约 10~20 KB，500 张不到 10 MB。
 const MAX_ENTRIES: usize = 500;
+/// 每写这么多次才扫一遍目录做清理（同 page_size 的 sizes_cache），避免首次扫描书库时
+/// 每写一张缩略图就全目录扫描一次，退化为 O(N²)。
+const PRUNE_EVERY: u32 = 64;
+static WRITE_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn slot() -> &'static RwLock<Option<PathBuf>> {
     CACHE_DIR.get_or_init(|| RwLock::new(None))
@@ -84,7 +88,12 @@ pub fn cached_thumbnail(
     if std::fs::create_dir_all(&cache_dir).is_ok() {
         // 缩略图可随时重建，写失败不影响阅读，忽略错误即可
         let _ = crate::atomic_fs::write(&cache_path, &bytes);
-        prune(&cache_dir, MAX_ENTRIES);
+        if WRITE_COUNT
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .is_multiple_of(PRUNE_EVERY)
+        {
+            prune(&cache_dir, MAX_ENTRIES);
+        }
     }
     Some(bytes)
 }

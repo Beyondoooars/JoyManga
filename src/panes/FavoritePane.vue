@@ -254,8 +254,7 @@ function pickFolder(folderId: number) {
               :comic-author="comic.author"
               :comic-category="comic.category"
               :comic-category-sub="comic.categorySub"
-              :comic-downloaded="comic.isDownloaded"
-              :comic-download-dir="comic.comicDownloadDir" />
+              :comic-downloaded="comic.isDownloaded" />
           </div>
 
           <nav v-if="favoritePageCount > 1" class="pager" aria-label="收藏分页">

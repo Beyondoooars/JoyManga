@@ -24,26 +24,6 @@ const IMAGE_DOMAIN_6: &str = "cdn-msp3.jmapinodeudzn.net";
 
 const CONFIG_FILE_NAME: &str = "config.json";
 
-/// Android 公共下载目录下的默认书库：用户可在文件管理器直接查看，
-/// 卸载应用不会随之删除。需要「所有文件访问」权限（首次启动引导授予）。
-///
-/// 运行时的位置由 Android 桥（`Environment.DIRECTORY_DOWNLOADS`）给出，不依赖该常量；
-/// 这里只保留给测试校验 `is_public_library_dir` 的典型布局。
-#[cfg(test)]
-pub const ANDROID_PUBLIC_LIBRARY_DIR: &str = "/storage/emulated/0/Download/JoyManga";
-
-/// 判断候选路径是否为公共默认书库：以 `Download/JoyManga` 结尾且位于
-/// `/storage` 之下，兼容 SD 卡等不同存储卷的 `/storage/<volume>/Download/JoyManga` 布局。
-///
-/// 用 `Path` 组件比较而不是字符串后缀：`/storage/x/NotDownload/JoyManga` 不会被误判，
-/// 尾随分隔符（`…/JoyManga/`）也能正常匹配。`initialize_android_storage` 与
-/// `clear_all_downloads` 共用这一判定，避免两处接受范围不一致。
-pub fn is_public_library_dir(candidate: &Path) -> bool {
-    let Ok(relative) = candidate.strip_prefix("/storage") else {
-        return false;
-    };
-    relative.ends_with(Path::new("Download").join("JoyManga")) && relative.components().count() >= 3
-}
 const LOGS_DIR_NAME: &str = "日志";
 
 #[derive(Debug)]

@@ -76,10 +76,16 @@ jobs:
           echo "NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> $GITHUB_ENV
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: lts/*
+          cache: pnpm
 
       # 主分支与手动触发的构建自动递增版本号：无需本地执行 pnpm bump 再手动提交。
       # 里程碑合入 main 时，在提交信息末尾加一行 Release-Bump: minor（或 major）；
@@ -99,15 +105,15 @@ jobs:
           BUMP: ${{ github.event.inputs.version || steps.bump.outputs.bump || 'patch' }}
         run: node scripts/bump-version.mjs "$BUMP"
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          run_install: false
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: android-ndk-29
 
       - name: Install cargo-ndk
         # 固定版本，避免 CI 每次拿到不同的上游版本导致构建不可复现。
@@ -123,7 +129,6 @@ jobs:
           fi
 
       - name: Extract version info
-        id: version_info
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             # tag 构建以 tag 为准：手工补发的 tag 可能指向尚未更新版本号的提交
@@ -134,7 +139,6 @@ jobs:
             VERSION=$(jq -r '.version' src-tauri/tauri.conf.json)
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Configure release signing
         env:

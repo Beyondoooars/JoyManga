@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::Semaphore;
@@ -13,13 +13,12 @@ use tokio::time::sleep;
 
 use crate::archive_intents::ArchiveIntentStore;
 use crate::errors::{CommandError, CommandErrorKind, CommandResult};
-use crate::events::{DownloadAllFavoritesEvent, UpdateDownloadedComicsEvent};
+use crate::events::DownloadAllFavoritesEvent;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
 use crate::types::{CbzMode, ChapterInfo, Comic, FavoriteSort};
 use crate::utils;
 
 static DOWNLOAD_ALL_FAVORITES_RUNNING: AtomicBool = AtomicBool::new(false);
-static UPDATE_DOWNLOADED_COMICS_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// 「仅 Wi-Fi 下载」的统一入口检查。
 ///
@@ -415,98 +414,6 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
     let _ = DownloadAllFavoritesEvent::GetComicsEnd.emit(&app);
 
     format_batch_errors("收藏夹下载任务创建不完整", batch_errors)?;
-
-    Ok(())
-}
-
-#[allow(clippy::cast_possible_wrap)]
-#[tauri::command(async)]
-#[specta::specta]
-pub async fn update_downloaded_comics(app: AppHandle) -> CommandResult<()> {
-    ensure_download_allowed(&app, "更新本地库存失败")?;
-    let _single_flight = SingleFlightGuard::acquire(&UPDATE_DOWNLOADED_COMICS_RUNNING)
-        .ok_or_else(|| CommandError::from("更新本地库存失败", anyhow!("已有同类任务正在运行")))?;
-    let config = app.get_config();
-    let mut batch_errors = Vec::new();
-    let default_cbz_mode = config.read().default_cbz_mode;
-
-    let downloaded_comics: Vec<_> = super::library_commands::get_downloaded_comics(app.clone())
-        .into_iter()
-        .filter(|comic| comic.id > 0)
-        .collect();
-
-    let total = downloaded_comics.len() as i64;
-    let _ = UpdateDownloadedComicsEvent::GetComicStart { total }.emit(&app);
-
-    for (i, downloaded_comic) in downloaded_comics.into_iter().enumerate() {
-        let comic_title = &downloaded_comic.name;
-        let comic_id = downloaded_comic.id;
-        let current = (i + 1) as i64;
-        let _ = UpdateDownloadedComicsEvent::GetComicProgress { current, total }.emit(&app);
-
-        let comic = match utils::get_comic(app.clone(), comic_id)
-            .await
-            .context(format!("获取ID为`{comic_id}`的漫画失败"))
-        {
-            Ok(comic) => comic,
-            Err(err) => {
-                let err_title = format!("更新库存过程中，获取漫画`{comic_title}`失败，已跳过");
-                let err = err.context("服务端可能暂时限流，请稍后重试失败项目");
-                let string_chain = err.to_string_chain();
-                tracing::error!(err_title, message = string_chain);
-                batch_errors.push(format!("更新漫画`{comic_title}`失败"));
-                continue;
-            }
-        };
-
-        let has_downloaded_chapter = comic
-            .chapter_infos
-            .iter()
-            .any(|chapter_info| chapter_info.is_downloaded == Some(true));
-
-        if !has_downloaded_chapter {
-            continue;
-        }
-
-        app.state::<ArchiveIntentStore>()
-            .set(comic.id, default_cbz_mode);
-
-        dispatch_uncompleted_chapters(
-            &app,
-            &comic,
-            &mut batch_errors,
-            "更新库存时创建章节下载任务",
-            |total_chapters| {
-                let _ = UpdateDownloadedComicsEvent::CreateDownloadTasksStart {
-                    comic_id: comic.id,
-                    comic_title: comic.name.clone(),
-                    current: 0,
-                    total: total_chapters as i64,
-                }
-                .emit(&app);
-            },
-            |cur| {
-                let _ = UpdateDownloadedComicsEvent::CreateDownloadTaskProgress {
-                    comic_id: comic.id,
-                    current: cur as i64,
-                }
-                .emit(&app);
-            },
-            || {
-                let _ = UpdateDownloadedComicsEvent::CreateDownloadTasksEnd { comic_id: comic.id }
-                    .emit(&app);
-            },
-        )
-        .await;
-    }
-
-    let _ = UpdateDownloadedComicsEvent::GetComicEnd.emit(&app);
-
-    if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
-        cache.invalidate();
-    }
-
-    format_batch_errors("更新本地库存不完整", batch_errors)?;
 
     Ok(())
 }

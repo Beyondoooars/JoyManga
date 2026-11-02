@@ -46,12 +46,12 @@ let stopInstallWatch: (() => void) | undefined
 
 /** 只订阅进度事件，不重新触发下载（用于回到前台后补回丢失的进度） */
 function watchInstallProgress() {
+  stopInstallWatch?.()
   const onProgress = (event: Event) => {
     const detail = (event as CustomEvent<UpdateProgress>).detail
     if (detail?.state) handleInstallProgress(detail)
   }
   window.addEventListener('jm-update-progress', onProgress)
-  stopInstallWatch?.()
   stopInstallWatch = () => window.removeEventListener('jm-update-progress', onProgress)
 }
 
@@ -65,6 +65,7 @@ function resumeInstallWatch() {
 }
 
 function startInstallWatch(url: string, fileName: string) {
+  stopInstallWatch?.()
   stopInstallWatch = downloadAndInstallApk(url, fileName, handleInstallProgress)
 }
 
