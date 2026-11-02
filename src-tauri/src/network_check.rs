@@ -151,13 +151,18 @@ async fn download_speed_sample(client: reqwest::Client, url: String) -> anyhow::
         .send()
         .await?
         .error_for_status()?;
-    let mut bytes = 0usize;
+    let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
-        bytes = bytes.saturating_add(chunk.len());
-        anyhow::ensure!(bytes <= IMAGE_SPEED_MAX_BYTES, "测速图片超过4MB上限");
+        anyhow::ensure!(
+            bytes.len().saturating_add(chunk.len()) <= IMAGE_SPEED_MAX_BYTES,
+            "测速图片超过4MB上限"
+        );
+        bytes.extend_from_slice(&chunk);
     }
-    anyhow::ensure!(bytes > 0, "测速图片为空");
-    Ok(bytes as u64)
+    anyhow::ensure!(!bytes.is_empty(), "测速图片为空");
+    // HTTP 200 也可能是代理或 CDN 的 HTML 验证页，不能据此选出不可用线路。
+    crate::image_data::validate_image(&bytes)?;
+    Ok(bytes.len() as u64)
 }
 
 fn completed(
@@ -343,6 +348,40 @@ mod tests {
         assert_eq!(json["sampleRequests"], 4);
         assert_eq!(json["vpnActive"], false);
         assert!(json["results"][0]["bytesPerSecond"].is_null());
+    }
+
+    #[tokio::test]
+    async fn speed_sample_rejects_successful_html_responses() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = b"<html><body>Verification required</body></html>";
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+
+        let result = download_speed_sample(
+            crate::tls::client_builder().build().unwrap(),
+            format!("http://{address}/media/albums/1_3x4.jpg"),
+        )
+        .await;
+        server.await.unwrap();
+        assert!(result.is_err());
+        assert!(format!("{:#}", result.unwrap_err()).contains("无法识别图片内容"));
     }
 
     #[test]
