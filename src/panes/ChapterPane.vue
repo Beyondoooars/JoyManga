@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import FavoriteButton from '../components/FavoriteButton.vue'
-import { SelectionArea, SelectionEvent } from '@viselect/vue'
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 import { ChapterInfo, commands, DownloadTaskState, type CbzMode, type Config } from '../bindings.ts'
 import { useStore } from '../store.ts'
@@ -59,84 +58,33 @@ const dropdownX = ref<number>(0)
 const dropdownY = ref<number>(0)
 const showDropdown = ref<boolean>(false)
 const checkedIds = ref<number[]>([])
-const selectedIds = ref<Set<number>>(new Set())
-const selectionAreaRef = ref<InstanceType<typeof SelectionArea>>()
 const downloadingSelected = ref(false)
 const refreshing = ref(false)
 
-const dropdownOptions = computed(() => {
-  const options = [
-    {
-      label: '勾选',
-      key: 'check',
-      props: {
-        onClick: () => {
-          ;[...selectedIds.value]
-            .filter((id) => !checkedIds.value.includes(id))
-            .forEach((id) => checkedIds.value.push(id))
-          showDropdown.value = false
-        },
+const dropdownOptions = computed(() => [
+  {
+    label: '全选',
+    key: 'check all',
+    props: {
+      onClick: () => {
+        store.pickedComic?.chapterInfos
+          ?.filter((c) => c.isDownloaded !== true && !checkedIds.value.includes(c.chapterId))
+          .forEach((c) => checkedIds.value.push(c.chapterId))
+        showDropdown.value = false
       },
     },
-    {
-      label: '取消勾选',
-      key: 'uncheck',
-      props: {
-        onClick: () => {
-          checkedIds.value = checkedIds.value.filter((id) => !selectedIds.value.has(id))
-          showDropdown.value = false
-        },
+  },
+  {
+    label: '取消全选',
+    key: 'uncheck all',
+    props: {
+      onClick: () => {
+        checkedIds.value.length = 0
+        showDropdown.value = false
       },
     },
-    {
-      label: '全选',
-      key: 'check all',
-      props: {
-        onClick: () => {
-          store.pickedComic?.chapterInfos
-            ?.filter((c) => c.isDownloaded !== true && !checkedIds.value.includes(c.chapterId))
-            .forEach((c) => checkedIds.value.push(c.chapterId))
-          showDropdown.value = false
-        },
-      },
-    },
-    {
-      label: '取消全选',
-      key: 'uncheck all',
-      props: {
-        onClick: () => {
-          checkedIds.value.length = 0
-          showDropdown.value = false
-        },
-      },
-    },
-  ]
-
-  if (selectedIds.value.size === 1) {
-    const selectedId = Array.from(selectedIds.value)[0]
-    const chapter = store.pickedComic?.chapterInfos.find((c) => c.chapterId === selectedId)
-    if (chapter && chapter.isDownloaded) {
-      options.unshift({
-        label: `阅读「${chapter.chapterTitle}」`,
-        key: 'read-chapter',
-        props: {
-          onClick: () => {
-            if (store.pickedComic) {
-              if (store.isArchiving(store.pickedComic.id)) {
-                message.warning('正在整合 CBZ，完成后即可阅读')
-              } else {
-                store.openReader(store.pickedComic.id, chapter.chapterId, store.pickedComic.name)
-              }
-            }
-            showDropdown.value = false
-          },
-        },
-      })
-    }
-  }
-
-  return options
-})
+  },
+])
 
 const hasDownloadedChapter = computed(() => {
   return store.pickedComic?.chapterInfos.some((c) => c.isDownloaded) ?? false
@@ -194,15 +142,12 @@ const selectableChapterIds = computed(() =>
     .map((c) => c.chapterId),
 )
 const selectableChapterIdSet = computed(() => new Set(selectableChapterIds.value))
-const chapterById = computed(() => new Map(chapterInfos.value.map((c) => [c.chapterId, c])))
 
 watch(
   // 只比较漫画 ID：刷新详情会整体替换 pickedComic 对象，引用变化不应清空用户已勾选的章节
   () => store.pickedComic?.id,
   () => {
     checkedIds.value = []
-    selectedIds.value.clear()
-    selectionAreaRef.value?.selection?.clearSelection()
   },
 )
 
@@ -225,30 +170,6 @@ function toggleSelectAllUndownloaded() {
   } else {
     checkedIds.value = [...notDownloadedChapterIds]
   }
-}
-
-function extractIds(elements: Element[]): number[] {
-  return elements
-    .map((element) => element.getAttribute('data-key'))
-    .filter(Boolean)
-    .map(Number)
-    .filter((id) => chapterById.value.get(id)?.isDownloaded !== true)
-}
-
-function unselectAll({ event, selection }: SelectionEvent) {
-  if (!event?.ctrlKey && !event?.metaKey) {
-    selection.clearSelection()
-    selectedIds.value.clear()
-  }
-}
-
-function updateSelectedIds({
-  store: {
-    changed: { added, removed },
-  },
-}: SelectionEvent) {
-  extractIds(added).forEach((id) => selectedIds.value.add(id))
-  extractIds(removed).forEach((id) => selectedIds.value.delete(id))
 }
 
 async function onContextMenu(e: MouseEvent) {
@@ -511,13 +432,7 @@ function isDownloading(state: State) {
           </div>
         </header>
 
-        <SelectionArea
-          ref="selectionAreaRef"
-          class="selection-container custom-scrollbar"
-          :options="{ selectables: '', features: { deselectOnBlur: true } }"
-          @contextmenu="onContextMenu"
-          @move="updateSelectedIds"
-          @start="unselectAll">
+        <div class="selection-container custom-scrollbar" @contextmenu="onContextMenu">
           <n-checkbox-group v-model:value="checkedIds" class="chapter-checkbox-group">
             <n-virtual-list
               class="chapter-list"
@@ -526,12 +441,10 @@ function isDownloading(state: State) {
               key-field="chapterId">
               <template #default="{ item }">
                 <n-checkbox
-                  :data-key="item.chapterId"
-                  class="selectable chapter-item"
+                  class="chapter-item"
                   :value="item.chapterId"
                   :disabled="item.isDownloaded === true || isDownloading(item.state)"
                   :class="{
-                    selected: selectedIds.has(item.chapterId),
                     downloaded: item.isDownloaded,
                     downloading: !item.isDownloaded && isDownloading(item.state),
                   }"
@@ -544,7 +457,7 @@ function isDownloading(state: State) {
               </template>
             </n-virtual-list>
           </n-checkbox-group>
-        </SelectionArea>
+        </div>
       </section>
 
       <n-dropdown
@@ -941,11 +854,6 @@ function isDownloading(state: State) {
   background: var(--jm-sunken) !important;
 }
 
-.selection-container .selected {
-  border-color: rgba(251, 114, 153, 0.4) !important;
-  background-color: var(--jm-brand-soft) !important;
-}
-
 /* 已下载用蓝色（信息/内容），避免与「选中」的粉色混淆 */
 .selection-container .downloaded {
   background-color: var(--jm-accent-soft) !important;
@@ -1004,12 +912,6 @@ function isDownloading(state: State) {
 
 :deep(.n-checkbox-box-wrapper) {
   flex: 0 0 auto;
-}
-
-:global(.selection-area) {
-  background-color: rgba(251, 114, 153, 0.14) !important;
-  border: 1px solid var(--jm-brand) !important;
-  border-radius: 2px;
 }
 
 /* 整理方式弹窗 */

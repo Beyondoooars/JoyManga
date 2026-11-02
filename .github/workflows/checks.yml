@@ -5,6 +5,11 @@ name: checks
 # 本地对应命令是 `pnpm check`（见 package.json 与 .githooks/pre-push）。
 on:
   workflow_call:
+    inputs:
+      android-check:
+        description: 是否执行 Android target 的 cargo check
+        type: boolean
+        default: true
 
 # 检查只读代码，不需要写权限；调用方（Android Build）的写权限不会被它继承使用。
 permissions:
@@ -48,6 +53,7 @@ jobs:
   # 删掉了只有 Android 分支调用的函数，PR 检查全绿，main 的 Android Build 才报 E0425。
   # 这里用与打包相同的 NDK 和 target 做一次 cargo check，让此类错误在 PR 阶段暴露。
   rust-android:
+    if: ${{ inputs['android-check'] }}
     runs-on: ubuntu-latest
     defaults:
       run:

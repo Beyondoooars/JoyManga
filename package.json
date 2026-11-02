@@ -33,7 +33,6 @@
     "@phosphor-icons/vue": "^2.2.1",
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-opener": "^2.7.2",
-    "@viselect/vue": "^3.10.1",
     "@vue/devtools-api": "^8.2.1",
     "naive-ui": "^2.45.3",
     "pinia": "^4.1.0",
