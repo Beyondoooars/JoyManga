@@ -25,6 +25,8 @@ jobs:
   # 避免 v0.3.5 那样 ci 红着仍然发布了 Release。
   verify:
     uses: ./.github/workflows/checks.yml
+    with:
+      android-check: false
 
   build-android:
     needs: verify

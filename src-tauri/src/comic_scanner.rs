@@ -387,17 +387,8 @@ pub fn from_cbz(cbz_path: &Path) -> anyhow::Result<Comic> {
 
 pub fn save_comic_metadata(comic: &Comic) -> anyhow::Result<()> {
     let mut clean_comic = comic.clone();
-    // 将漫画的is_downloaded和comic_download_dir字段设置为None
-    // 这样能使这些字段在序列化时被忽略
-    clean_comic.is_downloaded = None;
-    clean_comic.comic_download_dir = None;
-    clean_comic.local_cover_data = None;
-    for chapter in &mut clean_comic.chapter_infos {
-        // 将章节的is_downloaded和chapter_download_dir字段设置为None
-        // 这样能使这些字段在序列化时被忽略
-        chapter.is_downloaded = None;
-        chapter.chapter_download_dir = None;
-    }
+    // 元数据只保留漫画状态，不携带当前机器上的下载路径与封面缓存。
+    clean_comic.clear_local_download_state();
 
     let comic_download_dir = comic
         .comic_download_dir

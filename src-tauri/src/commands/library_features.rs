@@ -6,8 +6,9 @@ use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Manager};
 
+use crate::comic_scanner::is_page_image;
 use crate::errors::{CommandError, CommandResult};
-use crate::extensions::{AppHandleExt, PathIsImg};
+use crate::extensions::{AppHandleExt, PathIsCbz, PathIsImg};
 use crate::library_catalog::{catalog_path, LibraryCatalog, CATALOG_LOCK};
 use crate::types::{ChapterInfo, Comic};
 use crate::utils;
@@ -77,7 +78,7 @@ fn import_batch_with_mode(
             Ok(files) => {
                 for file in files {
                     let result = (|| -> anyhow::Result<bool> {
-                        ensure!(is_cbz(&file), "请选择 CBZ 文件");
+                        ensure!(file.is_cbz(), "请选择 CBZ 文件");
                         validate_archive_structure(&file)?;
                         let canonical = std::fs::canonicalize(&file)?;
                         if let Some(comic) = known.iter().find(|comic| {
@@ -126,7 +127,7 @@ fn find_cbz_files(source: &Path) -> anyhow::Result<Vec<PathBuf>> {
         .filter_entry(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
     {
         let entry = entry.context("读取导入文件夹失败")?;
-        if entry.file_type().is_file() && is_cbz(entry.path()) {
+        if entry.file_type().is_file() && entry.path().is_cbz() {
             ensure!(files.len() < MAX_PAGES, "单次最多导入 10000 个 CBZ 文件");
             files.push(entry.into_path());
         }
@@ -292,11 +293,6 @@ fn sorted_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn is_cbz(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cbz"))
-}
-
 fn source_id(source: &Path) -> anyhow::Result<i64> {
     use std::io::Read;
     let metadata = std::fs::metadata(source)?;
@@ -325,7 +321,7 @@ fn source_id(source: &Path) -> anyhow::Result<i64> {
         {
             let entry = entry?;
             ensure!(!entry.file_type().is_symlink(), "源目录包含链接");
-            if entry.file_type().is_file() && (entry.path().is_img() || is_cbz(entry.path())) {
+            if entry.file_type().is_file() && (entry.path().is_img() || entry.path().is_cbz()) {
                 let metadata = entry.metadata()?;
                 fingerprint.consume(
                     entry
@@ -377,7 +373,7 @@ fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<bool> {
             ..Comic::default()
         };
         let groups = if source.is_file() {
-            ensure!(is_cbz(&source), "目前支持 CBZ 文件和图片文件夹");
+            ensure!(source.is_cbz(), "目前支持 CBZ 文件和图片文件夹");
             validate_archive_structure(&source)?;
             if let Ok(original) = Comic::from_cbz(&source) {
                 comic.name = original.name;
@@ -392,7 +388,7 @@ fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<bool> {
             } else {
                 children
                     .into_iter()
-                    .filter(|path| path.is_dir() || is_cbz(path))
+                    .filter(|path| path.is_dir() || path.is_cbz())
                     .collect()
             }
         };
@@ -469,7 +465,7 @@ fn validate_archive_structure(path: &Path) -> anyhow::Result<()> {
             "压缩包包含不安全的文件路径"
         );
         let entry_name = entry.name()?;
-        if Path::new(entry_name.as_ref()).is_img() {
+        if is_page_image(entry_name.as_ref()) {
             ensure!(entry.size() <= MAX_PAGE_BYTES, "压缩包中的图片过大");
             pages += 1;
         }
@@ -559,6 +555,27 @@ mod tests {
             1
         );
         assert!(source.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn import_rejects_cbz_with_only_hidden_images() {
+        let root = std::env::temp_dir().join(format!("jm-hidden-cbz-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("hidden.cbz");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        zip.start_file("_cover.jpg", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&png()).unwrap();
+        zip.finish().unwrap();
+        let library = root.join("library");
+        let error = import_source(&source, &library).unwrap_err();
+        assert!(format!("{error:#}").contains("压缩包没有漫画图片"));
+        assert!(
+            super::super::library_commands::scan_downloaded_comics(&library)
+                .comics
+                .is_empty()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

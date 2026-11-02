@@ -52,17 +52,22 @@ pub struct Comic {
 }
 
 impl Comic {
-    /// 归档/导出时清理只属于本机的状态，避免把下载路径与登录态写进 CBZ。
-    pub fn sanitized_for_archive(&mut self) {
+    /// 清理只描述本机下载位置的字段，保留收藏等漫画自身状态。
+    pub(crate) fn clear_local_download_state(&mut self) {
         self.is_downloaded = None;
         self.comic_download_dir = None;
         self.local_cover_data = None;
-        self.is_favorite = false;
-        self.liked = false;
         for chapter in &mut self.chapter_infos {
             chapter.is_downloaded = None;
             chapter.chapter_download_dir = None;
         }
+    }
+
+    /// 归档/导出时清理本机状态与登录态，避免把它们写进 CBZ。
+    pub fn sanitized_for_archive(&mut self) {
+        self.clear_local_download_state();
+        self.is_favorite = false;
+        self.liked = false;
     }
 
     pub fn from_comic_resp_data(app: &AppHandle, comic: GetComicRespData) -> anyhow::Result<Comic> {
@@ -261,6 +266,62 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn comic_with_local_state() -> Comic {
+        Comic {
+            is_favorite: true,
+            liked: true,
+            is_downloaded: Some(true),
+            comic_download_dir: Some(PathBuf::from("downloads/comic")),
+            local_cover_data: Some("data:image/jpeg;base64,cover".to_string()),
+            chapter_infos: vec![ChapterInfo {
+                chapter_id: 1,
+                chapter_title: "第1话".to_string(),
+                order: 1,
+                is_downloaded: Some(true),
+                chapter_download_dir: Some(PathBuf::from("downloads/comic/1.cbz")),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ordinary_metadata_cleanup_preserves_favorite_state() {
+        let mut comic = comic_with_local_state();
+        comic.clear_local_download_state();
+        assert!(comic.is_favorite);
+        assert!(comic.liked);
+        assert_eq!(comic.is_downloaded, None);
+        assert_eq!(comic.comic_download_dir, None);
+        assert_eq!(comic.local_cover_data, None);
+        assert_eq!(comic.chapter_infos[0].is_downloaded, None);
+        assert_eq!(comic.chapter_infos[0].chapter_download_dir, None);
+
+        let json = serde_json::to_value(comic).unwrap();
+        assert_eq!(json["is_favorite"], true);
+        assert_eq!(json["liked"], true);
+        for field in ["isDownloaded", "comicDownloadDir", "localCoverData"] {
+            assert!(json.get(field).is_none());
+        }
+        assert!(json["chapterInfos"][0].get("isDownloaded").is_none());
+        assert!(json["chapterInfos"][0].get("chapterDownloadDir").is_none());
+    }
+
+    #[test]
+    fn archive_cleanup_clears_local_and_account_state() {
+        let mut comic = comic_with_local_state();
+        comic.sanitized_for_archive();
+        assert!(!comic.is_favorite);
+        assert!(!comic.liked);
+        assert_eq!(comic.comic_download_dir, None);
+        assert_eq!(comic.chapter_infos[0].chapter_download_dir, None);
+
+        let json = serde_json::to_value(comic).unwrap();
+        assert_eq!(json["is_favorite"], false);
+        assert_eq!(json["liked"], false);
+        assert!(json.get("localCoverData").is_none());
+        assert!(json["chapterInfos"][0].get("chapterDownloadDir").is_none());
     }
 
     #[test]

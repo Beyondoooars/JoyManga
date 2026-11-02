@@ -323,7 +323,7 @@ export const useStore = defineStore('store', () => {
   const downloadedSubTab = ref<'library' | 'transfers'>('library')
 
   function openTransfers() {
-    chapterDetailShowing.value = false
+    closeComicDetail()
     currentTabName.value = 'downloaded'
     downloadedSubTab.value = 'transfers'
   }
@@ -422,7 +422,7 @@ export const useStore = defineStore('store', () => {
   function searchKeyword(keyword: string) {
     const trimmed = keyword.trim()
     if (!trimmed) return
-    chapterDetailShowing.value = false
+    closeComicDetail()
     currentTabName.value = 'search'
     pendingSearchKeyword.value = trimmed
   }
