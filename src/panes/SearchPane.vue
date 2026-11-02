@@ -498,8 +498,7 @@ function goToPage(page: number) {
                 :comic-author="comic.author"
                 :comic-category="comic.category"
                 :comic-category-sub="comic.categorySub"
-                :comic-downloaded="comic.isDownloaded"
-                :comic-download-dir="comic.comicDownloadDir" />
+                :comic-downloaded="comic.isDownloaded" />
             </div>
 
             <div v-else-if="languageFilter !== 'all'" class="jm-empty">

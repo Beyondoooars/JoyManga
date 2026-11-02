@@ -52,6 +52,19 @@ pub struct Comic {
 }
 
 impl Comic {
+    /// 归档/导出时清理只属于本机的状态，避免把下载路径与登录态写进 CBZ。
+    pub fn sanitized_for_archive(&mut self) {
+        self.is_downloaded = None;
+        self.comic_download_dir = None;
+        self.local_cover_data = None;
+        self.is_favorite = false;
+        self.liked = false;
+        for chapter in &mut self.chapter_infos {
+            chapter.is_downloaded = None;
+            chapter.chapter_download_dir = None;
+        }
+    }
+
     pub fn from_comic_resp_data(app: &AppHandle, comic: GetComicRespData) -> anyhow::Result<Comic> {
         let mut chapter_infos: Vec<ChapterInfo> = comic
             .series

@@ -25,7 +25,6 @@ src-tauri/target/
 *.sw?
 
 # Auto-generated declaration files
-src/auto-imports.d.ts
 src/components.d.ts
 
 # Distribution binaries

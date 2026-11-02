@@ -24,6 +24,19 @@ impl AnyhowErrorToStringChain for anyhow::Error {
     }
 }
 
+pub trait PathIsCbz {
+    /// 判断路径是否为 CBZ 归档（扩展名大小写不敏感）
+    fn is_cbz(&self) -> bool;
+}
+
+impl PathIsCbz for std::path::Path {
+    fn is_cbz(&self) -> bool {
+        self.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("cbz"))
+    }
+}
+
 pub trait PathIsImg {
     /// 判断路径是否为图片(jpg/png/webp/gif)
     fn is_img(&self) -> bool;
@@ -33,24 +46,30 @@ impl PathIsImg for std::path::Path {
     fn is_img(&self) -> bool {
         self.extension()
             .and_then(|ext| ext.to_str())
-            .map(str::to_lowercase)
-            .is_some_and(|ext| matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif"))
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("jpg")
+                    || ext.eq_ignore_ascii_case("jpeg")
+                    || ext.eq_ignore_ascii_case("png")
+                    || ext.eq_ignore_ascii_case("webp")
+                    || ext.eq_ignore_ascii_case("gif")
+            })
     }
 }
 
 /// 图片扩展名 → MIME；未知扩展名按 JPEG 处理（JM 的图片以 JPEG 为主）。
 pub fn mime_for_image(path: &std::path::Path) -> &'static str {
-    match path
+    let ext = path
         .extension()
         .and_then(|ext| ext.to_str())
-        .unwrap_or("jpeg")
-        .to_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => "image/jpeg",
+        .unwrap_or("jpeg");
+    if ext.eq_ignore_ascii_case("png") {
+        "image/png"
+    } else if ext.eq_ignore_ascii_case("webp") {
+        "image/webp"
+    } else if ext.eq_ignore_ascii_case("gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
     }
 }
 

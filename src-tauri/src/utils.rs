@@ -13,7 +13,7 @@ use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
 
 use crate::{
-    extensions::{AppHandleExt, PathIsImg, WalkDirEntryExt},
+    extensions::{AppHandleExt, PathIsCbz, PathIsImg, WalkDirEntryExt},
     types::Comic,
 };
 
@@ -303,12 +303,11 @@ impl DownloadedLibraryCache {
         *self.scan.write() = None;
     }
 
-    pub fn set_comics(&self, root: &Path, comics: &[Comic]) {
+    pub fn set_comics(&self, root: &Path, comics: Vec<Comic>) {
         *self.comics.write() = Some((
             root.to_path_buf(),
             comics
-                .iter()
-                .cloned()
+                .into_iter()
                 .map(|mut comic| {
                     comic.local_cover_data = None;
                     (comic.id, comic)
@@ -394,13 +393,7 @@ pub fn create_id_to_dir_map(app: &AppHandle) -> anyhow::Result<HashMap<i64, Path
     if let Ok(entries) = std::fs::read_dir(&download_dir) {
         for entry in entries.filter_map(Result::ok) {
             let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_lowercase)
-                    == Some("cbz".to_string())
-            {
+            if path.is_file() && path.is_cbz() {
                 if let Ok(id) = read_comic_id_from_cbz(&path) {
                     id_to_dir_map.entry(id).or_insert(path);
                 }
@@ -840,12 +833,12 @@ mod tests {
             local_cover_data: Some("large-cover".into()),
             ..super::Comic::default()
         };
-        cache.set_comics(root, std::slice::from_ref(&comic));
+        cache.set_comics(root, vec![comic.clone()]);
         assert!(cache.comic(root, 1).unwrap().local_cover_data.is_none());
         assert!(cache.comic(Path::new("other"), 1).is_none());
         cache.insert(1, root.join("chapter"));
         assert!(cache.comic(root, 1).is_none());
-        cache.set_comics(root, &[comic]);
+        cache.set_comics(root, vec![comic]);
         cache.invalidate();
         assert!(cache.comic(root, 1).is_none());
     }
@@ -858,7 +851,7 @@ mod tests {
             id: 1,
             ..super::Comic::default()
         };
-        cache.set_comics(root, std::slice::from_ref(&comic));
+        cache.set_comics(root, vec![comic]);
         assert!(cache.comic(root, 1).is_some());
 
         let mut map = std::collections::HashMap::new();

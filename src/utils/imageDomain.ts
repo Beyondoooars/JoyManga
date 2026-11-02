@@ -1,29 +1,4 @@
-import type { ApiDomainMode, ImageDomainMode } from '../bindings.ts'
-
-// 与 Rust 端 `config.rs` 中的 `API_DOMAIN_*` 常量保持一致
-export const API_DOMAIN_PRESETS: Record<Exclude<ApiDomainMode, 'Custom'>, string> = {
-  Domain1: 'www.cdnzack.cc',
-  Domain2: 'www.cdnhth.cc',
-  Domain3: 'www.cdnhth.net',
-  Domain4: 'www.cdnbea.net',
-  Domain5: 'www.cdn-mspjmapiproxy.xyz',
-}
-
-const DEFAULT_API_DOMAIN = API_DOMAIN_PRESETS.Domain1
-
-export function resolveApiDomain(
-  mode: ApiDomainMode | undefined,
-  customDomain: string | undefined,
-): string {
-  if (mode === undefined) {
-    return DEFAULT_API_DOMAIN
-  }
-  if (mode === 'Custom') {
-    const custom = (customDomain ?? '').trim()
-    return custom === '' ? DEFAULT_API_DOMAIN : custom
-  }
-  return API_DOMAIN_PRESETS[mode] ?? DEFAULT_API_DOMAIN
-}
+import type { ImageDomainMode } from '../bindings.ts'
 
 // 与 Rust 端 `config.rs` 中的 `IMAGE_DOMAIN_*` 常量保持一致
 export const IMAGE_DOMAIN_PRESETS: Record<Exclude<ImageDomainMode, 'Custom'>, string> = {
