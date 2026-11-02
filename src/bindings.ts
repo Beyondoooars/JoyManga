@@ -11,6 +11,8 @@ export const commands = {
   getImageDomainPresets: () => __TAURI_INVOKE<ImageDomainPreset[]>('get_image_domain_presets'),
   checkNetwork: (config: Config, comicId: number | null) =>
     typedError<NetworkCheckReport, CommandError>(__TAURI_INVOKE('check_network', { config, comicId })),
+  testImageDownloadSpeed: (config: Config, comicId: number) =>
+    typedError<ImageSpeedReport, CommandError>(__TAURI_INVOKE('test_image_download_speed', { config, comicId })),
   getApiDomainStatus: () => typedError<NetworkProbe, CommandError>(__TAURI_INVOKE('get_api_domain_status')),
   initializeAndroidStorage: (libraryDir: string) =>
     typedError<Config, CommandError>(__TAURI_INVOKE('initialize_android_storage', { libraryDir })),
@@ -639,6 +641,24 @@ export type ImageDomainPreset = {
   mode: ImageDomainMode
   label: string
   domain: string
+}
+
+export type ImageSpeedReport = {
+  results: ImageSpeedResult[]
+  best: ImageDomainMode | null
+  sampleRequests: number
+  vpnActive: boolean
+}
+
+export type ImageSpeedResult = {
+  mode: ImageDomainMode
+  label: string
+  domain: string
+  bytes: number
+  elapsedMs: number
+  /**  请求失败时没有吞吐量。 */
+  bytesPerSecond?: number | null
+  error?: string | null
 }
 
 export type ImportReport = {

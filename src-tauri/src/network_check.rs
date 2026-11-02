@@ -1,5 +1,6 @@
-use crate::config::Config;
+use crate::config::{Config, ImageDomainMode};
 use crate::responses::GetWeeklyInfoRespData;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -17,6 +18,146 @@ pub struct NetworkCheckReport {
     pub api: NetworkProbe,
     pub image: NetworkProbe,
     pub domain: NetworkProbe,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSpeedResult {
+    pub mode: ImageDomainMode,
+    pub label: String,
+    pub domain: String,
+    pub bytes: u64,
+    pub elapsed_ms: u64,
+    /// 请求失败时没有吞吐量。
+    #[specta(optional)]
+    pub bytes_per_second: Option<f64>,
+    #[specta(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSpeedReport {
+    pub results: Vec<ImageSpeedResult>,
+    pub best: Option<ImageDomainMode>,
+    pub sample_requests: usize,
+    pub vpn_active: bool,
+}
+
+const IMAGE_SPEED_REQUESTS: usize = 4;
+const IMAGE_SPEED_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// 同一封面在每条线路上并发下载数次，以总吞吐而不是单次握手延迟排序。
+/// 每条线路单独使用客户端，避免某个域名的连接池状态污染另一条线路。
+/// 只比较当前网络与代理/VPN 路径下的结果，不声称 VPN 本身一定提速。
+pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<ImageSpeedReport> {
+    config.validate()?;
+    anyhow::ensure!(comic_id > 0, "先选择一本在线漫画，再测速图片线路");
+    let mut candidates = crate::config::image_domain_presets();
+    if config.image_domain_mode == ImageDomainMode::Custom {
+        candidates.push(crate::config::ImageDomainPreset {
+            mode: ImageDomainMode::Custom,
+            label: "自定义".into(),
+            domain: config.get_image_domain(),
+        });
+    }
+
+    let mut results = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let result = tokio::time::timeout(
+            Duration::from_secs(12),
+            probe_image_domain(&config, &candidate.domain, comic_id),
+        )
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!("线路测速超过 12 秒")),
+        };
+        let (bytes, elapsed_ms, error) = match result {
+            Ok((bytes, elapsed_ms)) => (bytes, elapsed_ms, None),
+            Err(error) => (0, 0, Some(format!("{error:#}").chars().take(240).collect())),
+        };
+        results.push(ImageSpeedResult {
+            bytes_per_second: (error.is_none()).then(|| bytes_per_second(bytes, elapsed_ms)),
+            mode: candidate.mode,
+            label: candidate.label,
+            domain: candidate.domain,
+            bytes,
+            elapsed_ms,
+            error,
+        });
+    }
+    // 线路按实际下载吞吐展示；不可用的线路始终排在可用线路之后。
+    results.sort_by(|a, b| {
+        b.error.is_none().cmp(&a.error.is_none()).then_with(|| {
+            match (a.bytes_per_second, b.bytes_per_second) {
+                (Some(a), Some(b)) => b.total_cmp(&a),
+                _ => std::cmp::Ordering::Equal,
+            }
+        })
+    });
+    let best = results
+        .iter()
+        .find(|result| result.error.is_none() && result.bytes > 0)
+        .map(|result| result.mode);
+    Ok(ImageSpeedReport {
+        results,
+        best,
+        sample_requests: IMAGE_SPEED_REQUESTS,
+        vpn_active: crate::network_state::is_vpn_active(),
+    })
+}
+
+fn bytes_per_second(bytes: u64, elapsed_ms: u64) -> f64 {
+    if elapsed_ms == 0 {
+        return 0.0;
+    }
+    bytes as f64 * 1000.0 / elapsed_ms as f64
+}
+
+async fn probe_image_domain(
+    config: &Config,
+    domain: &str,
+    comic_id: i64,
+) -> anyhow::Result<(u64, u64)> {
+    let client = config
+        .apply_proxy(
+            crate::tls::client_builder()
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(8)),
+        )?
+        .build()?;
+    let url = format!("https://{domain}/media/albums/{comic_id}_3x4.jpg");
+    let started = Instant::now();
+    let mut tasks = FuturesUnordered::new();
+    for _ in 0..IMAGE_SPEED_REQUESTS {
+        let client = client.clone();
+        let url = url.clone();
+        tasks.push(download_speed_sample(client, url));
+    }
+    let mut bytes = 0u64;
+    while let Some(result) = tasks.next().await {
+        bytes = bytes.saturating_add(result?);
+    }
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok((bytes, elapsed_ms.max(1)))
+}
+
+async fn download_speed_sample(client: reqwest::Client, url: String) -> anyhow::Result<u64> {
+    let mut response = client
+        .get(url)
+        .header("user-agent", "Mozilla/5.0")
+        .header("x-requested-with", "com.JMComic3.app")
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut bytes = 0usize;
+    while let Some(chunk) = response.chunk().await? {
+        bytes = bytes.saturating_add(chunk.len());
+        anyhow::ensure!(bytes <= IMAGE_SPEED_MAX_BYTES, "测速图片超过4MB上限");
+    }
+    anyhow::ensure!(bytes > 0, "测速图片为空");
+    Ok(bytes as u64)
 }
 
 fn completed(
@@ -175,5 +316,38 @@ fn format_age(updated_at_unix: u64) -> String {
         format!("{} 小时前", age / 3600)
     } else {
         format!("{} 天前", age / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throughput_is_missing_when_a_probe_fails() {
+        let report = ImageSpeedReport {
+            results: vec![ImageSpeedResult {
+                mode: ImageDomainMode::Domain1,
+                label: "线路1".into(),
+                domain: "img.example".into(),
+                bytes: 0,
+                elapsed_ms: 0,
+                bytes_per_second: None,
+                error: Some("timeout".into()),
+            }],
+            best: None,
+            sample_requests: IMAGE_SPEED_REQUESTS,
+            vpn_active: false,
+        };
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["sampleRequests"], 4);
+        assert_eq!(json["vpnActive"], false);
+        assert!(json["results"][0]["bytesPerSecond"].is_null());
+    }
+
+    #[test]
+    fn throughput_uses_actual_transfer_window() {
+        assert_eq!(bytes_per_second(2 * 1024 * 1024, 2_000), 1024.0 * 1024.0);
+        assert_eq!(bytes_per_second(1024, 0), 0.0);
     }
 }

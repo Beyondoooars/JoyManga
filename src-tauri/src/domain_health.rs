@@ -95,6 +95,10 @@ impl DomainHealthStore {
         }
     }
 
+    pub fn clear(&self) {
+        self.entries.write().clear();
+    }
+
     /// 该线路当前是否处于冷却（供诊断日志/设置页展示）。
     pub fn is_cooling_down(&self, domain: &str) -> bool {
         let now = Instant::now();
@@ -181,6 +185,16 @@ mod tests {
         let mut candidates = vec!["a.example".to_string(), "b.example".to_string()];
         store.sort_candidates(&mut candidates);
         assert_eq!(candidates, vec!["a.example", "b.example"]);
+    }
+
+    #[test]
+    fn network_change_discards_stale_health() {
+        let store = DomainHealthStore::new();
+        store.record_failure("old-path.example");
+        store.record_failure("old-path.example");
+        store.clear();
+        assert!(!store.is_cooling_down("old-path.example"));
+        assert_eq!(store.failure_count("old-path.example"), 0);
     }
 
     #[test]

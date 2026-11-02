@@ -551,7 +551,7 @@ impl Config {
         let library_dir = base_dir.join("library");
         let (download_dir, export_dir) = (library_dir.clone(), library_dir);
         // Android 设备的默认并发：移动端网络与内存都更保守
-        let (chapter_concurrency, img_concurrency) = (1, 4);
+        let (chapter_concurrency, img_concurrency) = (2, 8);
 
         Config {
             revision: 0,
@@ -948,7 +948,7 @@ mod tests {
         let merged = Config::merge_config(&value.to_string(), app_data_dir);
 
         assert_eq!(merged.username, "alice");
-        assert_eq!(merged.chapter_concurrency, 1);
+        assert_eq!(merged.chapter_concurrency, 2);
         merged.validate().unwrap();
     }
 
@@ -963,7 +963,7 @@ mod tests {
         let merged = Config::merge_config(&value.to_string(), app_data_dir);
 
         assert_eq!(merged.username, "bob");
-        assert_eq!(merged.img_concurrency, 4);
+        assert_eq!(merged.img_concurrency, 8);
         merged.validate().unwrap();
     }
 }
