@@ -168,20 +168,44 @@ const fixtureCheckIn = {
 }
 
 const listeners = new Map()
+// 与 ui.html 中的 Tauri 事件表同构：event -> eventId -> { handlerId }，供 unregisterListener 清理。
+const eventListeners = (window.__TAURI_EVENT_LISTENERS__ ??= Object.create(null))
 let listenerId = 0
 function emitTask(snapshot) {
   for (const { event, handler } of listeners.values()) {
     if (event === 'download-task-event') {
-      Reflect.get(window, `_${handler}`)({ event, id: 0, payload: { event: 'Create', data: snapshot } })
+      window.__TAURI_INTERNALS__.runCallback(handler, {
+        event,
+        id: 0,
+        payload: { event: 'Create', data: snapshot },
+      })
     }
+  }
+}
+// 控制台可调用 __uiFixtureSetNetwork({ vpn: true }) 模拟原生推送的 VPN/计费网络事件。
+window.__uiFixtureSetNetwork = ({ vpn, metered, networkKey } = {}) => {
+  if (typeof metered === 'boolean') {
+    window.dispatchEvent(new CustomEvent('jm-network-metered', { detail: metered }))
+  }
+  if (typeof vpn === 'boolean') {
+    const detail = typeof networkKey === 'string' ? { active: vpn, networkKey } : vpn
+    window.dispatchEvent(new CustomEvent('jm-network-vpn', { detail }))
   }
 }
 window.__uiFixtureInvoke = async (command, args) => {
   if (command === 'plugin:event|listen') {
-    listeners.set(++listenerId, args)
-    return listenerId
+    const id = ++listenerId
+    listeners.set(id, args)
+    const byEvent = (eventListeners[args.event] ??= Object.create(null))
+    byEvent[id] = { target: args.target, handlerId: args.handler }
+    return id
   }
-  if (command === 'plugin:event|unlisten') return listeners.delete(args.eventId)
+  if (command === 'plugin:event|unlisten') {
+    const removed = listeners.delete(args.eventId)
+    const byEvent = eventListeners[args.event]
+    if (byEvent) delete byEvent[args.eventId]
+    return removed
+  }
   if (command === 'plugin:app|version') return '0.2.1'
   if (command === 'get_config') return structuredClone(config)
   // 初始化会读取会话与域名预设，缺任一项整页都会停在「应用初始化失败」。
@@ -193,7 +217,10 @@ window.__uiFixtureInvoke = async (command, args) => {
   if (command === 'logout') return null
   if (command === 'get_api_domain_presets') return [{ mode: 'Official', label: '官方', domain: 'api.fixture.invalid' }]
   if (command === 'get_image_domain_presets')
-    return [{ mode: 'Official', label: '官方', domain: 'img.fixture.invalid' }]
+    return [
+      { mode: 'Domain1', label: '官方', domain: 'img.fixture.invalid' },
+      { mode: 'Domain2', label: '线路 2', domain: 'fast.fixture.invalid' },
+    ]
   // 这些命令在 bindings 里被包成 Result，IPC 返回值就是 data 本身
   if (command === 'get_api_domain_status') return { label: '域名', state: 'Passed', elapsedMs: 12, message: '线路正常' }
   if (command === 'get_logs_dir_size') return 0
@@ -211,6 +238,7 @@ window.__uiFixtureInvoke = async (command, args) => {
           bytes: 1048576,
           elapsedMs: 320,
           bytesPerSecond: 3276800,
+          successfulSamples: 3,
           error: null,
         },
         {
@@ -220,6 +248,7 @@ window.__uiFixtureInvoke = async (command, args) => {
           bytes: 0,
           elapsedMs: 0,
           bytesPerSecond: null,
+          successfulSamples: 0,
           error: '连接超时',
         },
       ],
@@ -230,7 +259,8 @@ window.__uiFixtureInvoke = async (command, args) => {
   if (command === 'save_config') {
     Object.assign(config, structuredClone(args.config))
     sessionStorage.setItem('jm-ui-fixture-config', JSON.stringify(config))
-    return null
+    // 真实命令返回保存后的配置；前端 applyConfig 依赖它同步权威版本。
+    return structuredClone(config)
   }
   if (command === 'get_weekly_info')
     return {

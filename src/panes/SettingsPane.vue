@@ -17,6 +17,7 @@ import {
   type CbzMode,
   type ImageDomainPreset,
   type ImageSpeedReport,
+  type ImageSpeedResult,
   type LogLevel,
   type NetworkCheckReport,
   type NetworkProbe,
@@ -29,7 +30,12 @@ import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { isAndroid as isAndroidDevice } from '../composables/useIsMobile.ts'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
-import { withAndroidSelection, exportToAndroidDownloads, isUnderPublicDownloads } from '../utils/androidStorage.ts'
+import {
+  withAndroidSelection,
+  exportToAndroidDownloads,
+  isUnderPublicDownloads,
+  watchNetworkVpn,
+} from '../utils/androidStorage.ts'
 import { getErrorMessage } from '../utils/errors.ts'
 import PathField from '../components/PathField.vue'
 import StorageLocationDialog from '../dialogs/StorageLocationDialog.vue'
@@ -65,6 +71,7 @@ const logsSizeLoading = ref(false)
 const imagePresets = ref<ImageDomainPreset[]>([])
 const checking = ref(false)
 const speedTesting = ref(false)
+const applyingFastest = ref(false)
 const speedReport = ref<ImageSpeedReport>()
 const speedError = ref('')
 const checkResult = ref<NetworkCheckReport>()
@@ -74,6 +81,8 @@ const dataError = ref('')
 let checkGeneration = 0
 let speedGeneration = 0
 let disposed = false
+let stopVpnWatch: (() => void) | undefined
+let lastVpnActive: boolean | undefined
 
 const domainStatus = ref<NetworkProbe>()
 const appVersion = ref('')
@@ -106,22 +115,28 @@ useBackHandler(() => {
 
 onBeforeUnmount(() => {
   disposed = true
+  stopVpnWatch?.()
+  stopVpnWatch = undefined
   checkGeneration++
   speedGeneration++
 })
 // 设置页被 KeepAlive 缓存：离开后 onBeforeUnmount 不会触发，在途请求的回调
 // 仍会写进这份状态。失活时同样作废代数，重新进入时再刷新一次。
+// 在途测速不在这里放开 speedTesting：后端请求仍在跑，必须等它结束（见 finally）。
 onDeactivated(() => {
+  stopVpnWatch?.()
+  stopVpnWatch = undefined
   checkGeneration++
   speedGeneration++
   checking.value = false
-  speedTesting.value = false
 })
 onActivated(() => {
   if (disposed) return
+  subscribeVpnWatch()
   void refreshDomainStatus()
 })
 onMounted(() => {
+  subscribeVpnWatch()
   void refreshDomainStatus()
   void getVersion().then((value) => {
     if (!disposed) appVersion.value = value
@@ -268,13 +283,26 @@ watch(networkKey, () => {
   checkGeneration++
   speedGeneration++
   checking.value = false
-  speedTesting.value = false
   speedReport.value = undefined
   speedError.value = ''
   checkResult.value = undefined
   networkError.value = ''
   void refreshDomainStatus()
 })
+
+function subscribeVpnWatch() {
+  // onMounted 与 onActivated 都会调用；先解绑避免 KeepAlive 往返后重复监听。
+  stopVpnWatch?.()
+  stopVpnWatch = watchNetworkVpn((active) => {
+    const changed = lastVpnActive !== undefined && lastVpnActive !== active
+    lastVpnActive = active
+    if (!changed) return
+    // 旧 VPN 路径下的测速结果不再可信；在途请求仍让它跑完再放开按钮。
+    speedGeneration++
+    speedReport.value = undefined
+    speedError.value = ''
+  })
+}
 
 async function testImageSpeed() {
   if (!store.config || speedTesting.value) return
@@ -292,16 +320,32 @@ async function testImageSpeed() {
   } catch (error) {
     if (current === speedGeneration && !disposed) speedError.value = getErrorMessage(error)
   } finally {
-    if (current === speedGeneration) speedTesting.value = false
+    // 前端同一时刻只允许一次测速，失效的旧请求结束后才能放开按钮。
+    speedTesting.value = false
   }
 }
 
 async function applyFastestImageDomain() {
   const best = speedReport.value?.best
-  if (!best || !store.config) return
-  store.config.imageDomainMode = best
-  await store.saveConfigNow()
-  message.success('已使用本次测速最快的图片线路；VPN 切换后可重新测速')
+  const config = store.config
+  if (!best || !config || applyingFastest.value) return
+  applyingFastest.value = true
+  const previous = config.imageDomainMode
+  config.imageDomainMode = best
+  try {
+    await store.saveConfigNow()
+    message.success('已使用本次测速最快的图片线路；网络路径变化后需重新测速')
+  } catch (error) {
+    config.imageDomainMode = previous
+    message.error(`图片线路未能保存：${getErrorMessage(error)}`)
+  } finally {
+    applyingFastest.value = false
+  }
+}
+
+/** 后端新版会带回成功样本数；bindings 重新生成前先按可选字段读取。 */
+function successfulSamplesOf(result: ImageSpeedResult): number | undefined {
+  return (result as ImageSpeedResult & { successfulSamples?: number }).successfulSamples
 }
 
 function formatSpeed(bytesPerSecond: number) {
@@ -641,8 +685,8 @@ const readingSummary = computed(() => {
               <div class="row-copy">
                 <strong>图片线路测速</strong>
                 <span>
-                  每条线路并发下载同一封面 {{ speedReport?.sampleRequests ?? 4 }} 次，比较实际吞吐。连接或断开 VPN
-                  后重新测速，不保证 VPN 一定提速。
+                  每条线路先预热连接，再并发下载同一封面 {{ speedReport?.sampleRequests ?? 4 }} 次并统计实际吞吐。
+                  连接或断开 VPN 后重新测速，不保证 VPN 一定提速。
                 </span>
               </div>
               <n-button secondary :loading="speedTesting" @click="testImageSpeed">测速全部图片线路</n-button>
@@ -650,16 +694,24 @@ const readingSummary = computed(() => {
             <n-alert v-if="speedError" type="error" :show-icon="false">{{ speedError }}</n-alert>
             <div v-if="speedReport" class="speed-results">
               <p class="note">
-                {{ speedReport.vpnActive ? '当前已识别到系统 VPN' : '当前未识别到系统 VPN' }}；以下为本次实际结果。
+                {{ speedReport.vpnActive ? '测速时已识别到系统 VPN' : '测速时未识别到系统 VPN' }}；以下为本次实际结果。
               </p>
               <div v-for="result in speedReport.results" :key="result.mode" class="speed-result">
                 <span>{{ result.label }} · {{ result.domain }}</span>
                 <strong v-if="result.bytesPerSecond != null">
                   {{ formatSpeed(result.bytesPerSecond) }} · {{ result.elapsedMs }} ms
+                  <template v-if="successfulSamplesOf(result) != null">
+                    · {{ successfulSamplesOf(result) }}/{{ speedReport.sampleRequests }} 次成功
+                  </template>
                 </strong>
                 <span v-else class="speed-error">{{ result.error }}</span>
               </div>
-              <n-button v-if="speedReport.best" type="primary" block @click="applyFastestImageDomain">
+              <n-button
+                v-if="speedReport.best"
+                type="primary"
+                block
+                :loading="applyingFastest"
+                @click="applyFastestImageDomain">
                 使用最快线路
               </n-button>
             </div>

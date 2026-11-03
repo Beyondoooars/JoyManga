@@ -156,15 +156,15 @@ class MainActivity : TauriActivity() {
             manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                     pushMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
-                    pushVpn(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+                    pushVpn(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN), network.toString())
                 }
                 override fun onLost(network: Network) {
                     pushMetered(manager.isActiveNetworkMetered)
-                    pushVpn(isVpnActive(manager))
+                    pushVpn(isVpnActive(manager), manager.activeNetwork?.toString())
                 }
             })
             pushMetered(manager.isActiveNetworkMetered)
-            pushVpn(isVpnActive(manager))
+            pushVpn(isVpnActive(manager), manager.activeNetwork?.toString())
         } catch (error: Exception) {
             android.util.Log.w("JoyManga", "读取网络计费状态失败", error)
         }
@@ -191,12 +191,17 @@ class MainActivity : TauriActivity() {
         }
     }
 
-    /** VPN 状态单独推送：后端据此决定是否跳过手动 HTTP 代理（见 Config::effective_proxy_url）。 */
-    private fun pushVpn(active: Boolean) {
+    /**
+     * VPN 与默认网络标识一起推送：后端据此决定是否跳过手动 HTTP 代理
+     * （见 Config::effective_proxy_url），并在默认网络真正变化时丢弃旧网络的线路健康状态。
+     */
+    private fun pushVpn(active: Boolean, networkKey: String?) {
         if (!visible) return
+        // 用 JSONObject 生成整个 detail，避免把 Network.toString() 直接拼进脚本。
+        val detail = JSONObject().put("active", active).put("networkKey", networkKey ?: JSONObject.NULL)
         runOnUiThread {
             appWebView?.evaluateJavascript(
-                "window.dispatchEvent(new CustomEvent('jm-network-vpn', {detail:$active}))", null)
+                "window.dispatchEvent(new CustomEvent('jm-network-vpn', {detail:$detail}))", null)
         }
     }
 
@@ -206,8 +211,9 @@ class MainActivity : TauriActivity() {
         AppState.activity = this
         AppState.foreground = true
         updateDownloadService()
-        pushMetered(getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered)
-        pushVpn(isVpnActive(getSystemService(ConnectivityManager::class.java)))
+        val manager = getSystemService(ConnectivityManager::class.java)
+        pushMetered(manager.isActiveNetworkMetered)
+        pushVpn(isVpnActive(manager), manager.activeNetwork?.toString())
         installPendingUpdate()
     }
     override fun onStop() {
@@ -528,6 +534,9 @@ class MainActivity : TauriActivity() {
          */
         @JavascriptInterface fun isVpnActive(): Boolean =
             isVpnActive(getSystemService(ConnectivityManager::class.java))
+        /** 页面恢复后主动同步网络标识，补回后台期间丢失的切换事件。 */
+        @JavascriptInterface fun networkKey(): String? =
+            getSystemService(ConnectivityManager::class.java).activeNetwork?.toString()
         @JavascriptInterface fun libraryPath(): String = libraryRoot().absolutePath
         /** 公共下载目录下的默认书库：文件管理器直接可见，卸载应用不随之删除。 */
         @JavascriptInterface fun downloadsPath(): String = publicLibraryRoot().absolutePath
