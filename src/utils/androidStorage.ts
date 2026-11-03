@@ -20,6 +20,7 @@ declare global {
       supportsPublicStorage(): boolean
       canWritePublicDownloads(): boolean
       isVpnActive?(): boolean
+      networkKey?(): string | null
       requestAllFilesAccess(): void
       downloadAndInstallApk(url: string, fileName: string): void
       updateDownloadState(): void
@@ -211,23 +212,40 @@ export function watchNetworkMetered(handler: (metered: boolean) => void): () => 
 }
 
 /**
- * 监听系统 VPN 状态（启动与切换网络时各一次）。
+ * 监听系统 VPN 状态与当前默认网络标识（启动与切换网络时各一次）。
  *
  * 后端在 VPN 开启时跳过手动 HTTP 代理：VPN 已在系统层接管流量，再连本机代理端口
- * 往往连不上，表现就是「开了 VPN 反而上不了网」。非 Android 环境恒为 false。
- * 返回值用于取消订阅。
+ * 往往连不上，表现就是「开了 VPN 反而上不了网」。默认网络标识用于识别 Wi-Fi 与
+ * 蜂窝互切：VPN 布尔值不变时，后端仍能据此丢弃旧网络的线路健康状态。
+ * 非 Android 环境恒为 false / null。返回值用于取消订阅。
  */
-export function watchNetworkVpn(handler: (active: boolean) => void): () => void {
+export function watchNetworkVpn(handler: (active: boolean, networkKey: string | null) => void): () => void {
   if (!isAndroid) {
-    handler(false)
+    handler(false, null)
     return () => {}
   }
-  const listener = (event: Event) => handler(Boolean((event as CustomEvent<boolean>).detail))
+  const listener = (event: Event) => {
+    const detail = (event as CustomEvent<unknown>).detail
+    // 新版原生推送 { active, networkKey }；旧版只推布尔值，保留兼容。
+    if (typeof detail === 'boolean') {
+      handler(detail, null)
+      return
+    }
+    if (detail !== null && typeof detail === 'object') {
+      const state = detail as { active?: unknown; networkKey?: unknown }
+      handler(state.active === true, typeof state.networkKey === 'string' ? state.networkKey : null)
+    }
+  }
   window.addEventListener('jm-network-vpn', listener)
   // 冷启动时原生在页面注册监听之前就推送过事件，错过了就再也没有下一次
   // （除非用户又切换一次网络）。这里主动拉一次当前状态兜底。
+  // 原生同时提供网络标识：界面不可见时丢弃的切换事件，也能在恢复后识别。
+  // 旧版原生没有 networkKey 时传 null，只比较 VPN 状态，不误判网络切换。
   try {
-    handler(window.JmAndroid?.isVpnActive?.() ?? false)
+    handler(
+      window.JmAndroid?.isVpnActive?.() ?? false,
+      window.JmAndroid?.networkKey?.() ?? null,
+    )
   } catch (error) {
     console.error('读取 VPN 状态失败', error)
   }

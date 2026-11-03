@@ -3,10 +3,12 @@ use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{ensure, Context};
 use bytes::Bytes;
 use image::ImageFormat;
+use parking_lot::Mutex;
 use tauri::AppHandle;
 use tokio::sync::watch;
 
@@ -23,7 +25,6 @@ use super::{DownloadManager, DownloadTaskState};
 const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PAGES: usize = 10_000;
 
-#[derive(Clone)]
 pub(crate) struct DownloadImgTask {
     app: AppHandle,
     download_manager: DownloadManager,
@@ -32,6 +33,9 @@ pub(crate) struct DownloadImgTask {
     index: usize,
     temp_download_path: PathBuf,
     block_num: u32,
+    /// 全局图片许可只覆盖网络请求本身；暂停/取消时由 `process` 立即归还，
+    /// 避免本地解码、编码和落盘占用其他章节的下载名额。
+    network_permit: Mutex<Option<DownloadPermit>>,
 }
 
 impl DownloadImgTask {
@@ -50,6 +54,7 @@ impl DownloadImgTask {
             index,
             temp_download_path,
             block_num,
+            network_permit: Mutex::new(None),
         }
     }
 
@@ -59,21 +64,19 @@ impl DownloadImgTask {
 
         let mut state_receiver = self.download_task.state_sender.subscribe();
         state_receiver.mark_changed();
-        let mut permit = None;
 
         loop {
-            let state_is_downloading = *state_receiver.borrow() == DownloadTaskState::Downloading;
-            release_inactive_image_permit(*state_receiver.borrow(), &mut permit);
+            let state = *state_receiver.borrow();
+            // 网络许可只在请求期间持有；暂停、排队或取消时立即归还，
+            // watch 可能合并 Paused -> Pending 通知，不能只在观察到 Paused 时释放。
+            {
+                let mut permit = self.network_permit.lock();
+                release_inactive_image_permit(state, &mut permit);
+            }
             tokio::select! {
-                () = &mut download_img_task, if state_is_downloading && permit.is_some() => break,
-                control_flow = self.acquire_img_permit(&mut permit), if state_is_downloading && permit.is_none() => {
-                    match control_flow {
-                        ControlFlow::Continue(()) => continue,
-                        ControlFlow::Break(()) => break,
-                    }
-                },
+                () = &mut download_img_task, if state == DownloadTaskState::Downloading => break,
                 _ = state_receiver.changed() => {
-                    match self.handle_state_change(&mut permit, &mut state_receiver) {
+                    match self.handle_state_change(&mut state_receiver) {
                         ControlFlow::Continue(()) => continue,
                         ControlFlow::Break(()) => break,
                     }
@@ -112,7 +115,20 @@ impl DownloadImgTask {
         // 整请求重试：单页失败会让整章停在“下载不完整”，重试成本远低于让用户手动重下。
         let mut attempt = 0;
         let (img_data, format) = loop {
-            match self.app.get_jm_client().get_img_data_and_format(url).await {
+            // 全局图片并发只限制网络请求：拿到响应后立刻归还许可，
+            // 后续解码、反混淆、编码与落盘不再占用其他章节的下载名额。
+            let permit = self.download_manager.img_sem.acquire().await;
+            *self.network_permit.lock() = Some(permit);
+
+            let request_started = Instant::now();
+            let result = self.app.get_jm_client().get_img_data_and_format(url).await;
+            self.download_task
+                .transfer_network_nanos
+                .fetch_add(elapsed_nanos(request_started), Ordering::Relaxed);
+            // 成功或失败都先归还许可，再决定重试或进入本地处理。
+            *self.network_permit.lock() = None;
+
+            match result {
                 Ok(data) => break data,
                 Err(err)
                     if attempt == 0
@@ -151,8 +167,8 @@ impl DownloadImgTask {
         let save_path = temp_download_path.join(format!("{index_filename}.{save_ext}"));
 
         let block_num = self.block_num;
-        // 保存图片
-        if let Err(err) = save_img(
+        // 保存图片（网络许可已归还，本地处理/写盘不再占用网络并发名额）
+        match save_img(
             &save_path,
             block_num,
             img_data,
@@ -161,16 +177,26 @@ impl DownloadImgTask {
         )
         .await
         {
-            let err_title = format!("保存图片`{url}`失败");
-            let string_chain = err.to_string_chain();
-            tracing::error!(err_title, message = string_chain);
-            let failure = classify_failure(&err, TaskStage::Downloading);
-            self.download_task.record_image_error(
-                format!("第 {} 张图片处理或保存失败：{err:#}", self.index + 1),
-                failure.kind,
-                image_line(url),
-            );
-            return;
+            Ok(metrics) => {
+                self.download_task
+                    .image_processing_nanos
+                    .fetch_add(metrics.processing_nanos, Ordering::Relaxed);
+                self.download_task
+                    .image_write_nanos
+                    .fetch_add(metrics.write_nanos, Ordering::Relaxed);
+            }
+            Err(err) => {
+                let err_title = format!("保存图片`{url}`失败");
+                let string_chain = err.to_string_chain();
+                tracing::error!(err_title, message = string_chain);
+                let failure = classify_failure(&err, TaskStage::Downloading);
+                self.download_task.record_image_error(
+                    format!("第 {} 张图片处理或保存失败：{err:#}", self.index + 1),
+                    failure.kind,
+                    image_line(url),
+                );
+                return;
+            }
         }
 
         tracing::trace!(
@@ -196,21 +222,8 @@ impl DownloadImgTask {
         self.download_task.emit_download_task_update_event();
     }
 
-    async fn acquire_img_permit(&self, permit: &mut Option<DownloadPermit>) -> ControlFlow<()> {
-        let url = &self.url;
-        let comic_title = &self.download_task.comic.name;
-        let chapter_title = &self.download_task.chapter_info.chapter_title;
-
-        tracing::trace!(comic_title, chapter_title, url, "图片开始排队");
-        if permit.is_none() {
-            *permit = Some(self.download_manager.img_sem.acquire().await);
-        }
-        ControlFlow::Continue(())
-    }
-
     fn handle_state_change(
         &self,
-        permit: &mut Option<DownloadPermit>,
         state_receiver: &mut watch::Receiver<DownloadTaskState>,
     ) -> ControlFlow<()> {
         let url = &self.url;
@@ -221,9 +234,6 @@ impl DownloadImgTask {
         match state {
             DownloadTaskState::Paused => {
                 tracing::trace!(comic_title, chapter_title, url, "图片暂停下载");
-                if let Some(permit) = permit.take() {
-                    drop(permit);
-                }
                 ControlFlow::Continue(())
             }
             DownloadTaskState::Cancelled => {
@@ -245,35 +255,55 @@ pub(crate) fn release_inactive_image_permit(
     }
 }
 
+/// 单张图片的本地耗时拆分，用于区分 CPU 处理与落盘开销。
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct SaveImgMetrics {
+    pub(crate) processing_nanos: u64,
+    pub(crate) write_nanos: u64,
+}
+
+fn elapsed_nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 pub(crate) async fn save_img(
     save_path: &Path,
     block_num: u32,
     src_img_data: Bytes,
     src_format: ImageFormat,
     file_writes: Arc<TaskFileWrites>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SaveImgMetrics> {
     if src_format == ImageFormat::Gif {
         // GIF 原样保存，避免二次编码丢帧
+        let write_started = Instant::now();
         file_writes
             .run(|| atomic_fs::write(save_path, src_img_data))
             .context(format!("保存图片`{}`失败", save_path.display()))?;
-        return Ok(());
+        return Ok(SaveImgMetrics {
+            processing_nanos: 0,
+            write_nanos: elapsed_nanos(write_started),
+        });
     }
 
     if block_num == 0 {
         // 未切片混淆：直接写入网络原始字节，避免二次编解码的 CPU 开销
         // 与 JPEG 二次有损压缩导致的画质损失
+        let write_started = Instant::now();
         file_writes
             .run(|| atomic_fs::write(save_path, src_img_data))
             .context(format!("保存图片`{}`失败", save_path.display()))?;
-        return Ok(());
+        return Ok(SaveImgMetrics {
+            processing_nanos: 0,
+            write_nanos: elapsed_nanos(write_started),
+        });
     }
 
     // 图像处理的闭包
     let save_path = save_path.to_path_buf();
-    let process_img = move || -> anyhow::Result<()> {
+    let process_img = move || -> anyhow::Result<SaveImgMetrics> {
         // 这里必然需要反混淆：block_num == 0 的情况已在上面直接落盘返回
         // 用 into_rgb8：解码器已产出 Rgb8 时直接移交缓冲区，省掉一次全图拷贝
+        let processing_started = Instant::now();
         let mut src_img = image::load_from_memory(&src_img_data)
             .context("解码图片失败")?
             .into_rgb8();
@@ -282,14 +312,19 @@ pub(crate) async fn save_img(
         let mut dst_img_data = Vec::new();
         // 反混淆后的图片统一编码为无损 WebP：体积明显小于 PNG，且不引入有损压缩
         dst_img.write_to(&mut Cursor::new(&mut dst_img_data), ImageFormat::WebP)?;
+        let processing_nanos = elapsed_nanos(processing_started);
         // 保存编码后的图片数据
+        let write_started = Instant::now();
         file_writes
             .run(|| atomic_fs::write(&save_path, dst_img_data))
             .context(format!("保存图片`{}`失败", save_path.display()))?;
-        Ok(())
+        Ok(SaveImgMetrics {
+            processing_nanos,
+            write_nanos: elapsed_nanos(write_started),
+        })
     };
     // 因为图像处理是CPU密集型操作，所以使用rayon并发处理
-    let (sender, receiver) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+    let (sender, receiver) = tokio::sync::oneshot::channel::<anyhow::Result<SaveImgMetrics>>();
     rayon::spawn(move || {
         let _ = sender.send(process_img());
     });
@@ -534,6 +569,36 @@ mod gif_passthrough_tests {
         .unwrap();
         // GIF 原样保存，避免二次编码丢帧
         assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod save_metrics_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scrambled_page_reports_processing_time_separately_from_write() {
+        let path = std::env::temp_dir().join(format!("jm-timing-{}.webp", uuid::Uuid::new_v4()));
+        let mut source = Cursor::new(Vec::new());
+        image::RgbImage::new(2, 2)
+            .write_to(&mut source, ImageFormat::Png)
+            .unwrap();
+        let metrics = save_img(
+            &path,
+            1,
+            Bytes::from(source.into_inner()),
+            ImageFormat::Png,
+            Arc::default(),
+        )
+        .await
+        .unwrap();
+        // 反混淆路径必须先解码再编码，处理耗时会被单独统计。
+        assert!(metrics.processing_nanos > 0);
+        assert_eq!(
+            image::guess_format(&std::fs::read(&path).unwrap()).unwrap(),
+            ImageFormat::WebP
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

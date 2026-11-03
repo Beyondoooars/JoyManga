@@ -286,20 +286,39 @@ impl JmClient {
         }
     }
 
-    pub fn reload_client(&self) {
-        self.reload_client_for_network_change(false);
-    }
-
-    /// VPN 改变了实际网络路径：旧路径的延迟与冷却记录不再适用于新路径。
+    /// VPN/代理/默认网络改变了实际网络路径：旧路径的延迟与冷却记录不再适用。
+    ///
+    /// 先推进全局网络代际，再清空旧路径状态。仍在旧路径上进行的请求会在写回
+    /// 健康状态前发现代际不符，从而不会把旧网络的结果带回新路径。
     pub fn reload_client_for_network_change(&self, network_changed: bool) {
         let (api_client, api_client_without_retry) = create_api_clients(&self.app);
         *self.api_client.write() = api_client;
         *self.api_client_without_retry.write() = api_client_without_retry;
         *self.img_client.write() = create_img_client(&self.app);
         if network_changed {
-            *self.last_success_domain.write() = None;
-            self.domain_health.clear();
+            crate::network_state::change_network_path(|| {
+                *self.last_success_domain.write() = None;
+                self.domain_health.clear();
+            });
         }
+    }
+
+    /// 只有网络代际未变化时才记入线路健康状态与最近成功线路。
+    fn record_success_if_current(&self, epoch: u64, domain: &str, latency: Duration) {
+        let recorded = crate::network_state::with_current_epoch(epoch, || {
+            self.domain_health.record_success(domain, latency);
+            *self.last_success_domain.write() = Some(domain.to_string());
+        });
+        if recorded.is_none() {
+            tracing::debug!(domain, "网络路径已变化，丢弃旧路径的成功记录");
+        }
+    }
+
+    /// 只有网络代际未变化时才记录失败；旧路径的超时不能给出新路径的线路降温。
+    fn record_failure_if_current(&self, epoch: u64, domain: &str) {
+        crate::network_state::with_current_epoch(epoch, || {
+            self.domain_health.record_failure(domain);
+        });
     }
 
     /// 从官方地址动态获取最新的移动端 API 域名列表（10 分钟内只刷新一次）。
@@ -643,6 +662,9 @@ impl JmClient {
         Fut: std::future::Future<Output = anyhow::Result<T>>,
     {
         let candidates = self.api_domain_candidates();
+        // 请求开始时记录网络路径代际；换 VPN/代理/默认网络后，旧请求的结果
+        // 不能写回新路径的线路健康状态。
+        let network_epoch = crate::network_state::network_epoch();
         let mut last_error: Option<anyhow::Error> = None;
         // 总预算：候选线路逐个尝试，单个请求自身有超时，但"全部候选都卡到超时"
         // 会让用户等 N×timeout（历史上出现过 5 线路 × 18s ≈ 90 秒转圈）。
@@ -657,13 +679,11 @@ impl JmClient {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             match attempt(candidate.clone(), ts).await {
                 Ok(value) => {
-                    self.domain_health
-                        .record_success(&candidate, started.elapsed());
-                    *self.last_success_domain.write() = Some(candidate);
+                    self.record_success_if_current(network_epoch, &candidate, started.elapsed());
                     return Ok(value);
                 }
                 Err(error) if is_route_unreachable(&error) => {
-                    self.domain_health.record_failure(&candidate);
+                    self.record_failure_if_current(network_epoch, &candidate);
                     tracing::warn!(
                         domain = %candidate,
                         retry,
@@ -809,6 +829,8 @@ impl JmClient {
         password: &str,
         generation: u64,
     ) -> anyhow::Result<LoginRespData> {
+        // 登录客户端在开始时按当时的 VPN/代理路径构建；路径变化后整轮结果作废。
+        let network_epoch = crate::network_state::network_epoch();
         let client = config
             .apply_proxy(timed_client_builder(Duration::from_secs(12)))?
             .build()?;
@@ -824,7 +846,9 @@ impl JmClient {
         let mut last_error = None;
         for (index, candidate) in candidates.iter().enumerate() {
             let attempt_started = Instant::now();
-            if generation != self.auth_generation.load(Ordering::SeqCst) {
+            if generation != self.auth_generation.load(Ordering::SeqCst)
+                || !crate::network_state::epoch_is_current(network_epoch)
+            {
                 return Err(crate::errors::login_cancelled());
             }
             tracing::info!(
@@ -849,6 +873,13 @@ impl JmClient {
                 parse_encrypted_resp::<GetUserProfileRespData>(response, ts, "登录").await
             }
             .await;
+            // 请求发出后网络路径可能已经切换（例如手动代理被跳过）：旧客户端
+            // 拿到的结果不能提交会话，也不能写回新路径的健康状态。
+            if generation != self.auth_generation.load(Ordering::SeqCst)
+                || !crate::network_state::epoch_is_current(network_epoch)
+            {
+                return Err(crate::errors::login_cancelled());
+            }
             match result {
                 Ok(profile) => {
                     tracing::info!(
@@ -858,9 +889,11 @@ impl JmClient {
                         elapsed_ms = attempt_started.elapsed().as_millis() as u64,
                         "登录线路成功"
                     );
-                    self.domain_health
-                        .record_success(candidate, std::time::Duration::ZERO);
-                    *self.last_success_domain.write() = Some(candidate.clone());
+                    self.record_success_if_current(
+                        network_epoch,
+                        candidate,
+                        std::time::Duration::ZERO,
+                    );
                     // 成功线路对应内置预设时同步保存该模式；动态域名只记入内存，
                     // 之后的请求会自动优先复用这条可用线路。
                     let mode = if candidate == &config.get_api_domain() {
@@ -868,7 +901,8 @@ impl JmClient {
                     } else {
                         preset_mode_for_domain(candidate).unwrap_or(config.api_domain_mode)
                     };
-                    let outcome = self.commit_login(config, mode, profile, generation);
+                    let outcome =
+                        self.commit_login(config, mode, profile, generation, network_epoch);
                     if let Err(error) = &outcome {
                         tracing::warn!(
                             generation,
@@ -888,7 +922,7 @@ impl JmClient {
                         error = %error,
                         "登录线路不可达，尝试下一条"
                     );
-                    self.domain_health.record_failure(candidate);
+                    self.record_failure_if_current(network_epoch, candidate);
                     last_error = Some(error);
                 }
                 Err(error) => {
@@ -923,13 +957,14 @@ impl JmClient {
         mode: ApiDomainMode,
         mut profile: GetUserProfileRespData,
         generation: u64,
+        network_epoch: u64,
     ) -> anyhow::Result<LoginRespData> {
         anyhow::ensure!(
             !profile.uid.is_empty() && !profile.s.is_empty(),
             "登录响应缺少有效账号或会话"
         );
         let config = self.app.get_config();
-        let (saved, epoch) = {
+        let (saved, epoch) = crate::network_state::with_current_epoch(network_epoch, || {
             let mut current = config.write();
             if generation != self.auth_generation.load(Ordering::SeqCst) {
                 return Err(crate::errors::login_cancelled());
@@ -956,8 +991,9 @@ impl JmClient {
             state.epoch += 1;
             state.token = token;
             state.profile = Some(profile.clone());
-            (saved, state.epoch)
-        };
+            Ok((saved, state.epoch))
+        })
+        .ok_or_else(crate::errors::login_cancelled)??;
         crate::config_updates::publish(&self.app, &saved);
         let _ = SessionChangedEvent {
             session_epoch: epoch,
