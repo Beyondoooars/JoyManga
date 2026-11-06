@@ -3,6 +3,7 @@ use crate::responses::GetWeeklyInfoRespData;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -49,12 +50,27 @@ pub struct ImageSpeedReport {
 
 const IMAGE_SPEED_REQUESTS: usize = 4;
 const IMAGE_SPEED_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// 预热一次 + 四次并发测量；12 秒会在慢网络上把预热也算进超时，因此单独放宽。
-const IMAGE_SPEED_TIMEOUT: Duration = Duration::from_secs(20);
+/// 每条线路的测量预算；预热有独立的小预算，不再挤占测量时间。
+const IMAGE_SPEED_TIMEOUT: Duration = Duration::from_secs(12);
+/// 预热只建立连接：最多读一小段响应，避免每条候选线路完整下载一张封面。
+const IMAGE_SPEED_WARMUP_TIMEOUT: Duration = Duration::from_secs(4);
+const IMAGE_SPEED_WARMUP_BYTES: usize = 64 * 1024;
 
 /// 进程级测速互斥：前端丢弃旧结果并不会停止后端请求，手动再次测速若并行执行
 /// 会一起抢占带宽。第二个请求直接返回可读的忙碌提示，而不是排队后重复测速。
 static IMAGE_SPEED_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+/// 测速取消标记：前端离开设置页或改动线路时通知后端停止剩余线路。
+static IMAGE_SPEED_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// 请求尽快停止当前图片线路测速；后端会在当前线路探测结束后退出。
+pub fn cancel_image_speed_test() {
+    IMAGE_SPEED_CANCEL.store(true, Ordering::SeqCst);
+}
+
+fn ensure_speed_test_active() -> anyhow::Result<()> {
+    anyhow::ensure!(!IMAGE_SPEED_CANCEL.load(Ordering::SeqCst), "测速已取消");
+    Ok(())
+}
 
 /// 同一封面在每条线路上并发下载数次，以总吞吐而不是单次握手延迟排序。
 /// 每条线路单独使用客户端，避免某个域名的连接池状态污染另一条线路。
@@ -66,6 +82,7 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock()
         .map_err(|_| anyhow::anyhow!("已有图片线路测速正在进行，请等待完成后再试"))?;
+    IMAGE_SPEED_CANCEL.store(false, Ordering::SeqCst);
 
     // 测速开始时固定 VPN 状态与网络代际；中途切换 VPN/代理/默认网络时整轮作废，
     // 避免前半段走代理、后半段走 VPN 的结果被放在一起排序。
@@ -76,6 +93,7 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
 
     let mut results = Vec::with_capacity(candidates.len());
     for candidate in candidates {
+        ensure_speed_test_active()?;
         ensure_same_network(network_epoch)?;
         let result = tokio::time::timeout(
             IMAGE_SPEED_TIMEOUT,
@@ -90,6 +108,7 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
         .await;
         // 网络变化优先于单线路超时报出：否则用户会误以为只是线路慢。
         ensure_same_network(network_epoch)?;
+        ensure_speed_test_active()?;
         let result = match result {
             Ok(result) => result,
             Err(_) => Err(anyhow::anyhow!(
@@ -122,25 +141,39 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
             error,
         });
     }
-    // 线路按实际下载吞吐展示；不可用的线路始终排在可用线路之后。
+    // 线路按实际下载吞吐展示；不可用的排最后，部分样本失败的排在完整成功之后。
     results.sort_by(|a, b| {
-        b.error.is_none().cmp(&a.error.is_none()).then_with(|| {
-            match (a.bytes_per_second, b.bytes_per_second) {
+        b.error
+            .is_none()
+            .cmp(&a.error.is_none())
+            .then_with(|| {
+                (b.successful_samples == IMAGE_SPEED_REQUESTS)
+                    .cmp(&(a.successful_samples == IMAGE_SPEED_REQUESTS))
+            })
+            .then_with(|| match (a.bytes_per_second, b.bytes_per_second) {
                 (Some(a), Some(b)) => b.total_cmp(&a),
                 _ => std::cmp::Ordering::Equal,
-            }
-        })
+            })
     });
-    let best = results
-        .iter()
-        .find(|result| result.error.is_none() && result.bytes > 0)
-        .map(|result| result.mode);
+    let best = usable_best(&results);
     Ok(ImageSpeedReport {
         results,
         best,
         sample_requests: IMAGE_SPEED_REQUESTS,
         vpn_active,
     })
+}
+
+/// 只有全部样本成功且确有字节的线路才能被持久化为“最快线路”。
+fn usable_best(results: &[ImageSpeedResult]) -> Option<ImageDomainMode> {
+    results
+        .iter()
+        .find(|result| {
+            result.error.is_none()
+                && result.bytes > 0
+                && result.successful_samples == IMAGE_SPEED_REQUESTS
+        })
+        .map(|result| result.mode)
 }
 
 /// 测速候选：内置线路 + 自定义线路。自定义域名与某条内置线路相同时
@@ -232,17 +265,22 @@ async fn probe_image_domain(
     referer: &str,
 ) -> anyhow::Result<ProbeSummary> {
     let client = config
-        .apply_proxy(
+        .apply_proxy_best_effort(
             crate::tls::client_builder()
                 .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(8)),
-        )?
+            "图片线路测速",
+        )
         .build()?;
     let url = format!("https://{domain}/media/albums/{comic_id}_3x4.jpg");
 
-    // 先热身一次，建立 TCP/TLS 连接并填充客户端连接池；冷启动握手不计入吞吐，
-    // 否则高 RTT 线路会被系统性低估。
-    let _ = download_speed_sample(client.clone(), url.clone(), referer.to_string()).await;
+    // 预热只建立 TCP/TLS 连接（最多读 64KB），不占用测量预算；
+    // 服务器忽略 Range 时最多多读一小段，不再为预热完整下载一张封面。
+    let _ = tokio::time::timeout(
+        IMAGE_SPEED_WARMUP_TIMEOUT,
+        warm_up_connection(client.clone(), url.clone(), referer.to_string()),
+    )
+    .await;
     ensure_same_network(network_epoch)?;
 
     let started = Instant::now();
@@ -263,19 +301,47 @@ async fn probe_image_domain(
     summarize_samples(samples, elapsed_ms)
 }
 
+/// 用 Range 请求预热连接：响应足够小时完整读完，让连接回到连接池；
+/// 服务器忽略 Range 时最多只读 `IMAGE_SPEED_WARMUP_BYTES` 就关闭。
+async fn warm_up_connection(
+    client: reqwest::Client,
+    url: String,
+    referer: String,
+) -> anyhow::Result<()> {
+    let mut response = apply_image_speed_headers(client.get(url), &referer)
+        .header("range", format!("bytes=0-{}", IMAGE_SPEED_WARMUP_BYTES - 1))
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut read = 0usize;
+    while let Some(chunk) = response.chunk().await? {
+        read = read.saturating_add(chunk.len());
+        if read >= IMAGE_SPEED_WARMUP_BYTES {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// 使用与正式下载一致的请求头，避免测速路径与章节图片路径得到不同响应。
+fn apply_image_speed_headers(
+    request: reqwest::RequestBuilder,
+    referer: &str,
+) -> reqwest::RequestBuilder {
+    request
+        .header("user-agent", crate::jm_client::IMAGE_USER_AGENT)
+        .header("accept", crate::jm_client::IMAGE_ACCEPT)
+        .header("x-requested-with", crate::jm_client::IMAGE_REQUESTED_WITH)
+        .header("accept-language", crate::jm_client::IMAGE_ACCEPT_LANGUAGE)
+        .header("referer", referer)
+}
+
 async fn download_speed_sample(
     client: reqwest::Client,
     url: String,
     referer: String,
 ) -> anyhow::Result<u64> {
-    let mut response = client
-        .get(url)
-        .header("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-        .header("accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-        .header("x-requested-with", "com.JMComic3.app")
-        .header("accept-language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
-        .header("referer", referer)
+    let mut response = apply_image_speed_headers(client.get(url), &referer)
         .send()
         .await?
         .error_for_status()?;
@@ -319,6 +385,8 @@ pub async fn check(
     domain_health: (u32, bool),
 ) -> anyhow::Result<NetworkCheckReport> {
     config.validate()?;
+    // 连接检查期间网络路径变化时整份报告作废，避免两条路径的结果混在一起。
+    let network_epoch = crate::network_state::network_epoch();
     let client = config
         .apply_proxy(
             crate::tls::client_builder()
@@ -386,6 +454,10 @@ pub async fn check(
         )
     };
     let (api, image) = tokio::join!(api, image);
+    anyhow::ensure!(
+        crate::network_state::epoch_is_current(network_epoch),
+        "检查期间网络路径已变化（VPN/代理/默认网络切换），请重新检查"
+    );
     let current_api_domain = config.get_api_domain();
     let (failures, cooling_down) = domain_health;
     let domain = domain_probe(
@@ -532,6 +604,28 @@ mod tests {
         assert_eq!(summary.successful_samples, 3);
         assert_eq!(summary.elapsed_ms, 2_000);
         assert_eq!(bytes_per_second(summary.bytes, summary.elapsed_ms), 300.0);
+    }
+
+    #[test]
+    fn only_fully_successful_lines_can_be_best() {
+        let result = |mode, successful_samples| ImageSpeedResult {
+            mode,
+            label: format!("{mode:?}"),
+            domain: format!("{mode:?}.example"),
+            bytes: 1024,
+            elapsed_ms: 1_000,
+            bytes_per_second: Some(1.0),
+            successful_samples,
+            error: None,
+        };
+        let partial = result(ImageDomainMode::Domain1, 1);
+        let full = result(ImageDomainMode::Domain2, IMAGE_SPEED_REQUESTS);
+        // 部分样本成功的线路即使单流吞吐更高，也不能被“使用最快线路”持久化。
+        assert_eq!(
+            usable_best(&[partial.clone(), full.clone()]),
+            Some(ImageDomainMode::Domain2)
+        );
+        assert_eq!(usable_best(&[partial]), None);
     }
 
     #[test]

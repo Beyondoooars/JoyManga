@@ -13,6 +13,8 @@ export const commands = {
     typedError<NetworkCheckReport, CommandError>(__TAURI_INVOKE('check_network', { config, comicId })),
   testImageDownloadSpeed: (config: Config, comicId: number) =>
     typedError<ImageSpeedReport, CommandError>(__TAURI_INVOKE('test_image_download_speed', { config, comicId })),
+  /**  请求停止正在进行的图片线路测速；前端离开设置页或改动线路时调用。 */
+  cancelImageSpeedTest: () => __TAURI_INVOKE<void>('cancel_image_speed_test'),
   getApiDomainStatus: () => typedError<NetworkProbe, CommandError>(__TAURI_INVOKE('get_api_domain_status')),
   initializeAndroidStorage: (libraryDir: string) =>
     typedError<Config, CommandError>(__TAURI_INVOKE('initialize_android_storage', { libraryDir })),

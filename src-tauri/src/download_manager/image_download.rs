@@ -25,6 +25,16 @@ use super::{DownloadManager, DownloadTaskState};
 const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PAGES: usize = 10_000;
 
+/// 单张图片的网络请求状态。
+///
+/// `in_request` 只覆盖 `get_img_data_and_format` 的 await：暂停发生在本地处理/落盘
+/// 时不能重建 future，否则已经完成的页面会被重复计数。
+#[derive(Default)]
+pub(crate) struct NetworkRequestState {
+    pub(crate) permit: Option<DownloadPermit>,
+    pub(crate) in_request: bool,
+}
+
 pub(crate) struct DownloadImgTask {
     app: AppHandle,
     download_manager: DownloadManager,
@@ -33,9 +43,9 @@ pub(crate) struct DownloadImgTask {
     index: usize,
     temp_download_path: PathBuf,
     block_num: u32,
-    /// 全局图片许可只覆盖网络请求本身；暂停/取消时由 `process` 立即归还，
-    /// 避免本地解码、编码和落盘占用其他章节的下载名额。
-    network_permit: Mutex<Option<DownloadPermit>>,
+    /// 全局图片许可与请求阶段。暂停/取消时由 `process` 立即归还许可；
+    /// 若请求已经发出，还会重建下载 future，确保恢复后重新获取许可。
+    network_request: Mutex<NetworkRequestState>,
 }
 
 impl DownloadImgTask {
@@ -54,24 +64,27 @@ impl DownloadImgTask {
             index,
             temp_download_path,
             block_num,
-            network_permit: Mutex::new(None),
+            network_request: Mutex::new(NetworkRequestState::default()),
         }
     }
 
     pub(crate) async fn process(self) {
-        let download_img_task = self.download_img();
-        tokio::pin!(download_img_task);
+        let mut download_img_task = Box::pin(self.download_img());
 
         let mut state_receiver = self.download_task.state_sender.subscribe();
         state_receiver.mark_changed();
 
         loop {
             let state = *state_receiver.borrow();
-            // 网络许可只在请求期间持有；暂停、排队或取消时立即归还，
-            // watch 可能合并 Paused -> Pending 通知，不能只在观察到 Paused 时释放。
-            {
-                let mut permit = self.network_permit.lock();
-                release_inactive_image_permit(state, &mut permit);
+            // 网络许可只在请求期间持有；暂停、排队或取消时立即归还。
+            // 若暂停时请求已经发出，future 会停在 await 上，必须重建它，
+            // 否则恢复后会在没有许可的情况下继续下载。
+            let restart = {
+                let mut request = self.network_request.lock();
+                release_inactive_image_permit(state, &mut request)
+            };
+            if restart {
+                download_img_task = Box::pin(self.download_img());
             }
             tokio::select! {
                 () = &mut download_img_task, if state == DownloadTaskState::Downloading => break,
@@ -110,6 +123,10 @@ impl DownloadImgTask {
 
         tracing::trace!(url, comic_title, chapter_title, "开始下载图片");
 
+        // 限制同时持有已下载图片的任务数；网络许可只限制请求并发，
+        // 这里防止多章节并发时缓冲图片随章节数放大。
+        let _buffer_permit = self.download_manager.buffer_sem.acquire().await;
+
         // CDN 偶发在响应体读到一半时断开（日志里的 peer closed connection）。
         // 断流发生在读取阶段，图片客户端自身的中间件重试覆盖不到，这里补一次
         // 整请求重试：单页失败会让整章停在“下载不完整”，重试成本远低于让用户手动重下。
@@ -118,7 +135,11 @@ impl DownloadImgTask {
             // 全局图片并发只限制网络请求：拿到响应后立刻归还许可，
             // 后续解码、反混淆、编码与落盘不再占用其他章节的下载名额。
             let permit = self.download_manager.img_sem.acquire().await;
-            *self.network_permit.lock() = Some(permit);
+            {
+                let mut request = self.network_request.lock();
+                request.permit = Some(permit);
+                request.in_request = true;
+            }
 
             let request_started = Instant::now();
             let result = self.app.get_jm_client().get_img_data_and_format(url).await;
@@ -126,7 +147,11 @@ impl DownloadImgTask {
                 .transfer_network_nanos
                 .fetch_add(elapsed_nanos(request_started), Ordering::Relaxed);
             // 成功或失败都先归还许可，再决定重试或进入本地处理。
-            *self.network_permit.lock() = None;
+            {
+                let mut request = self.network_request.lock();
+                request.permit = None;
+                request.in_request = false;
+            }
 
             match result {
                 Ok(data) => break data,
@@ -245,14 +270,22 @@ impl DownloadImgTask {
     }
 }
 
+/// 释放非下载状态下的网络许可；返回是否需要重建下载 future。
+///
+/// 请求已经发出时仅释放许可不够：future 会停在 await 上，恢复后不会再获取许可。
+/// 返回 true 让调用方丢弃并重建 future，恢复时重新走许可获取。
 pub(crate) fn release_inactive_image_permit(
     state: DownloadTaskState,
-    permit: &mut Option<DownloadPermit>,
-) {
-    // watch 可能合并 Paused -> Pending 通知，不能只在观察到 Paused 时释放名额。
-    if state != DownloadTaskState::Downloading {
-        *permit = None;
+    request: &mut NetworkRequestState,
+) -> bool {
+    if state == DownloadTaskState::Downloading {
+        return false;
     }
+    // watch 可能合并 Paused -> Pending 通知，不能只在观察到 Paused 时释放名额。
+    let restart = request.in_request;
+    request.permit = None;
+    request.in_request = false;
+    restart
 }
 
 /// 单张图片的本地耗时拆分，用于区分 CPU 处理与落盘开销。
@@ -544,6 +577,48 @@ mod page_reuse_tests {
         assert_eq!(image::guess_format(&page).unwrap(), ImageFormat::Jpeg);
         assert_eq!(std::fs::read(source).unwrap(), original);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod permit_release_tests {
+    use super::*;
+
+    #[test]
+    fn pause_while_idle_releases_without_restart() {
+        let mut request = NetworkRequestState::default();
+        assert!(!release_inactive_image_permit(
+            DownloadTaskState::Paused,
+            &mut request
+        ));
+    }
+
+    #[test]
+    fn pause_mid_request_requires_future_restart() {
+        let mut request = NetworkRequestState {
+            permit: None,
+            in_request: true,
+        };
+        // 请求已发出时只释放许可不够：必须重建 future，恢复后才能重新获取。
+        assert!(release_inactive_image_permit(
+            DownloadTaskState::Paused,
+            &mut request
+        ));
+        assert!(!request.in_request);
+    }
+
+    #[tokio::test]
+    async fn downloading_state_keeps_permit() {
+        let limiter = crate::download_scheduler::DownloadLimiter::new(1);
+        let mut request = NetworkRequestState {
+            permit: Some(limiter.acquire().await),
+            in_request: true,
+        };
+        assert!(!release_inactive_image_permit(
+            DownloadTaskState::Downloading,
+            &mut request
+        ));
+        assert!(request.permit.is_some());
     }
 }
 

@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 /// 当前网络是否按流量计费。默认 false（未知情况放行）。
 static METERED: AtomicBool = AtomicBool::new(false);
@@ -17,6 +17,9 @@ static VPN: AtomicBool = AtomicBool::new(false);
 /// 平台给出的默认网络标识（Wi-Fi/蜂窝的具体网络）。仅用于识别“换了网络”，
 /// 不写入日志，也不参与代理选择。
 static NETWORK_KEY: RwLock<Option<String>> = RwLock::new(None);
+/// 快照写入锁：VPN 标志与网络标识必须成对更新，避免两次并发推送交错出
+/// 从未存在过的 (VPN, key) 组合。
+static NETWORK_SNAPSHOT_LOCK: Mutex<()> = Mutex::new(());
 /// 网络路径代际。VPN、手动代理或默认网络变化时递增；请求在启动时记录代际，
 /// 写回线路健康状态前核对，避免旧路径的结果污染新路径。
 static NETWORK_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -53,14 +56,21 @@ pub fn set_vpn(active: bool) -> bool {
 /// 只翻转 VPN 布尔值不够：Wi-Fi 与蜂窝网络互切时 VPN 可能都是 false，
 /// 但连接池和线路健康状态同样不能跨网络复用。`network_key` 为 `None`
 /// 表示平台未提供标识（旧版原生层），此时只比较 VPN 状态。
+/// 首次拿到标识只建立基线，不视为换网：冷启动不应因此重建客户端。
 pub fn set_network_snapshot(active: bool, network_key: Option<&str>) -> bool {
+    let _snapshot_guard = NETWORK_SNAPSHOT_LOCK.lock();
     let vpn_changed = set_vpn(active);
     let key_changed = match network_key {
         Some(key) => {
             let next = key.trim();
             let next = (!next.is_empty()).then(|| next.to_string());
             let mut current = NETWORK_KEY.write();
+            let known = current.is_some();
             if *current == next {
+                false
+            } else if !known {
+                // 首个快照只记录基线；旧版原生没有 key，不能把“第一次拿到标识”当成换网。
+                *current = next;
                 false
             } else {
                 *current = next;
@@ -150,7 +160,10 @@ mod tests {
     #[test]
     fn network_snapshot_detects_key_and_vpn_changes() {
         let _guard = STATE_TEST_LOCK.lock();
-        assert!(set_network_snapshot(false, Some("test-wifi-a")));
+        *NETWORK_KEY.write() = None;
+        let _ = set_vpn(false);
+        // 首个快照只建立基线，不算网络变化。
+        assert!(!set_network_snapshot(false, Some("test-wifi-a")));
         assert!(!set_network_snapshot(false, Some("test-wifi-a")));
         // Wi-Fi ↔ 蜂窝：VPN 标志不变，但默认网络已切换
         assert!(set_network_snapshot(false, Some("test-cell-b")));
@@ -159,6 +172,7 @@ mod tests {
         assert!(!set_network_snapshot(true, None));
         assert!(set_network_snapshot(false, None));
         assert!(!set_network_snapshot(false, None));
+        *NETWORK_KEY.write() = None;
     }
 
     #[test]

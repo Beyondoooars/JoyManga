@@ -21,6 +21,8 @@ declare global {
       canWritePublicDownloads(): boolean
       isVpnActive?(): boolean
       networkKey?(): string | null
+      /** 一次 JsBridge 调用同时返回 VPN 与网络标识（JSON 字符串）。 */
+      networkSnapshot?(): string
       requestAllFilesAccess(): void
       downloadAndInstallApk(url: string, fileName: string): void
       updateDownloadState(): void
@@ -240,12 +242,19 @@ export function watchNetworkVpn(handler: (active: boolean, networkKey: string | 
   // 冷启动时原生在页面注册监听之前就推送过事件，错过了就再也没有下一次
   // （除非用户又切换一次网络）。这里主动拉一次当前状态兜底。
   // 原生同时提供网络标识：界面不可见时丢弃的切换事件，也能在恢复后识别。
-  // 旧版原生没有 networkKey 时传 null，只比较 VPN 状态，不误判网络切换。
+  // 新版原生用一次调用同时返回两个值；旧版原生没有 networkSnapshot，
+  // 回退到两次调用，只比较 VPN 状态，不误判网络切换。
   try {
-    handler(
-      window.JmAndroid?.isVpnActive?.() ?? false,
-      window.JmAndroid?.networkKey?.() ?? null,
-    )
+    const snapshot = window.JmAndroid?.networkSnapshot?.()
+    if (typeof snapshot === 'string') {
+      const state = JSON.parse(snapshot) as { active?: unknown; networkKey?: unknown }
+      handler(state.active === true, typeof state.networkKey === 'string' ? state.networkKey : null)
+    } else {
+      handler(
+        window.JmAndroid?.isVpnActive?.() ?? false,
+        window.JmAndroid?.networkKey?.() ?? null,
+      )
+    }
   } catch (error) {
     console.error('读取 VPN 状态失败', error)
   }
