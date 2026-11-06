@@ -78,6 +78,13 @@ pub(crate) struct DownloadTask {
     pub(crate) file_writes: Arc<TaskFileWrites>,
     pub(crate) settings: DownloadSettings,
     pub(crate) downloaded_bytes: Arc<AtomicU64>,
+    /// 网络请求耗时（从发起 `get_img_data_and_format` 到拿到响应，
+    /// 含其内部重试与图片层的整请求重试）。
+    pub(crate) transfer_network_nanos: Arc<AtomicU64>,
+    /// 图片解码/反混淆/编码耗时。
+    pub(crate) image_processing_nanos: Arc<AtomicU64>,
+    /// 图片落盘（含原子写入与 fsync）耗时。
+    pub(crate) image_write_nanos: Arc<AtomicU64>,
 }
 
 impl DownloadTask {
@@ -117,6 +124,9 @@ impl DownloadTask {
             file_writes: Arc::default(),
             settings,
             downloaded_bytes: Arc::new(AtomicU64::new(0)),
+            transfer_network_nanos: Arc::new(AtomicU64::new(0)),
+            image_processing_nanos: Arc::new(AtomicU64::new(0)),
+            image_write_nanos: Arc::new(AtomicU64::new(0)),
         };
 
         Ok(task)
@@ -166,6 +176,9 @@ impl DownloadTask {
         self.downloaded_img_count.store(0, Ordering::Relaxed);
         self.total_img_count.store(0, Ordering::Relaxed);
         self.downloaded_bytes.store(0, Ordering::Relaxed);
+        self.transfer_network_nanos.store(0, Ordering::Relaxed);
+        self.image_processing_nanos.store(0, Ordering::Relaxed);
+        self.image_write_nanos.store(0, Ordering::Relaxed);
         let transfer_started = Instant::now();
         self.set_stage(TaskStage::FetchMeta);
         let comic_title = &self.comic.name;
@@ -242,16 +255,31 @@ impl DownloadTask {
             self.fail_with_error("图片任务异常退出".to_string(), &error);
             return;
         }
-        let network_elapsed = transfer_started.elapsed();
+        // `chapter_transfer_completed` 是整章传输阶段的端到端指标：分母从获取元数据
+        // 之前开始，包含本地页面复用、排队、暂停以及图片处理/落盘；分子只是本次
+        // 成功保存的新下载字节。它不能当作 HTTP 吞吐，只用于章节整体趋势对比。
+        // 需要拆分网络、处理与写入耗时时看下面的分项计数。
+        let end_to_end_elapsed = transfer_started.elapsed();
+        let downloaded_bytes = self.downloaded_bytes.load(Ordering::Relaxed);
+        // 两个并发度必须用同一个读锁快照：parking_lot 写优先，若持有第一个读锁时
+        // 再次 read()，遇到排队的写者会形成互相等待。
+        let (img_concurrency, chapter_concurrency) = {
+            let config = self.app.get_config();
+            let config = config.read();
+            (config.img_concurrency, config.chapter_concurrency)
+        };
         tracing::info!(
             task_id = %self.task_id,
             comic_id = self.comic.id,
             chapter_id = self.chapter_info.chapter_id,
-            bytes = self.downloaded_bytes.load(Ordering::Relaxed),
-            elapsed_ms = u64::try_from(network_elapsed.as_millis()).unwrap_or(u64::MAX),
-            bytes_per_second = self.downloaded_bytes.load(Ordering::Relaxed) as f64 / network_elapsed.as_secs_f64().max(0.001),
-            img_concurrency = self.app.get_config().read().img_concurrency,
-            chapter_concurrency = self.app.get_config().read().chapter_concurrency,
+            bytes = downloaded_bytes,
+            end_to_end_elapsed_ms = u64::try_from(end_to_end_elapsed.as_millis()).unwrap_or(u64::MAX),
+            end_to_end_bytes_per_second = downloaded_bytes as f64 / end_to_end_elapsed.as_secs_f64().max(0.001),
+            transfer_network_ms = self.transfer_network_nanos.load(Ordering::Relaxed) / 1_000_000,
+            image_processing_ms = self.image_processing_nanos.load(Ordering::Relaxed) / 1_000_000,
+            image_write_ms = self.image_write_nanos.load(Ordering::Relaxed) / 1_000_000,
+            img_concurrency,
+            chapter_concurrency,
             vpn = crate::network_state::is_vpn_active(),
             "chapter_transfer_completed"
         );

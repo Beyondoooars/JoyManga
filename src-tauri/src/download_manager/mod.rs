@@ -40,6 +40,9 @@ pub struct DownloadManager {
     app: AppHandle,
     pub(crate) chapter_sem: Arc<DownloadLimiter>,
     pub(crate) img_sem: Arc<DownloadLimiter>,
+    /// 同时持有已下载图片的任务上限：网络许可只管请求并发，
+    /// 这里防止多章节并发时缓冲图片随章节数放大。
+    pub(crate) buffer_sem: Arc<DownloadLimiter>,
     pub(crate) byte_per_sec: Arc<AtomicU64>,
     download_tasks: Arc<RwLock<HashMap<i64, DownloadTask>>>,
     pub(crate) queue: Arc<DownloadQueue>,
@@ -53,6 +56,12 @@ pub enum DownloadTaskState {
     Cancelled,
     Completed,
     Failed,
+}
+
+/// 缓冲名额：允许本地处理与网络下载重叠，但把同时持有已下载图片的任务数
+/// 限制在网络并发的两倍，避免多章节并发时内存随章节数放大。
+fn buffer_limit(img_concurrency: usize) -> usize {
+    img_concurrency.max(1).saturating_mul(2)
 }
 
 impl DownloadManager {
@@ -72,6 +81,7 @@ impl DownloadManager {
             app,
             chapter_sem: DownloadLimiter::new(chapter_concurrency),
             img_sem: DownloadLimiter::new(img_concurrency),
+            buffer_sem: DownloadLimiter::new(buffer_limit(img_concurrency)),
             byte_per_sec: Arc::new(AtomicU64::new(0)),
             download_tasks: Arc::new(RwLock::new(HashMap::new())),
             queue,
@@ -216,6 +226,8 @@ impl DownloadManager {
         let config = config.read();
         self.chapter_sem.set_limit(config.chapter_concurrency);
         self.img_sem.set_limit(config.img_concurrency);
+        self.buffer_sem
+            .set_limit(buffer_limit(config.img_concurrency));
     }
 
     pub(crate) fn remove_finished_task(&self, chapter_id: i64, task_id: uuid::Uuid) {
@@ -312,7 +324,9 @@ impl DownloadManager {
 #[cfg(test)]
 mod regression_tests {
     use super::download_task::TaskFileWrites;
-    use super::image_download::{is_valid_saved_image, release_inactive_image_permit, save_img};
+    use super::image_download::{
+        is_valid_saved_image, release_inactive_image_permit, save_img, NetworkRequestState,
+    };
     use super::scramble::stitch_img;
     use super::*;
     use crate::atomic_fs;
@@ -323,6 +337,13 @@ mod regression_tests {
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
     use tokio::sync::watch;
+
+    #[test]
+    fn buffer_limit_allows_overlap_but_bounds_per_chapters() {
+        assert_eq!(buffer_limit(1), 2);
+        assert_eq!(buffer_limit(8), 16);
+        assert_eq!(buffer_limit(0), 2);
+    }
 
     #[test]
     fn flat_download_does_not_overwrite_another_comics_root_metadata() {
@@ -353,7 +374,10 @@ mod regression_tests {
         let chapters = DownloadLimiter::new(1);
         let images = DownloadLimiter::new(1);
         let first_chapter = chapters.acquire().await;
-        let mut image_permit = Some(images.acquire().await);
+        let mut image_request = NetworkRequestState {
+            permit: Some(images.acquire().await),
+            in_request: false,
+        };
         let (state, receiver) = watch::channel(DownloadTaskState::Downloading);
 
         state.send_replace(DownloadTaskState::Paused);
@@ -361,7 +385,7 @@ mod regression_tests {
         let second_chapter = chapters.acquire().await;
         // 图片任务尚未被调度，直接观察到 Pending，跳过了 Paused。
         state.send_replace(DownloadTaskState::Pending);
-        release_inactive_image_permit(*receiver.borrow(), &mut image_permit);
+        release_inactive_image_permit(*receiver.borrow(), &mut image_request);
 
         let second_image = tokio::time::timeout(Duration::from_secs(1), images.acquire())
             .await

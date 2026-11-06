@@ -33,12 +33,31 @@ impl std::fmt::Display for LoginSettingsChanged {
 
 impl std::error::Error for LoginSettingsChanged {}
 
+/// 登录期间网络路径（VPN/代理/默认网络）发生变化，本次登录结果不再可信。
+///
+/// 与 [`LoginCancelled`] 分开归类：网络切换不是用户取消，自动登录应当
+/// 换上新路径重试，而不是把整个会话的自动登录判死。
+#[derive(Debug)]
+pub struct LoginNetworkChanged;
+
+impl std::fmt::Display for LoginNetworkChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("登录期间网络路径已变化，请重试")
+    }
+}
+
+impl std::error::Error for LoginNetworkChanged {}
+
 pub(crate) fn login_cancelled() -> anyhow::Error {
     anyhow::Error::new(LoginCancelled)
 }
 
 pub(crate) fn login_settings_changed() -> anyhow::Error {
     anyhow::Error::new(LoginSettingsChanged)
+}
+
+pub(crate) fn login_network_changed() -> anyhow::Error {
+    anyhow::Error::new(LoginNetworkChanged)
 }
 
 /// 错误类别：前端据此决定给用户什么操作，而不是解析中文文案。
@@ -110,6 +129,10 @@ impl CommandError {
 /// 因为前端会按类别改变主操作按钮。
 pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
     for cause in error.chain() {
+        // 网络路径变化可重试（自动登录会换新路径再试），不能归入不可重试的取消。
+        if cause.downcast_ref::<LoginNetworkChanged>().is_some() {
+            return CommandErrorKind::Network;
+        }
         if cause.downcast_ref::<LoginCancelled>().is_some()
             || cause.downcast_ref::<LoginSettingsChanged>().is_some()
         {
@@ -406,6 +429,13 @@ mod tests {
         assert_eq!(settings.kind, CommandErrorKind::Cancelled);
         // 文案里带“登录”也必须是 Cancelled，而不是按文本兜底成 Auth。
         assert!(settings.err_message.contains("登录期间网络设置已改变"));
+    }
+
+    #[test]
+    fn login_network_change_is_retryable_network_error() {
+        let changed = CommandError::from("登录失败", login_network_changed());
+        assert_eq!(changed.kind, CommandErrorKind::Network);
+        assert!(changed.err_message.contains("登录期间网络路径已变化"));
     }
 
     #[test]

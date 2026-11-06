@@ -13,6 +13,8 @@ export const commands = {
     typedError<NetworkCheckReport, CommandError>(__TAURI_INVOKE('check_network', { config, comicId })),
   testImageDownloadSpeed: (config: Config, comicId: number) =>
     typedError<ImageSpeedReport, CommandError>(__TAURI_INVOKE('test_image_download_speed', { config, comicId })),
+  /**  请求停止正在进行的图片线路测速；前端离开设置页或改动线路时调用。 */
+  cancelImageSpeedTest: () => __TAURI_INVOKE<void>('cancel_image_speed_test'),
   getApiDomainStatus: () => typedError<NetworkProbe, CommandError>(__TAURI_INVOKE('get_api_domain_status')),
   initializeAndroidStorage: (libraryDir: string) =>
     typedError<Config, CommandError>(__TAURI_INVOKE('initialize_android_storage', { libraryDir })),
@@ -116,12 +118,15 @@ export const commands = {
   setNetworkMetered: (metered: boolean) =>
     typedError<null, CommandError>(__TAURI_INVOKE('set_network_metered', { metered })),
   /**
-   *  Android 侧把当前默认网络是否由 VPN 承载推给后端。
+   *  Android 侧把当前默认网络是否由 VPN 承载、以及默认网络标识推给后端。
    *
    *  手动 HTTP 代理只在没有 VPN 时生效（见 `Config::effective_proxy_url`），
    *  所以状态一旦变化就必须重建已缓存的 HTTP 客户端，否则要等到下次改设置。
+   *  `network_key` 用来识别 Wi-Fi 与蜂窝网络互切：这种切换 VPN 布尔值通常不变，
+   *  但旧连接池与线路健康状态同样不能跨网络复用。
    */
-  setNetworkVpn: (active: boolean) => typedError<null, CommandError>(__TAURI_INVOKE('set_network_vpn', { active })),
+  setNetworkVpn: (active: boolean, networkKey: string | null) =>
+    typedError<null, CommandError>(__TAURI_INVOKE('set_network_vpn', { active, networkKey })),
   importLocalComics: (paths: string[]) =>
     typedError<ImportReport, CommandError>(__TAURI_INVOKE('import_local_comics', { paths })),
   removeLibraryComic: (comicId: number, deleteFiles: boolean) =>
@@ -658,6 +663,8 @@ export type ImageSpeedResult = {
   elapsedMs: number
   /**  请求失败时没有吞吐量。 */
   bytesPerSecond?: number | null
+  /**  实际成功并完成校验的样本数；低于 `sample_requests` 时吞吐只按成功样本统计。 */
+  successfulSamples: number
   error?: string | null
 }
 
