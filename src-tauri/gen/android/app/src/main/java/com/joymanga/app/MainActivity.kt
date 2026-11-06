@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import android.os.*
 import android.provider.*
@@ -22,6 +23,7 @@ import android.view.WindowManager
 import org.json.*
 import java.io.*
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 class MainActivity : TauriActivity() {
@@ -31,6 +33,9 @@ class MainActivity : TauriActivity() {
     // 安装包的清理/删除单独占一个线程：大文件删除偶尔要等文件系统，不能挡住导入导出的暂存清理。
     private val updateWorker = Executors.newSingleThreadExecutor()
     private var visible = false
+    /// 当前可用的物理网络（Wi-Fi/蜂窝）：VPN 开启时默认网络是隧道，
+    /// 只有跟踪这一层才能发现底层换网。
+    private val physicalNetworks = ConcurrentHashMap<Network, String>()
     private var activeDownloads = 0
     private val handler = Handler(Looper.getMainLooper())
     private var serviceUpdateScheduled = false
@@ -156,18 +161,61 @@ class MainActivity : TauriActivity() {
             manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                     pushMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
-                    pushVpn(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN), network.toString())
+                    pushVpn(
+                        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+                        networkPathKey(network),
+                    )
                 }
                 override fun onLost(network: Network) {
-                    pushMetered(manager.isActiveNetworkMetered)
-                    pushVpn(isVpnActive(manager), manager.activeNetwork?.toString())
+                    pushCurrentNetworkState()
                 }
             })
-            pushMetered(manager.isActiveNetworkMetered)
-            pushVpn(isVpnActive(manager), manager.activeNetwork?.toString())
+            // 默认网络回调在 VPN 下只报告隧道；额外跟踪物理网络，
+            // 把隧道底层的 Wi-Fi↔蜂窝切换也纳入网络路径标识。
+            val physicalRequest = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build()
+            manager.registerNetworkCallback(
+                physicalRequest,
+                object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) {
+                        updatePhysicalNetwork(manager, network)
+                        pushCurrentNetworkState()
+                    }
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        capabilities: NetworkCapabilities,
+                    ) {
+                        physicalNetworks[network] = physicalKind(capabilities)
+                        pushCurrentNetworkState()
+                    }
+                    override fun onLost(network: Network) {
+                        physicalNetworks.remove(network)
+                        pushCurrentNetworkState()
+                    }
+                },
+            )
+            pushCurrentNetworkState()
         } catch (error: Exception) {
             android.util.Log.w("JoyManga", "读取网络计费状态失败", error)
         }
+    }
+
+    /** 启动/换网/物理网络变化时统一推送一次当前状态。 */
+    private fun pushCurrentNetworkState() {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        pushMetered(manager.isActiveNetworkMetered)
+        pushCurrentVpn(manager)
+    }
+
+    /**
+     * 同一时刻采样 VPN 标志与网络路径标识：分开调用会在网络切换瞬间拼出
+     * 从未存在过的 (active, networkKey) 组合。
+     */
+    private fun pushCurrentVpn(manager: ConnectivityManager) {
+        val network = manager.activeNetwork
+        pushVpn(isVpnActive(manager, network), networkPathKey(network))
     }
 
     /**
@@ -178,30 +226,76 @@ class MainActivity : TauriActivity() {
      * 跳过用户手动配置的代理。默认网络的能力里出现 TRANSPORT_VPN 才说明流量
      * 真的走 VPN。NET_CAPABILITY_NOT_VPN 在 API 28+ 才存在，这里用传输类型判断。
      */
-    private fun isVpnActive(manager: ConnectivityManager): Boolean {
-        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
+    private fun isVpnActive(
+        manager: ConnectivityManager,
+        network: Network? = manager.activeNetwork,
+    ): Boolean {
+        val capabilities = manager.getNetworkCapabilities(network) ?: return false
         return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
     }
 
+    /**
+     * 路径标识 = 默认网络 + 当前承载流量的物理网络。
+     * VPN 开启时默认网络是隧道，只有后半段能反映底层 Wi-Fi/蜂窝切换。
+     */
+    private fun networkPathKey(network: Network?): String =
+        "${network?.toString() ?: "none"}|${physicalPathKey()}"
+
+    private fun updatePhysicalNetwork(manager: ConnectivityManager, network: Network) {
+        val capabilities = manager.getNetworkCapabilities(network) ?: return
+        physicalNetworks[network] = physicalKind(capabilities)
+    }
+
+    private fun physicalKind(capabilities: NetworkCapabilities): String = when {
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cell"
+        else -> "other"
+    }
+
+    /** Wi-Fi/有线优先，其次蜂窝；同类型按 netId 排序，保证标识稳定。 */
+    private fun physicalPathKey(): String {
+        val candidates = physicalNetworks.entries.map { (network, kind) -> kind to network.toString() }
+        val best = candidates.minWithOrNull(
+            compareBy({ physicalRank(it.first) }, { it.second }),
+        ) ?: return "none"
+        return "${best.first}:${best.second}"
+    }
+
+    private fun physicalRank(kind: String): Int = when (kind) {
+        "wifi", "ethernet" -> 0
+        "cell" -> 1
+        else -> 2
+    }
+
     private fun pushMetered(metered: Boolean) {
-        if (!visible) return
         runOnUiThread {
-            appWebView?.evaluateJavascript(
-                "window.dispatchEvent(new CustomEvent('jm-network-metered', {detail:$metered}))", null)
+            try {
+                appWebView?.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('jm-network-metered', {detail:$metered}))", null)
+            } catch (error: Exception) {
+                android.util.Log.w("JoyManga", "推送计费状态失败", error)
+            }
         }
     }
 
     /**
-     * VPN 与默认网络标识一起推送：后端据此决定是否跳过手动 HTTP 代理
-     * （见 Config::effective_proxy_url），并在默认网络真正变化时丢弃旧网络的线路健康状态。
+     * VPN 与网络路径标识一起推送：后端据此决定是否跳过手动 HTTP 代理
+     * （见 Config::effective_proxy_url），并在路径变化时丢弃旧网络的线路健康状态。
+     *
+     * 不按 `visible` 过滤：下载在后台 Service 侧继续，换网/VPN 变化必须送到 Rust，
+     * 否则后台下载会一直沿用旧路径。WebView 已销毁时推送失败只记日志。
      */
     private fun pushVpn(active: Boolean, networkKey: String?) {
-        if (!visible) return
         // 用 JSONObject 生成整个 detail，避免把 Network.toString() 直接拼进脚本。
         val detail = JSONObject().put("active", active).put("networkKey", networkKey ?: JSONObject.NULL)
         runOnUiThread {
-            appWebView?.evaluateJavascript(
-                "window.dispatchEvent(new CustomEvent('jm-network-vpn', {detail:$detail}))", null)
+            try {
+                appWebView?.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('jm-network-vpn', {detail:$detail}))", null)
+            } catch (error: Exception) {
+                android.util.Log.w("JoyManga", "推送 VPN 状态失败", error)
+            }
         }
     }
 
@@ -211,9 +305,7 @@ class MainActivity : TauriActivity() {
         AppState.activity = this
         AppState.foreground = true
         updateDownloadService()
-        val manager = getSystemService(ConnectivityManager::class.java)
-        pushMetered(manager.isActiveNetworkMetered)
-        pushVpn(isVpnActive(manager), manager.activeNetwork?.toString())
+        pushCurrentNetworkState()
         installPendingUpdate()
     }
     override fun onStop() {
@@ -240,6 +332,8 @@ class MainActivity : TauriActivity() {
         }
         worker.shutdownNow()
         updateWorker.shutdownNow()
+        // 后台推送可能仍在队列里；清空引用后 evaluateJavascript 不会再碰已销毁的 WebView。
+        appWebView = null
         if (AppState.activity === this) AppState.activity = null
         AppState.foreground = false
         super.onDestroy()
@@ -535,8 +629,20 @@ class MainActivity : TauriActivity() {
         @JavascriptInterface fun isVpnActive(): Boolean =
             isVpnActive(getSystemService(ConnectivityManager::class.java))
         /** 页面恢复后主动同步网络标识，补回后台期间丢失的切换事件。 */
-        @JavascriptInterface fun networkKey(): String? =
-            getSystemService(ConnectivityManager::class.java).activeNetwork?.toString()
+        @JavascriptInterface fun networkKey(): String =
+            networkPathKey(getSystemService(ConnectivityManager::class.java).activeNetwork)
+        /**
+         * 一次性返回 VPN 标志与网络路径标识，避免两次 JsBridge 调用之间网络切换
+         * 拼出从未存在过的组合。返回 JSON 字符串；旧前端仍可用上面两个方法。
+         */
+        @JavascriptInterface fun networkSnapshot(): String {
+            val manager = getSystemService(ConnectivityManager::class.java)
+            val network = manager.activeNetwork
+            return JSONObject()
+                .put("active", isVpnActive(manager, network))
+                .put("networkKey", networkPathKey(network))
+                .toString()
+        }
         @JavascriptInterface fun libraryPath(): String = libraryRoot().absolutePath
         /** 公共下载目录下的默认书库：文件管理器直接可见，卸载应用不随之删除。 */
         @JavascriptInterface fun downloadsPath(): String = publicLibraryRoot().absolutePath

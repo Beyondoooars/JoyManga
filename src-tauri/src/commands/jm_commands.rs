@@ -336,6 +336,13 @@ pub async fn test_image_download_speed(
     Ok(result)
 }
 
+/// 请求停止正在进行的图片线路测速；前端离开设置页或改动线路时调用。
+#[tauri::command(async)]
+#[specta::specta]
+pub fn cancel_image_speed_test() {
+    crate::network_check::cancel_image_speed_test();
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn get_image_domain_presets() -> Vec<crate::config::ImageDomainPreset> {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, toRaw, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, toRaw, watch } from 'vue'
 import {
   PhArrowClockwise,
   PhBookOpenText,
@@ -83,6 +83,7 @@ let speedGeneration = 0
 let disposed = false
 let stopVpnWatch: (() => void) | undefined
 let lastVpnActive: boolean | undefined
+let lastNetworkPathKey: string | null | undefined
 
 const domainStatus = ref<NetworkProbe>()
 const appVersion = ref('')
@@ -117,6 +118,7 @@ onBeforeUnmount(() => {
   disposed = true
   stopVpnWatch?.()
   stopVpnWatch = undefined
+  cancelRunningSpeedTest()
   checkGeneration++
   speedGeneration++
 })
@@ -126,6 +128,7 @@ onBeforeUnmount(() => {
 onDeactivated(() => {
   stopVpnWatch?.()
   stopVpnWatch = undefined
+  cancelRunningSpeedTest()
   checkGeneration++
   speedGeneration++
   checking.value = false
@@ -280,6 +283,7 @@ const networkKey = computed(() => {
     : ''
 })
 watch(networkKey, () => {
+  cancelRunningSpeedTest()
   checkGeneration++
   speedGeneration++
   checking.value = false
@@ -293,15 +297,24 @@ watch(networkKey, () => {
 function subscribeVpnWatch() {
   // onMounted 与 onActivated 都会调用；先解绑避免 KeepAlive 往返后重复监听。
   stopVpnWatch?.()
-  stopVpnWatch = watchNetworkVpn((active) => {
-    const changed = lastVpnActive !== undefined && lastVpnActive !== active
+  stopVpnWatch = watchNetworkVpn((active, networkKey) => {
+    // 只比较 VPN 布尔值会漏掉 Wi-Fi↔蜂窝：后端把默认网络标识变化同样视为新路径。
+    const changed = lastVpnActive !== undefined
+      && (lastVpnActive !== active || lastNetworkPathKey !== networkKey)
     lastVpnActive = active
+    lastNetworkPathKey = networkKey
     if (!changed) return
-    // 旧 VPN 路径下的测速结果不再可信；在途请求仍让它跑完再放开按钮。
+    // 旧路径下的测速结果不再可信；同时让后端停止剩余线路。
+    cancelRunningSpeedTest()
     speedGeneration++
     speedReport.value = undefined
     speedError.value = ''
   })
+}
+
+/** 让后端尽快停止剩余线路，避免离开设置页或改配置后继续占用带宽。 */
+function cancelRunningSpeedTest() {
+  void commands.cancelImageSpeedTest().catch(() => { /* 旧后端没有该命令 */ })
 }
 
 async function testImageSpeed() {
@@ -331,12 +344,17 @@ async function applyFastestImageDomain() {
   if (!best || !config || applyingFastest.value) return
   applyingFastest.value = true
   const previous = config.imageDomainMode
+  const previousReport = speedReport.value
   config.imageDomainMode = best
   try {
     await store.saveConfigNow()
     message.success('已使用本次测速最快的图片线路；网络路径变化后需重新测速')
   } catch (error) {
     config.imageDomainMode = previous
+    // 回退配置会再次触发 networkKey watcher 清空报告；等 watcher 跑完再恢复，
+    // 否则一次保存失败会让用户丢掉整轮测速结果、只能重跑。
+    await nextTick()
+    speedReport.value = previousReport
     message.error(`图片线路未能保存：${getErrorMessage(error)}`)
   } finally {
     applyingFastest.value = false

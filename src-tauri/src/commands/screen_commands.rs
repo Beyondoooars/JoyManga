@@ -33,7 +33,7 @@ pub fn set_network_vpn(
     if crate::network_state::set_network_snapshot(active, network_key.as_deref()) {
         // 不记录 network_key 具体值：它可能包含系统网络标识。
         tracing::info!(active, "网络路径已变化，重建 HTTP 客户端并取消在途登录");
-        app.get_jm_client().cancel_login();
+        app.get_jm_client().cancel_login_for_network_change();
         app.get_jm_client().reload_client_for_network_change(true);
     }
     Ok(())
