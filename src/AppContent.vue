@@ -248,8 +248,8 @@ onMounted(() => {
     void commands.setNetworkMetered(metered).catch(() => { /* 旧后端无此命令时忽略 */ })
   })
   // VPN 开启时后端跳过手动代理，否则「开 VPN 反而连不上」
-  stopVpnWatch = watchNetworkVpn((active) => {
-    void commands.setNetworkVpn(active).catch(() => { /* 旧后端无此命令时忽略 */ })
+  stopVpnWatch = watchNetworkVpn((active, networkKey) => {
+    void commands.setNetworkVpn(active, networkKey).catch(() => { /* 旧后端无此命令时忽略 */ })
   })
   // 通知栏"取消当前"：由原生转发事件，这里执行取消并给出反馈
   const onCancelCurrent = async () => {

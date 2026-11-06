@@ -93,8 +93,9 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
         || previous.proxy_host != next.proxy_host
         || previous.proxy_port != next.proxy_port
     {
+        // 代理变化与 VPN 切换等价：旧代理下的冷却与“最近成功线路”不能沿用到新路径。
         app.get_jm_client().cancel_login();
-        app.get_jm_client().reload_client();
+        app.get_jm_client().reload_client_for_network_change(true);
     }
     if previous.chapter_concurrency != next.chapter_concurrency
         || previous.img_concurrency != next.img_concurrency

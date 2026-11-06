@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context};
 use bytes::{Bytes, BytesMut};
 use image::ImageFormat;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use reqwest::StatusCode;
 use reqwest_middleware::ClientWithMiddleware;
 use reqwest_retry::policies::ExponentialBackoff;
@@ -31,6 +31,13 @@ pub(crate) const APP_TOKEN_SECRET: &str = "18comicAPP";
 const APP_TOKEN_SECRET_2: &str = "18comicAPPContent";
 const APP_DATA_SECRET: &str = "185Hcomic3PAPP7R";
 pub(crate) const APP_VERSION: &str = "2.0.13";
+/// 与官方 App 一致的图片请求头，降低被 CDN 拒绝的概率。
+pub(crate) const IMAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+pub(crate) const IMAGE_ACCEPT: &str =
+    "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+/// 官方 App 的包名标识，CDN 据此放行；与本应用自身的包名无关，勿随品牌改名。
+pub(crate) const IMAGE_REQUESTED_WITH: &str = "com.JMComic3.app";
+pub(crate) const IMAGE_ACCEPT_LANGUAGE: &str = "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7";
 /// 动态更新移动端 API 域名的官方地址（返回 AES 加密的域名列表）
 const API_DOMAIN_UPDATE_URLS: [&str; 3] = [
     "https://rup4a04-c01.tos-ap-southeast-1.bytepluses.com/newsvr-2025.txt",
@@ -240,6 +247,8 @@ pub struct JmClient {
     daily_check_in_lock: Arc<tokio::sync::Mutex<()>>,
     auth_generation: Arc<AtomicU64>,
     auth_cancel: tokio::sync::watch::Sender<u64>,
+    /// 本次取消是否由网络路径变化触发：自动登录据此决定换路径重试还是静默让路。
+    auth_cancel_for_network_change: Arc<AtomicBool>,
     img_client: Arc<RwLock<ClientWithMiddleware>>,
     /// 从官方地址动态获取的最新 API 域名（优先于内置预设使用）
     updated_api_domains: Arc<RwLock<Vec<String>>>,
@@ -252,6 +261,9 @@ pub struct JmClient {
     domain_health: Arc<crate::domain_health::DomainHealthStore>,
     /// APP 接口版本号（初始化时为内置版本，可从 /setting 更新）
     app_version: Arc<RwLock<String>>,
+    /// 串行化 HTTP 客户端重建：保存代理设置与网络变化可能同时触发，
+    /// 交错写入会让 API 与图片客户端落在不同路径上。
+    reload_lock: Arc<Mutex<()>>,
 }
 
 impl JmClient {
@@ -276,6 +288,7 @@ impl JmClient {
             daily_check_in_lock: Arc::new(tokio::sync::Mutex::new(())),
             auth_generation: Arc::new(AtomicU64::new(0)),
             auth_cancel: tokio::sync::watch::channel(0).0,
+            auth_cancel_for_network_change: Arc::new(AtomicBool::new(false)),
             img_client,
             updated_api_domains: Arc::new(RwLock::new(cached_api_domains)),
             domain_refresh_at: Arc::new(RwLock::new(None)),
@@ -283,23 +296,46 @@ impl JmClient {
             last_success_domain: Arc::new(RwLock::new(None)),
             domain_health: Arc::new(crate::domain_health::DomainHealthStore::new()),
             app_version: Arc::new(RwLock::new(APP_VERSION.to_string())),
+            reload_lock: Arc::new(Mutex::new(())),
         }
     }
 
-    pub fn reload_client(&self) {
-        self.reload_client_for_network_change(false);
-    }
-
-    /// VPN 改变了实际网络路径：旧路径的延迟与冷却记录不再适用于新路径。
+    /// VPN/代理/默认网络改变了实际网络路径：旧路径的延迟与冷却记录不再适用。
+    ///
+    /// 先推进全局网络代际，再清空旧路径状态。仍在旧路径上进行的请求会在写回
+    /// 健康状态前发现代际不符，从而不会把旧网络的结果带回新路径。
     pub fn reload_client_for_network_change(&self, network_changed: bool) {
+        // 三个客户端必须作为一组构建并写入；否则两个并发调用会交错出
+        // 「API 走旧代理、图片走新代理」这类混合状态。
+        let _reload_guard = self.reload_lock.lock();
         let (api_client, api_client_without_retry) = create_api_clients(&self.app);
         *self.api_client.write() = api_client;
         *self.api_client_without_retry.write() = api_client_without_retry;
         *self.img_client.write() = create_img_client(&self.app);
         if network_changed {
-            *self.last_success_domain.write() = None;
-            self.domain_health.clear();
+            crate::network_state::change_network_path(|| {
+                *self.last_success_domain.write() = None;
+                self.domain_health.clear();
+            });
         }
+    }
+
+    /// 只有网络代际未变化时才记入线路健康状态与最近成功线路。
+    fn record_success_if_current(&self, epoch: u64, domain: &str, latency: Duration) {
+        let recorded = crate::network_state::with_current_epoch(epoch, || {
+            self.domain_health.record_success(domain, latency);
+            *self.last_success_domain.write() = Some(domain.to_string());
+        });
+        if recorded.is_none() {
+            tracing::debug!(domain, "网络路径已变化，丢弃旧路径的成功记录");
+        }
+    }
+
+    /// 只有网络代际未变化时才记录失败；旧路径的超时不能给出新路径的线路降温。
+    fn record_failure_if_current(&self, epoch: u64, domain: &str) {
+        crate::network_state::with_current_epoch(epoch, || {
+            self.domain_health.record_failure(domain);
+        });
     }
 
     /// 从官方地址动态获取最新的移动端 API 域名列表（10 分钟内只刷新一次）。
@@ -461,8 +497,28 @@ impl JmClient {
     }
 
     pub fn cancel_login(&self) {
+        self.cancel_login_with_reason(false);
+    }
+
+    /// 网络路径变化导致登录作废：与用户主动取消/改设置分开，自动登录应换路径重试。
+    pub fn cancel_login_for_network_change(&self) {
+        self.cancel_login_with_reason(true);
+    }
+
+    fn cancel_login_with_reason(&self, network_changed: bool) {
+        self.auth_cancel_for_network_change
+            .store(network_changed, Ordering::SeqCst);
         let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.auth_cancel.send_replace(generation);
+    }
+
+    /// 登录被取消时返回对应类别：网络路径变化可重试，其余取消不重试。
+    fn cancelled_login_error(&self) -> anyhow::Error {
+        if self.auth_cancel_for_network_change.load(Ordering::SeqCst) {
+            crate::errors::login_network_changed()
+        } else {
+            crate::errors::login_cancelled()
+        }
     }
 
     pub fn invalidate_session(&self) {
@@ -643,6 +699,9 @@ impl JmClient {
         Fut: std::future::Future<Output = anyhow::Result<T>>,
     {
         let candidates = self.api_domain_candidates();
+        // 请求开始时记录网络路径代际；换 VPN/代理/默认网络后，旧请求的结果
+        // 不能写回新路径的线路健康状态。
+        let network_epoch = crate::network_state::network_epoch();
         let mut last_error: Option<anyhow::Error> = None;
         // 总预算：候选线路逐个尝试，单个请求自身有超时，但"全部候选都卡到超时"
         // 会让用户等 N×timeout（历史上出现过 5 线路 × 18s ≈ 90 秒转圈）。
@@ -657,13 +716,11 @@ impl JmClient {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             match attempt(candidate.clone(), ts).await {
                 Ok(value) => {
-                    self.domain_health
-                        .record_success(&candidate, started.elapsed());
-                    *self.last_success_domain.write() = Some(candidate);
+                    self.record_success_if_current(network_epoch, &candidate, started.elapsed());
                     return Ok(value);
                 }
                 Err(error) if is_route_unreachable(&error) => {
-                    self.domain_health.record_failure(&candidate);
+                    self.record_failure_if_current(network_epoch, &candidate);
                     tracing::warn!(
                         domain = %candidate,
                         retry,
@@ -752,6 +809,9 @@ impl JmClient {
 
     pub async fn login(&self, username: &str, password: &str) -> anyhow::Result<LoginRespData> {
         let started = Instant::now();
+        // 新登录会取消上一轮；先清掉上一轮的原因，避免旧登录把“网络变化”误传给新一轮。
+        self.auth_cancel_for_network_change
+            .store(false, Ordering::SeqCst);
         let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.auth_cancel.send_replace(generation);
         let mut cancellation = self.auth_cancel.subscribe();
@@ -769,7 +829,7 @@ impl JmClient {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "登录在排队期间被取消"
             );
-            return Err(crate::errors::login_cancelled());
+            return Err(self.cancelled_login_error());
         }
         let config = self.app.get_config().read().clone();
         let result = tokio::select! {
@@ -777,12 +837,16 @@ impl JmClient {
                 result.map_err(|_| anyhow!("登录整体超时，请在设置 → 网络中检查线路或代理"))?
             },
             _ = cancellation.changed() => {
+                let network_changed = self
+                    .auth_cancel_for_network_change
+                    .load(Ordering::SeqCst);
                 tracing::info!(
                     generation,
+                    network_changed,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "登录等待期间收到取消通知"
                 );
-                Err(crate::errors::login_cancelled())
+                Err(self.cancelled_login_error())
             },
         };
         match &result {
@@ -809,6 +873,8 @@ impl JmClient {
         password: &str,
         generation: u64,
     ) -> anyhow::Result<LoginRespData> {
+        // 登录客户端在开始时按当时的 VPN/代理路径构建；路径变化后整轮结果作废。
+        let network_epoch = crate::network_state::network_epoch();
         let client = config
             .apply_proxy(timed_client_builder(Duration::from_secs(12)))?
             .build()?;
@@ -825,7 +891,10 @@ impl JmClient {
         for (index, candidate) in candidates.iter().enumerate() {
             let attempt_started = Instant::now();
             if generation != self.auth_generation.load(Ordering::SeqCst) {
-                return Err(crate::errors::login_cancelled());
+                return Err(self.cancelled_login_error());
+            }
+            if !crate::network_state::epoch_is_current(network_epoch) {
+                return Err(crate::errors::login_network_changed());
             }
             tracing::info!(
                 generation,
@@ -849,6 +918,14 @@ impl JmClient {
                 parse_encrypted_resp::<GetUserProfileRespData>(response, ts, "登录").await
             }
             .await;
+            // 请求发出后网络路径可能已经切换（例如手动代理被跳过）：旧客户端
+            // 拿到的结果不能提交会话，也不能写回新路径的健康状态。
+            if generation != self.auth_generation.load(Ordering::SeqCst) {
+                return Err(self.cancelled_login_error());
+            }
+            if !crate::network_state::epoch_is_current(network_epoch) {
+                return Err(crate::errors::login_network_changed());
+            }
             match result {
                 Ok(profile) => {
                     tracing::info!(
@@ -858,9 +935,11 @@ impl JmClient {
                         elapsed_ms = attempt_started.elapsed().as_millis() as u64,
                         "登录线路成功"
                     );
-                    self.domain_health
-                        .record_success(candidate, std::time::Duration::ZERO);
-                    *self.last_success_domain.write() = Some(candidate.clone());
+                    self.record_success_if_current(
+                        network_epoch,
+                        candidate,
+                        std::time::Duration::ZERO,
+                    );
                     // 成功线路对应内置预设时同步保存该模式；动态域名只记入内存，
                     // 之后的请求会自动优先复用这条可用线路。
                     let mode = if candidate == &config.get_api_domain() {
@@ -868,7 +947,8 @@ impl JmClient {
                     } else {
                         preset_mode_for_domain(candidate).unwrap_or(config.api_domain_mode)
                     };
-                    let outcome = self.commit_login(config, mode, profile, generation);
+                    let outcome =
+                        self.commit_login(config, mode, profile, generation, network_epoch);
                     if let Err(error) = &outcome {
                         tracing::warn!(
                             generation,
@@ -888,7 +968,7 @@ impl JmClient {
                         error = %error,
                         "登录线路不可达，尝试下一条"
                     );
-                    self.domain_health.record_failure(candidate);
+                    self.record_failure_if_current(network_epoch, candidate);
                     last_error = Some(error);
                 }
                 Err(error) => {
@@ -923,16 +1003,17 @@ impl JmClient {
         mode: ApiDomainMode,
         mut profile: GetUserProfileRespData,
         generation: u64,
+        network_epoch: u64,
     ) -> anyhow::Result<LoginRespData> {
         anyhow::ensure!(
             !profile.uid.is_empty() && !profile.s.is_empty(),
             "登录响应缺少有效账号或会话"
         );
         let config = self.app.get_config();
-        let (saved, epoch) = {
+        let (saved, epoch) = crate::network_state::with_current_epoch(network_epoch, || {
             let mut current = config.write();
             if generation != self.auth_generation.load(Ordering::SeqCst) {
-                return Err(crate::errors::login_cancelled());
+                return Err(self.cancelled_login_error());
             }
             let network_unchanged = current.get_api_domain() == base.get_api_domain()
                 && current.proxy_mode == base.proxy_mode
@@ -956,8 +1037,9 @@ impl JmClient {
             state.epoch += 1;
             state.token = token;
             state.profile = Some(profile.clone());
-            (saved, state.epoch)
-        };
+            Ok((saved, state.epoch))
+        })
+        .ok_or_else(crate::errors::login_network_changed)??;
         crate::config_updates::publish(&self.app, &saved);
         let _ = SessionChangedEvent {
             session_epoch: epoch,
@@ -1333,11 +1415,10 @@ impl JmClient {
             self.img_client
                 .read()
                 .get(url)
-                .header("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-                .header("accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-                // 官方 App 的包名标识，CDN 据此放行；与本应用自身的包名无关，勿随品牌改名
-                .header("x-requested-with", "com.JMComic3.app")
-                .header("accept-language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("user-agent", IMAGE_USER_AGENT)
+                .header("accept", IMAGE_ACCEPT)
+                .header("x-requested-with", IMAGE_REQUESTED_WITH)
+                .header("accept-language", IMAGE_ACCEPT_LANGUAGE)
                 .header("referer", referer.clone())
         };
         let http_resp = build_request().send().await.map_err(image_request_error)?;

@@ -13,7 +13,12 @@
     <div id="app"></div>
     <script>
       // 在 Vue/Tauri 模块执行前安装测试桩，不继承或修改真实 WebView IPC。
+      // 回调与事件监听表按 Tauri 2 的注入脚本建模：回调存 Map，事件表为 event -> eventId。
       const callbacks = new Map()
+      function unregisterCallback(id) {
+        callbacks.delete(id)
+        delete window[`_${id}`]
+      }
       window.__TAURI_INTERNALS__ = {
         invoke: (command, args) => window.__uiFixtureInvoke(command, args),
         metadata: {
@@ -22,15 +27,33 @@
         },
         transformCallback: (callback, once = false) => {
           const id = window.crypto.getRandomValues(new Uint32Array(1))[0]
-          window[`_${id}`] = (data) => {
-            if (once) delete window[`_${id}`]
+          const run = (data) => {
+            if (once) unregisterCallback(id)
             return callback?.(data)
           }
-          callbacks.set(id, callback)
+          window[`_${id}`] = run
+          callbacks.set(id, run)
           return id
         },
+        unregisterCallback,
+        runCallback: (id, data) => {
+          const callback = callbacks.get(id)
+          if (callback) callback(data)
+          else console.warn(`[TAURI] Couldn't find callback id ${id}.`)
+        },
+        callbacks,
       }
-      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {}
+      // 对应真实 Tauri 的 __internal_unstable_listeners_object_id__：event -> eventId -> { handlerId }
+      window.__TAURI_EVENT_LISTENERS__ = Object.create(null)
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+        unregisterListener: (event, eventId) => {
+          const eventListeners = window.__TAURI_EVENT_LISTENERS__[event]
+          const listener = eventListeners?.[eventId]
+          if (!listener) return
+          window.__TAURI_INTERNALS__.unregisterCallback(listener.handlerId)
+          delete eventListeners[eventId]
+        },
+      }
     </script>
     <script type="module" src="/tests/ui.mjs"></script>
   </body>
