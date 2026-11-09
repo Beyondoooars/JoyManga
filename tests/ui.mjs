@@ -172,10 +172,10 @@ const listeners = new Map()
 const eventListeners = (window.__TAURI_EVENT_LISTENERS__ ??= Object.create(null))
 let listenerId = 0
 function emitTask(snapshot) {
-  for (const { event, handler } of listeners.values()) {
-    if (event === 'download-task-event') {
-      window.__TAURI_INTERNALS__.runCallback(handler, {
-        event,
+  for (const listener of Object.values(eventListeners['download-task-event'] ?? {})) {
+    if (window.__TAURI_INTERNALS__.callbacks.has(listener.handlerId)) {
+      window.__TAURI_INTERNALS__.runCallback(listener.handlerId, {
+        event: 'download-task-event',
         id: 0,
         payload: { event: 'Create', data: snapshot },
       })
@@ -202,8 +202,14 @@ window.__uiFixtureInvoke = async (command, args) => {
   }
   if (command === 'plugin:event|unlisten') {
     const removed = listeners.delete(args.eventId)
-    const byEvent = eventListeners[args.event]
-    if (byEvent) delete byEvent[args.eventId]
+    if (args.event) {
+      const byEvent = eventListeners[args.event]
+      if (byEvent) delete byEvent[args.eventId]
+    } else {
+      for (const bucket of Object.values(eventListeners)) {
+        delete bucket[args.eventId]
+      }
+    }
     return removed
   }
   if (command === 'plugin:app|version') return '0.2.1'

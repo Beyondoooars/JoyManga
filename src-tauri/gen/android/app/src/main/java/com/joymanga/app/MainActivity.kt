@@ -33,9 +33,15 @@ class MainActivity : TauriActivity() {
     // 安装包的清理/删除单独占一个线程：大文件删除偶尔要等文件系统，不能挡住导入导出的暂存清理。
     private val updateWorker = Executors.newSingleThreadExecutor()
     private var visible = false
+    private data class PhysicalNetworkInfo(val kind: String, val validated: Boolean)
     /// 当前可用的物理网络（Wi-Fi/蜂窝）：VPN 开启时默认网络是隧道，
     /// 只有跟踪这一层才能发现底层换网。
-    private val physicalNetworks = ConcurrentHashMap<Network, String>()
+    private val physicalNetworks = ConcurrentHashMap<Network, PhysicalNetworkInfo>()
+    private var defaultNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var physicalNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastPushedMetered: Boolean? = null
+    private var lastPushedVpnActive: Boolean? = null
+    private var lastPushedNetworkKey: String? = null
     private var activeDownloads = 0
     private val handler = Handler(Looper.getMainLooper())
     private var serviceUpdateScheduled = false
@@ -158,7 +164,7 @@ class MainActivity : TauriActivity() {
     private fun registerNetworkCallback() {
         try {
             val manager = getSystemService(ConnectivityManager::class.java)
-            manager.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+            val defaultCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
                     pushMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
                     pushVpn(
@@ -169,37 +175,64 @@ class MainActivity : TauriActivity() {
                 override fun onLost(network: Network) {
                     pushCurrentNetworkState()
                 }
-            })
+            }
+            defaultNetworkCallback = defaultCallback
+            manager.registerDefaultNetworkCallback(defaultCallback)
+
             // 默认网络回调在 VPN 下只报告隧道；额外跟踪物理网络，
             // 把隧道底层的 Wi-Fi↔蜂窝切换也纳入网络路径标识。
             val physicalRequest = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
                 .build()
-            manager.registerNetworkCallback(
-                physicalRequest,
-                object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) {
-                        updatePhysicalNetwork(manager, network)
+            val physicalCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    if (updatePhysicalNetwork(manager, network)) {
                         pushCurrentNetworkState()
                     }
-                    override fun onCapabilitiesChanged(
-                        network: Network,
-                        capabilities: NetworkCapabilities,
-                    ) {
-                        physicalNetworks[network] = physicalKind(capabilities)
-                        pushCurrentNetworkState()
-                    }
-                    override fun onLost(network: Network) {
-                        physicalNetworks.remove(network)
-                        pushCurrentNetworkState()
-                    }
-                },
-            )
+                }
+                override fun onCapabilitiesChanged(
+                    network: Network,
+                    capabilities: NetworkCapabilities,
+                ) {
+                    physicalNetworks[network] = PhysicalNetworkInfo(
+                        physicalKind(capabilities),
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                    )
+                    pushCurrentNetworkState()
+                }
+                override fun onLost(network: Network) {
+                    physicalNetworks.remove(network)
+                    pushCurrentNetworkState()
+                }
+            }
+            physicalNetworkCallback = physicalCallback
+            manager.registerNetworkCallback(physicalRequest, physicalCallback)
+
+            seedPhysicalNetworks(manager)
             pushCurrentNetworkState()
         } catch (error: Exception) {
             android.util.Log.w("JoyManga", "读取网络计费状态失败", error)
         }
+    }
+
+    /**
+     * 避免异步回调就绪前的冷启动竞态：同步抓取已有的物理网络填入缓存。
+     */
+    private fun seedPhysicalNetworks(manager: ConnectivityManager) {
+        try {
+            for (network in manager.allNetworks) {
+                val capabilities = manager.getNetworkCapabilities(network) ?: continue
+                if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                ) {
+                    physicalNetworks[network] = PhysicalNetworkInfo(
+                        physicalKind(capabilities),
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                    )
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     /** 启动/换网/物理网络变化时统一推送一次当前状态。 */
@@ -239,11 +272,15 @@ class MainActivity : TauriActivity() {
      * VPN 开启时默认网络是隧道，只有后半段能反映底层 Wi-Fi/蜂窝切换。
      */
     private fun networkPathKey(network: Network?): String =
-        "${network?.toString() ?: "none"}|${physicalPathKey()}"
+        "${network?.toString() ?: "none"}|${physicalPathKey(network)}"
 
-    private fun updatePhysicalNetwork(manager: ConnectivityManager, network: Network) {
-        val capabilities = manager.getNetworkCapabilities(network) ?: return
-        physicalNetworks[network] = physicalKind(capabilities)
+    private fun updatePhysicalNetwork(manager: ConnectivityManager, network: Network): Boolean {
+        val capabilities = manager.getNetworkCapabilities(network) ?: return false
+        physicalNetworks[network] = PhysicalNetworkInfo(
+            physicalKind(capabilities),
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+        )
+        return true
     }
 
     private fun physicalKind(capabilities: NetworkCapabilities): String = when {
@@ -253,13 +290,27 @@ class MainActivity : TauriActivity() {
         else -> "other"
     }
 
-    /** Wi-Fi/有线优先，其次蜂窝；同类型按 netId 排序，保证标识稳定。 */
-    private fun physicalPathKey(): String {
-        val candidates = physicalNetworks.entries.map { (network, kind) -> kind to network.toString() }
-        val best = candidates.minWithOrNull(
-            compareBy({ physicalRank(it.first) }, { it.second }),
+    /**
+     * Wi-Fi/有线优先，其次蜂窝；同类型按 netId 排序，保证标识稳定。
+     * 未开启 VPN 时直接采用当前默认网络，避免非默认的备用物理网络引发虚假切换；
+     * 开启 VPN 时优先挑选已验证（validated）的底层物理链路。
+     */
+    private fun physicalPathKey(activeNetwork: Network? = null): String {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        if (activeNetwork != null) {
+            val caps = manager.getNetworkCapabilities(activeNetwork)
+            if (caps != null && !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                return "${physicalKind(caps)}:$activeNetwork"
+            }
+        }
+        val best = physicalNetworks.entries.minWithOrNull(
+            compareBy<Map.Entry<Network, PhysicalNetworkInfo>>(
+                { if (it.value.validated) 0 else 1 },
+                { physicalRank(it.value.kind) },
+                { it.key.toString() },
+            ),
         ) ?: return "none"
-        return "${best.first}:${best.second}"
+        return "${best.value.kind}:${best.key}"
     }
 
     private fun physicalRank(kind: String): Int = when (kind) {
@@ -270,6 +321,8 @@ class MainActivity : TauriActivity() {
 
     private fun pushMetered(metered: Boolean) {
         runOnUiThread {
+            if (lastPushedMetered == metered) return@runOnUiThread
+            lastPushedMetered = metered
             try {
                 appWebView?.evaluateJavascript(
                     "window.dispatchEvent(new CustomEvent('jm-network-metered', {detail:$metered}))", null)
@@ -287,9 +340,12 @@ class MainActivity : TauriActivity() {
      * 否则后台下载会一直沿用旧路径。WebView 已销毁时推送失败只记日志。
      */
     private fun pushVpn(active: Boolean, networkKey: String?) {
-        // 用 JSONObject 生成整个 detail，避免把 Network.toString() 直接拼进脚本。
-        val detail = JSONObject().put("active", active).put("networkKey", networkKey ?: JSONObject.NULL)
         runOnUiThread {
+            if (lastPushedVpnActive == active && lastPushedNetworkKey == networkKey) return@runOnUiThread
+            lastPushedVpnActive = active
+            lastPushedNetworkKey = networkKey
+            // 用 JSONObject 生成整个 detail，避免把 Network.toString() 直接拼进脚本。
+            val detail = JSONObject().put("active", active).put("networkKey", networkKey ?: JSONObject.NULL)
             try {
                 appWebView?.evaluateJavascript(
                     "window.dispatchEvent(new CustomEvent('jm-network-vpn', {detail:$detail}))", null)
@@ -330,6 +386,13 @@ class MainActivity : TauriActivity() {
             try { unregisterReceiver(updateInstallReceiver) } catch (_: Exception) {}
             updateInstallReceiverRegistered = false
         }
+        try {
+            val manager = getSystemService(ConnectivityManager::class.java)
+            defaultNetworkCallback?.let { manager.unregisterNetworkCallback(it) }
+            physicalNetworkCallback?.let { manager.unregisterNetworkCallback(it) }
+        } catch (_: Exception) {}
+        defaultNetworkCallback = null
+        physicalNetworkCallback = null
         worker.shutdownNow()
         updateWorker.shutdownNow()
         // 后台推送可能仍在队列里；清空引用后 evaluateJavascript 不会再碰已销毁的 WebView。
@@ -619,6 +682,8 @@ class MainActivity : TauriActivity() {
     }
 
     inner class AndroidBridge {
+        @JavascriptInterface fun isMetered(): Boolean =
+            getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered
         /**
          * 当前默认网络是否由 VPN 承载；前端在注册监听后主动拉一次。
          *
@@ -640,6 +705,7 @@ class MainActivity : TauriActivity() {
             val network = manager.activeNetwork
             return JSONObject()
                 .put("active", isVpnActive(manager, network))
+                .put("metered", manager.isActiveNetworkMetered)
                 .put("networkKey", networkPathKey(network))
                 .toString()
         }

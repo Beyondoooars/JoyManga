@@ -60,7 +60,7 @@ pub enum DownloadTaskState {
 
 /// 缓冲名额：允许本地处理与网络下载重叠，但把同时持有已下载图片的任务数
 /// 限制在网络并发的两倍，避免多章节并发时内存随章节数放大。
-fn buffer_limit(img_concurrency: usize) -> usize {
+pub(crate) fn buffer_limit(img_concurrency: usize) -> usize {
     img_concurrency.max(1).saturating_mul(2)
 }
 
@@ -375,6 +375,7 @@ mod regression_tests {
         let images = DownloadLimiter::new(1);
         let first_chapter = chapters.acquire().await;
         let mut image_request = NetworkRequestState {
+            buffer_permit: None,
             permit: Some(images.acquire().await),
             in_request: false,
         };

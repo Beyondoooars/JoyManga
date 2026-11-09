@@ -61,10 +61,18 @@ const IMAGE_SPEED_WARMUP_BYTES: usize = 64 * 1024;
 static IMAGE_SPEED_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 /// 测速取消标记：前端离开设置页或改动线路时通知后端停止剩余线路。
 static IMAGE_SPEED_CANCEL: AtomicBool = AtomicBool::new(false);
+static IMAGE_SPEED_CANCEL_NOTIFY: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn cancel_sender() -> &'static tokio::sync::watch::Sender<u64> {
+    IMAGE_SPEED_CANCEL_NOTIFY.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
 
 /// 请求尽快停止当前图片线路测速；后端会在当前线路探测结束后退出。
 pub fn cancel_image_speed_test() {
     IMAGE_SPEED_CANCEL.store(true, Ordering::SeqCst);
+    let sender = cancel_sender();
+    let next = sender.borrow().wrapping_add(1);
+    sender.send_replace(next);
 }
 
 fn ensure_speed_test_active() -> anyhow::Result<()> {
@@ -82,6 +90,8 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock()
         .map_err(|_| anyhow::anyhow!("已有图片线路测速正在进行，请等待完成后再试"))?;
+    let mut cancel_rx = cancel_sender().subscribe();
+    let _ = *cancel_rx.borrow_and_update();
     IMAGE_SPEED_CANCEL.store(false, Ordering::SeqCst);
 
     // 测速开始时固定 VPN 状态与网络代际；中途切换 VPN/代理/默认网络时整轮作废，
@@ -95,27 +105,26 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
     for candidate in candidates {
         ensure_speed_test_active()?;
         ensure_same_network(network_epoch)?;
-        let result = tokio::time::timeout(
-            IMAGE_SPEED_TIMEOUT,
-            probe_image_domain(
+        let result = tokio::select! {
+            _ = cancel_rx.changed() => {
+                return Err(anyhow::anyhow!("测速已取消"));
+            }
+            res = probe_image_domain(
                 &config,
                 &candidate.domain,
                 comic_id,
                 network_epoch,
                 &referer,
-            ),
-        )
-        .await;
+            ) => {
+                if IMAGE_SPEED_CANCEL.load(Ordering::SeqCst) {
+                    return Err(anyhow::anyhow!("测速已取消"));
+                }
+                res
+            }
+        };
         // 网络变化优先于单线路超时报出：否则用户会误以为只是线路慢。
         ensure_same_network(network_epoch)?;
         ensure_speed_test_active()?;
-        let result = match result {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!(
-                "线路测速超过 {} 秒",
-                IMAGE_SPEED_TIMEOUT.as_secs()
-            )),
-        };
         let (bytes, elapsed_ms, successful_samples, error) = match result {
             Ok(summary) => (
                 summary.bytes,
@@ -282,21 +291,34 @@ async fn probe_image_domain(
     )
     .await;
     ensure_same_network(network_epoch)?;
+    ensure_speed_test_active()?;
 
     let started = Instant::now();
-    let mut tasks = FuturesUnordered::new();
-    for _ in 0..IMAGE_SPEED_REQUESTS {
-        let client = client.clone();
-        let url = url.clone();
-        let referer = referer.to_string();
-        tasks.push(download_speed_sample(client, url, referer));
-    }
-    let mut samples = Vec::with_capacity(IMAGE_SPEED_REQUESTS);
-    while let Some(result) = tasks.next().await {
-        samples.push(
-            result.map_err(|error| format!("{error:#}").chars().take(240).collect::<String>()),
-        );
-    }
+    let measure = async {
+        let mut tasks = FuturesUnordered::new();
+        for _ in 0..IMAGE_SPEED_REQUESTS {
+            let client = client.clone();
+            let url = url.clone();
+            let referer = referer.to_string();
+            tasks.push(download_speed_sample(client, url, referer));
+        }
+        let mut samples = Vec::with_capacity(IMAGE_SPEED_REQUESTS);
+        while let Some(result) = tasks.next().await {
+            samples.push(
+                result.map_err(|error| format!("{error:#}").chars().take(240).collect::<String>()),
+            );
+        }
+        samples
+    };
+    let samples = match tokio::time::timeout(IMAGE_SPEED_TIMEOUT, measure).await {
+        Ok(samples) => samples,
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "线路测速超过 {} 秒",
+                IMAGE_SPEED_TIMEOUT.as_secs()
+            ));
+        }
+    };
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     summarize_samples(samples, elapsed_ms)
 }
@@ -425,12 +447,12 @@ pub async fn check(
         };
         let started = Instant::now();
         let result = async {
-            let mut response = client
-                .get(format!(
-                    "https://{}/media/albums/{id}_3x4.jpg",
-                    config.get_image_domain()
-                ))
-                .header("user-agent", "Mozilla/5.0")
+            let referer = format!("https://{}", config.get_api_domain());
+            let url = format!(
+                "https://{}/media/albums/{id}_3x4.jpg",
+                config.get_image_domain()
+            );
+            let mut response = apply_image_speed_headers(client.get(&url), &referer)
                 .send()
                 .await?
                 .error_for_status()?;
