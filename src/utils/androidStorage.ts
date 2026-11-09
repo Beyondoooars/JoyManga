@@ -20,6 +20,7 @@ declare global {
       supportsPublicStorage(): boolean
       canWritePublicDownloads(): boolean
       isVpnActive?(): boolean
+      isMetered?(): boolean
       networkKey?(): string | null
       /** 一次 JsBridge 调用同时返回 VPN 与网络标识（JSON 字符串）。 */
       networkSnapshot?(): string
@@ -210,6 +211,25 @@ export function watchNetworkMetered(handler: (metered: boolean) => void): () => 
   }
   const listener = (event: Event) => handler(Boolean((event as CustomEvent<boolean>).detail))
   window.addEventListener('jm-network-metered', listener)
+  try {
+    let metered: boolean | undefined
+    if (typeof window.JmAndroid?.isMetered === 'function') {
+      metered = window.JmAndroid.isMetered()
+    } else {
+      const snapshot = window.JmAndroid?.networkSnapshot?.()
+      if (typeof snapshot === 'string') {
+        const state = JSON.parse(snapshot) as { metered?: unknown }
+        if (typeof state.metered === 'boolean') {
+          metered = state.metered
+        }
+      }
+    }
+    if (metered !== undefined) {
+      handler(Boolean(metered))
+    }
+  } catch (error) {
+    console.error('读取网络计费状态失败', error)
+  }
   return () => window.removeEventListener('jm-network-metered', listener)
 }
 

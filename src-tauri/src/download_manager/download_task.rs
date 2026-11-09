@@ -241,7 +241,9 @@ impl DownloadTask {
             }
         }
 
-        let window_size = self.app.get_config().read().img_concurrency.max(1);
+        // 窗口上限与 buffer_sem 对齐：单张图片归还网络许可进入本地解码/写盘后，
+        // 允许立即派发下一张图片并发拉取网络数据，使网络下载与本地落盘真正重叠。
+        let window_size = super::buffer_limit(self.app.get_config().read().img_concurrency);
         if let Err(error) = run_bounded(
             urls_with_block_num.into_iter().enumerate(),
             window_size,
