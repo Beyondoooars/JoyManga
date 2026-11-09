@@ -17,7 +17,6 @@ import {
   type CbzMode,
   type ImageDomainPreset,
   type ImageSpeedReport,
-  type ImageSpeedResult,
   type LogLevel,
   type NetworkCheckReport,
   type NetworkProbe,
@@ -129,6 +128,8 @@ onDeactivated(() => {
   stopVpnWatch?.()
   stopVpnWatch = undefined
   cancelRunningSpeedTest()
+  lastVpnActive = undefined
+  lastNetworkPathKey = undefined
   checkGeneration++
   speedGeneration++
   checking.value = false
@@ -274,7 +275,6 @@ const networkKey = computed(() => {
     ? JSON.stringify([
         config.apiDomainMode,
         config.customApiDomain,
-        config.imageDomainMode,
         config.customImageDomain,
         config.proxyMode,
         config.proxyHost,
@@ -283,6 +283,7 @@ const networkKey = computed(() => {
     : ''
 })
 watch(networkKey, () => {
+  if (applyingFastest.value) return
   cancelRunningSpeedTest()
   checkGeneration++
   speedGeneration++
@@ -306,14 +307,20 @@ function subscribeVpnWatch() {
     if (!changed) return
     // 旧路径下的测速结果不再可信；同时让后端停止剩余线路。
     cancelRunningSpeedTest()
+    checkGeneration++
     speedGeneration++
+    checking.value = false
     speedReport.value = undefined
     speedError.value = ''
+    checkResult.value = undefined
+    networkError.value = ''
+    void refreshDomainStatus()
   })
 }
 
 /** 让后端尽快停止剩余线路，避免离开设置页或改配置后继续占用带宽。 */
 function cancelRunningSpeedTest() {
+  if (!speedTesting.value) return
   void commands.cancelImageSpeedTest().catch(() => { /* 旧后端没有该命令 */ })
 }
 
@@ -359,11 +366,6 @@ async function applyFastestImageDomain() {
   } finally {
     applyingFastest.value = false
   }
-}
-
-/** 后端新版会带回成功样本数；bindings 重新生成前先按可选字段读取。 */
-function successfulSamplesOf(result: ImageSpeedResult): number | undefined {
-  return (result as ImageSpeedResult & { successfulSamples?: number }).successfulSamples
 }
 
 function formatSpeed(bytesPerSecond: number) {
@@ -718,8 +720,8 @@ const readingSummary = computed(() => {
                 <span>{{ result.label }} · {{ result.domain }}</span>
                 <strong v-if="result.bytesPerSecond != null">
                   {{ formatSpeed(result.bytesPerSecond) }} · {{ result.elapsedMs }} ms
-                  <template v-if="successfulSamplesOf(result) != null">
-                    · {{ successfulSamplesOf(result) }}/{{ speedReport.sampleRequests }} 次成功
+                  <template v-if="result.successfulSamples != null">
+                    · {{ result.successfulSamples }}/{{ speedReport.sampleRequests }} 次成功
                   </template>
                 </strong>
                 <span v-else class="speed-error">{{ result.error }}</span>

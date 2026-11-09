@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
     Arc,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -247,8 +247,8 @@ pub struct JmClient {
     daily_check_in_lock: Arc<tokio::sync::Mutex<()>>,
     auth_generation: Arc<AtomicU64>,
     auth_cancel: tokio::sync::watch::Sender<u64>,
-    /// 本次取消是否由网络路径变化触发：自动登录据此决定换路径重试还是静默让路。
-    auth_cancel_for_network_change: Arc<AtomicBool>,
+    /// 最近一次因网络路径变化而取消的登录代际（用于区分是换网重试还是用户取消）
+    auth_cancel_network_generation: Arc<AtomicU64>,
     img_client: Arc<RwLock<ClientWithMiddleware>>,
     /// 从官方地址动态获取的最新 API 域名（优先于内置预设使用）
     updated_api_domains: Arc<RwLock<Vec<String>>>,
@@ -288,7 +288,7 @@ impl JmClient {
             daily_check_in_lock: Arc::new(tokio::sync::Mutex::new(())),
             auth_generation: Arc::new(AtomicU64::new(0)),
             auth_cancel: tokio::sync::watch::channel(0).0,
-            auth_cancel_for_network_change: Arc::new(AtomicBool::new(false)),
+            auth_cancel_network_generation: Arc::new(AtomicU64::new(0)),
             img_client,
             updated_api_domains: Arc::new(RwLock::new(cached_api_domains)),
             domain_refresh_at: Arc::new(RwLock::new(None)),
@@ -308,16 +308,16 @@ impl JmClient {
         // 三个客户端必须作为一组构建并写入；否则两个并发调用会交错出
         // 「API 走旧代理、图片走新代理」这类混合状态。
         let _reload_guard = self.reload_lock.lock();
-        let (api_client, api_client_without_retry) = create_api_clients(&self.app);
-        *self.api_client.write() = api_client;
-        *self.api_client_without_retry.write() = api_client_without_retry;
-        *self.img_client.write() = create_img_client(&self.app);
         if network_changed {
             crate::network_state::change_network_path(|| {
                 *self.last_success_domain.write() = None;
                 self.domain_health.clear();
             });
         }
+        let (api_client, api_client_without_retry) = create_api_clients(&self.app);
+        *self.api_client.write() = api_client;
+        *self.api_client_without_retry.write() = api_client_without_retry;
+        *self.img_client.write() = create_img_client(&self.app);
     }
 
     /// 只有网络代际未变化时才记入线路健康状态与最近成功线路。
@@ -506,15 +506,21 @@ impl JmClient {
     }
 
     fn cancel_login_with_reason(&self, network_changed: bool) {
-        self.auth_cancel_for_network_change
-            .store(network_changed, Ordering::SeqCst);
         let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if network_changed {
+            self.auth_cancel_network_generation
+                .store(generation, Ordering::SeqCst);
+        } else {
+            self.auth_cancel_network_generation
+                .store(0, Ordering::SeqCst);
+        }
         self.auth_cancel.send_replace(generation);
     }
 
-    /// 登录被取消时返回对应类别：网络路径变化可重试，其余取消不重试。
-    fn cancelled_login_error(&self) -> anyhow::Error {
-        if self.auth_cancel_for_network_change.load(Ordering::SeqCst) {
+    /// 登录被取消时返回对应类别：若在本轮 `generation` 之后发生过因网络路径变化触发的取消，
+    /// 则即使新一轮登录已再次递增 `auth_generation`，旧登录仍应收到可重试的 `LoginNetworkChanged`。
+    fn cancelled_login_error(&self, generation: u64) -> anyhow::Error {
+        if self.auth_cancel_network_generation.load(Ordering::SeqCst) > generation {
             crate::errors::login_network_changed()
         } else {
             crate::errors::login_cancelled()
@@ -809,9 +815,6 @@ impl JmClient {
 
     pub async fn login(&self, username: &str, password: &str) -> anyhow::Result<LoginRespData> {
         let started = Instant::now();
-        // 新登录会取消上一轮；先清掉上一轮的原因，避免旧登录把“网络变化”误传给新一轮。
-        self.auth_cancel_for_network_change
-            .store(false, Ordering::SeqCst);
         let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.auth_cancel.send_replace(generation);
         let mut cancellation = self.auth_cancel.subscribe();
@@ -829,7 +832,7 @@ impl JmClient {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "登录在排队期间被取消"
             );
-            return Err(self.cancelled_login_error());
+            return Err(self.cancelled_login_error(generation));
         }
         let config = self.app.get_config().read().clone();
         let result = tokio::select! {
@@ -837,16 +840,18 @@ impl JmClient {
                 result.map_err(|_| anyhow!("登录整体超时，请在设置 → 网络中检查线路或代理"))?
             },
             _ = cancellation.changed() => {
+                let current_generation = self.auth_generation.load(Ordering::SeqCst);
                 let network_changed = self
-                    .auth_cancel_for_network_change
-                    .load(Ordering::SeqCst);
+                    .auth_cancel_network_generation
+                    .load(Ordering::SeqCst) > generation;
                 tracing::info!(
                     generation,
+                    current_generation,
                     network_changed,
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "登录等待期间收到取消通知"
                 );
-                Err(self.cancelled_login_error())
+                Err(self.cancelled_login_error(generation))
             },
         };
         match &result {
@@ -864,6 +869,33 @@ impl JmClient {
             ),
         }
         result
+    }
+
+    fn ensure_login_attempt_valid(
+        &self,
+        base: &Config,
+        generation: u64,
+        network_epoch: u64,
+    ) -> anyhow::Result<()> {
+        {
+            let config = self.app.get_config();
+            let current = config.read();
+            let settings_unchanged = current.get_api_domain() == base.get_api_domain()
+                && current.proxy_mode == base.proxy_mode
+                && current.proxy_host == base.proxy_host
+                && current.proxy_port == base.proxy_port;
+            if !settings_unchanged {
+                return Err(crate::errors::login_settings_changed());
+            }
+        }
+        let current_generation = self.auth_generation.load(Ordering::SeqCst);
+        if generation != current_generation {
+            return Err(self.cancelled_login_error(generation));
+        }
+        if !crate::network_state::epoch_is_current(network_epoch) {
+            return Err(crate::errors::login_network_changed());
+        }
+        Ok(())
     }
 
     async fn login_candidates(
@@ -890,12 +922,7 @@ impl JmClient {
         let mut last_error = None;
         for (index, candidate) in candidates.iter().enumerate() {
             let attempt_started = Instant::now();
-            if generation != self.auth_generation.load(Ordering::SeqCst) {
-                return Err(self.cancelled_login_error());
-            }
-            if !crate::network_state::epoch_is_current(network_epoch) {
-                return Err(crate::errors::login_network_changed());
-            }
+            self.ensure_login_attempt_valid(config, generation, network_epoch)?;
             tracing::info!(
                 generation,
                 attempt = index + 1,
@@ -920,12 +947,7 @@ impl JmClient {
             .await;
             // 请求发出后网络路径可能已经切换（例如手动代理被跳过）：旧客户端
             // 拿到的结果不能提交会话，也不能写回新路径的健康状态。
-            if generation != self.auth_generation.load(Ordering::SeqCst) {
-                return Err(self.cancelled_login_error());
-            }
-            if !crate::network_state::epoch_is_current(network_epoch) {
-                return Err(crate::errors::login_network_changed());
-            }
+            self.ensure_login_attempt_valid(config, generation, network_epoch)?;
             match result {
                 Ok(profile) => {
                     tracing::info!(
@@ -938,7 +960,7 @@ impl JmClient {
                     self.record_success_if_current(
                         network_epoch,
                         candidate,
-                        std::time::Duration::ZERO,
+                        attempt_started.elapsed(),
                     );
                     // 成功线路对应内置预设时同步保存该模式；动态域名只记入内存，
                     // 之后的请求会自动优先复用这条可用线路。
@@ -1010,10 +1032,25 @@ impl JmClient {
             "登录响应缺少有效账号或会话"
         );
         let config = self.app.get_config();
+        {
+            let current = config.read();
+            let settings_unchanged = current.get_api_domain() == base.get_api_domain()
+                && current.proxy_mode == base.proxy_mode
+                && current.proxy_host == base.proxy_host
+                && current.proxy_port == base.proxy_port;
+            if !settings_unchanged {
+                return Err(crate::errors::login_settings_changed());
+            }
+        }
+        let current_generation = self.auth_generation.load(Ordering::SeqCst);
+        if generation != current_generation {
+            return Err(self.cancelled_login_error(generation));
+        }
         let (saved, epoch) = crate::network_state::with_current_epoch(network_epoch, || {
             let mut current = config.write();
-            if generation != self.auth_generation.load(Ordering::SeqCst) {
-                return Err(self.cancelled_login_error());
+            let current_generation = self.auth_generation.load(Ordering::SeqCst);
+            if generation != current_generation {
+                return Err(self.cancelled_login_error(generation));
             }
             let network_unchanged = current.get_api_domain() == base.get_api_domain()
                 && current.proxy_mode == base.proxy_mode
@@ -1039,7 +1076,23 @@ impl JmClient {
             state.profile = Some(profile.clone());
             Ok((saved, state.epoch))
         })
-        .ok_or_else(crate::errors::login_network_changed)??;
+        .ok_or_else(|| {
+            let current = config.read();
+            let settings_unchanged = current.get_api_domain() == base.get_api_domain()
+                && current.proxy_mode == base.proxy_mode
+                && current.proxy_host == base.proxy_host
+                && current.proxy_port == base.proxy_port;
+            if !settings_unchanged {
+                crate::errors::login_settings_changed()
+            } else {
+                let current_generation = self.auth_generation.load(Ordering::SeqCst);
+                if generation != current_generation {
+                    self.cancelled_login_error(current_generation)
+                } else {
+                    crate::errors::login_network_changed()
+                }
+            }
+        })??;
         crate::config_updates::publish(&self.app, &saved);
         let _ = SessionChangedEvent {
             session_epoch: epoch,
