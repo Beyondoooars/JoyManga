@@ -4,7 +4,7 @@ import { commands, type GetWeeklyInfoRespData } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
 import { useStore } from '../store.ts'
-import { PhArrowClockwise, PhCaretDown, PhFire, PhWarningCircle } from '@phosphor-icons/vue'
+import { PhArrowClockwise, PhCaretDown, PhWarningCircle } from '@phosphor-icons/vue'
 import { getErrorMessage } from '../utils/errors.ts'
 
 const store = useStore()
@@ -23,7 +23,6 @@ let requestGeneration = 0
 let activeRequestKey = ''
 
 const categories = computed(() => weeklyInfo.value?.categories ?? [])
-const types = computed(() => weeklyInfo.value?.type ?? [])
 const activeCategoryLabel = computed(
   () => categories.value.find((category) => category.id === selectedCategoryId.value)?.time ?? '',
 )
@@ -32,8 +31,9 @@ const categoryOptions = computed(() =>
   categories.value.map((category) => ({ label: category.time, value: category.id })),
 )
 
-onMounted(async () => {
-  isMounted = true
+async function initWeeklyInfo() {
+  infoLoading.value = true
+  infoUnavailable.value = false
   let result: Awaited<ReturnType<typeof commands.getWeeklyInfo>>
   try {
     result = await commands.getWeeklyInfo()
@@ -55,14 +55,14 @@ onMounted(async () => {
     return
   }
 
-  // 按照需求：仅保留韩漫和日漫，删除其他
-  const filteredTypes = (result.data.type ?? []).filter((t) => t.id === 'manga' || t.id === 'hanman')
+  // 按照需求：仅保留日漫，省去分类切换
+  const filteredTypes = (result.data.type ?? []).filter((t) => t.id === 'manga')
+  const defaultType = filteredTypes[0] ?? (result.data.type ?? [])[0]
 
   weeklyInfo.value = { ...result.data, type: filteredTypes }
   infoLoading.value = false
 
   const firstCategory = result.data.categories?.[0]
-  const defaultType = filteredTypes.find((t) => t.id === 'manga') ?? filteredTypes[0]
 
   if (firstCategory?.id === undefined || defaultType?.id === undefined) {
     message.warning('每周必看暂时没有可用分类')
@@ -74,6 +74,11 @@ onMounted(async () => {
   currentWeeklyTypeId.value = defaultType.id
   initialized = true
   await getWeekly()
+}
+
+onMounted(() => {
+  isMounted = true
+  void initWeeklyInfo()
 })
 
 onUnmounted(() => {
@@ -108,6 +113,7 @@ async function getWeekly() {
   const epoch = store.sessionEpoch
   const observedRevision = store.favoriteRevision
   loading.value = true
+  loadError.value = null
   try {
     const result = await commands.getWeekly(selectedCategoryId.value, currentWeeklyTypeId.value)
     if (!isMounted || generation !== requestGeneration || epoch !== store.sessionEpoch) return
@@ -144,7 +150,6 @@ async function getWeekly() {
     <div v-if="infoLoading" class="weekly-shell">
       <div class="weekly-head">
         <div class="weekly-title">
-          <span class="title-icon"><PhFire :size="18" weight="fill" /></span>
           <h2 id="weekly-heading">每周必看</h2>
         </div>
       </div>
@@ -158,34 +163,34 @@ async function getWeekly() {
 
     <!-- 不可用 -->
     <div v-else-if="infoUnavailable" class="jm-empty">
-      <div class="jm-empty-icon is-muted"><PhFire :size="28" weight="duotone" /></div>
+      <div class="jm-empty-icon is-muted"><PhWarningCircle :size="28" weight="duotone" /></div>
       <strong>本周榜单还没准备好</strong>
       <p>新的精选内容稍后上线，先去搜索想看的漫画吧。</p>
+      <div class="jm-empty-actions">
+        <button type="button" class="jm-btn" @click="initWeeklyInfo">重新加载</button>
+      </div>
     </div>
 
     <div v-else-if="weeklyInfo !== undefined" class="weekly-shell">
       <header class="weekly-head">
         <div class="weekly-title">
-          <span class="title-icon"><PhFire :size="18" weight="fill" /></span>
-          <div class="title-copy">
-            <h2 id="weekly-heading">每周必看</h2>
-            <n-popselect
-              v-model:value="selectedCategoryId"
-              :options="categoryOptions"
-              trigger="click"
-              size="small"
-              scrollable
-              :disabled="categories.length === 0">
-              <button
-                type="button"
-                class="issue-select"
-                :disabled="categories.length === 0"
-                aria-label="选择榜单期数">
-                <span>{{ activeCategoryLabel || '选择期数' }}</span>
-                <PhCaretDown :size="13" weight="bold" aria-hidden="true" />
-              </button>
-            </n-popselect>
-          </div>
+          <h2 id="weekly-heading">每周必看</h2>
+          <n-popselect
+            v-model:value="selectedCategoryId"
+            :options="categoryOptions"
+            trigger="click"
+            size="small"
+            scrollable
+            :disabled="categories.length === 0">
+            <button
+              type="button"
+              class="issue-select"
+              :disabled="categories.length === 0"
+              aria-label="选择榜单期数">
+              <span>{{ activeCategoryLabel || '选择期数' }}</span>
+              <PhCaretDown :size="13" weight="bold" aria-hidden="true" />
+            </button>
+          </n-popselect>
         </div>
         <button
           type="button"
@@ -197,21 +202,6 @@ async function getWeekly() {
           <PhArrowClockwise :size="19" :class="{ 'jm-spin': loading }" />
         </button>
       </header>
-
-      <!-- 筛选：顺序为周期，第二个为类型 -->
-      <div class="filter-block">
-        <div class="filter-row" role="group" aria-label="漫画类型">
-          <button
-            v-for="weeklyType in types"
-            :key="weeklyType.id"
-            type="button"
-            class="filter-chip"
-            :class="{ 'is-active': currentWeeklyTypeId === weeklyType.id }"
-            @click="currentWeeklyTypeId = weeklyType.id ?? ''">
-            {{ weeklyType.title }}
-          </button>
-        </div>
-      </div>
 
       <div v-if="loading && store.getWeeklyResult === undefined" class="cover-grid">
         <div v-for="n in 6" :key="n" class="skeleton-card">
@@ -231,9 +221,9 @@ async function getWeekly() {
 
       <div v-else-if="store.getWeeklyResult" class="weekly-body" :aria-busy="loading">
         <div v-if="store.getWeeklyResult.list.length === 0" class="jm-empty">
-          <div class="jm-empty-icon is-muted"><PhFire :size="28" weight="duotone" /></div>
-          <strong>该分类暂无内容</strong>
-          <p>换一个周期或类型看看。</p>
+          <div class="jm-empty-icon is-muted"><PhWarningCircle :size="28" weight="duotone" /></div>
+          <strong>该期榜单暂无内容</strong>
+          <p>换一个周期看看。</p>
         </div>
         <div v-else class="cover-grid">
           <ComicCard
@@ -269,32 +259,14 @@ async function getWeekly() {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 6px var(--jm-gutter) 4px;
+  padding: 10px var(--jm-gutter) 8px;
 }
 
 .weekly-title {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 9px;
-}
-
-.title-icon {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  color: var(--jm-brand);
-  place-items: center;
-  border-radius: var(--jm-r-sm);
-  background: var(--jm-brand-soft);
-}
-
-.title-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
+  gap: 10px;
 }
 
 .weekly-title h2 {
@@ -311,9 +283,9 @@ async function getWeekly() {
   display: inline-flex;
   max-width: 100%;
   align-items: center;
-  align-self: flex-start;
+  align-self: center;
   gap: 4px;
-  padding: 1px 8px 1px 9px;
+  padding: 2px 8px 2px 9px;
   color: var(--jm-text-3);
   border: 1px solid var(--jm-line);
   border-radius: var(--jm-r-pill);
@@ -343,54 +315,13 @@ async function getWeekly() {
   white-space: nowrap;
 }
 
-.filter-block {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px var(--jm-gutter) 2px;
-}
-
-.filter-row {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.filter-row::-webkit-scrollbar {
-  display: none;
-}
-
-.filter-chip {
-  height: 32px;
-  flex: 0 0 auto;
-  padding: 0 13px;
-  color: var(--jm-text-2);
-  border: 1px solid transparent;
-  border-radius: var(--jm-r-pill);
-  background: var(--jm-sunken);
-  font-size: var(--jm-fs-sm);
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    color 160ms ease,
-    background-color 160ms ease,
-    border-color 160ms ease;
-}
-
-.filter-chip.is-active {
-  color: var(--jm-brand);
-  border-color: rgba(251, 114, 153, 0.28);
-  background: var(--jm-brand-soft);
-}
-
 .weekly-body {
   display: flex;
   flex-direction: column;
 }
 
 .cover-grid {
-  padding: 12px var(--jm-gutter) 4px;
+  padding: 4px var(--jm-gutter) 12px;
 }
 
 .skeleton-card {

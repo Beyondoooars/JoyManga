@@ -31,11 +31,17 @@ function openReader(comicId: number, chapterId: number, comicTitle: string) {
 }
 
 async function showComicDir(comic: Comic) {
-  if (!comic.comicDownloadDir) return
-  const result = await commands.showPathInFileManager(comic.comicDownloadDir)
-  if (result.status === 'error') {
-    console.error(result.error)
-    message.error(formatCommandError(result.error))
+  const dir = comic.comicDownloadDir
+  if (!dir) return
+  try {
+    await navigator.clipboard.writeText(dir)
+    message.success('已复制下载目录到剪贴板')
+  } catch {
+    const result = await commands.showPathInFileManager(dir)
+    if (result.status === 'error') {
+      console.error(result.error)
+      message.error(formatCommandError(result.error))
+    }
   }
 }
 
@@ -71,7 +77,7 @@ async function showComicDir(comic: Comic) {
             <button type="button" class="row-action is-brand" :aria-label="`阅读 ${comic.name} ${chapterInfo.chapterTitle}`" @click="openReader(comic.id, chapterInfo.chapterId, comic.name)">
               <PhBookOpen :size="17" />
             </button>
-            <button v-if="comic.comicDownloadDir" type="button" class="row-action" aria-label="打开下载目录" @click="showComicDir(comic)">
+            <button v-if="comic.comicDownloadDir" type="button" class="row-action" aria-label="复制下载目录" title="复制下载目录" @click="showComicDir(comic)">
               <PhFolderOpen :size="17" />
             </button>
           </div>

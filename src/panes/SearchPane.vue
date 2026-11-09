@@ -13,8 +13,8 @@ import {
   PhArrowLeft,
   PhArrowRight,
   PhClockCounterClockwise,
-  PhMagnifyingGlass,
   PhSparkle,
+  PhWarningCircle,
   PhX,
 } from '@phosphor-icons/vue'
 import { useStore } from '../store.ts'
@@ -372,7 +372,6 @@ function goToPage(page: number) {
     <!-- 搜索区：常驻顶部，输入时浮出历史 -->
     <div class="search-zone">
       <div class="search-field">
-        <PhMagnifyingGlass :size="19" class="search-icon" weight="bold" aria-hidden="true" />
         <input
           v-model="searchInput"
           class="search-input"
@@ -383,7 +382,7 @@ function goToPage(page: number) {
           aria-label="搜索漫画、作者或 JM 编号"
           @focus="historyOpen = true"
           @blur="historyOpen = false"
-          @keydown.enter="startSearch(searchInput, sortSelected)" />
+          @keydown.enter="!$event.isComposing && startSearch(searchInput, sortSelected)" />
         <button
           v-if="searchInput || currentSession"
           type="button"
@@ -465,7 +464,7 @@ function goToPage(page: number) {
           </div>
 
           <div v-if="fatalError !== null" class="jm-empty">
-            <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
+            <div class="jm-empty-icon is-muted"><PhWarningCircle :size="28" weight="duotone" /></div>
             <strong>搜索失败</strong>
             <p>{{ fatalError }}</p>
             <div class="empty-actions">
@@ -502,7 +501,6 @@ function goToPage(page: number) {
             </div>
 
             <div v-else-if="languageFilter !== 'all'" class="jm-empty">
-              <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
               <strong v-if="isExhausted">没有符合「{{ filterLabel }}」的作品</strong>
               <strong v-else>本页暂无符合「{{ filterLabel }}」的作品</strong>
               <p v-if="isExhausted">「{{ committedKeyword }}」的搜索结果已到末尾，可以清除筛选查看全部。</p>
@@ -521,7 +519,6 @@ function goToPage(page: number) {
             </div>
 
             <div v-else class="jm-empty">
-              <div class="jm-empty-icon is-muted"><PhMagnifyingGlass :size="28" weight="duotone" /></div>
               <strong>没有匹配的结果</strong>
               <p>「{{ committedKeyword }}」没有找到漫画，试试更短的关键词或换个说法。</p>
             </div>
@@ -581,7 +578,7 @@ function goToPage(page: number) {
   height: 44px;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+  padding: 0 14px;
   border: 1px solid transparent;
   border-radius: var(--jm-r-md);
   background: var(--jm-sunken);
@@ -595,15 +592,6 @@ function goToPage(page: number) {
   border-color: var(--jm-brand);
   background: var(--jm-surface);
   box-shadow: 0 0 0 3px rgba(251, 114, 153, 0.14);
-}
-
-.search-icon {
-  flex: 0 0 auto;
-  color: var(--jm-text-3);
-}
-
-.search-field:focus-within .search-icon {
-  color: var(--jm-brand);
 }
 
 .search-input {

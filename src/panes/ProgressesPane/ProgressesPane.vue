@@ -11,10 +11,13 @@ const message = useMessage()
 const uncompletedCount = computed(
   () => [...store.progresses.values()].filter((task) => task.state !== 'Completed' && task.state !== 'Cancelled').length,
 )
+const completedCount = computed(
+  () => [...store.progresses.values()].filter((task) => task.state === 'Completed').length,
+)
 
 const tabs = computed(() => [
   { value: 'uncompleted' as const, label: '进行中', count: uncompletedCount.value },
-  { value: 'completed' as const, label: '已完成', count: 0 },
+  { value: 'completed' as const, label: '已完成', count: completedCount.value },
 ])
 
 const taskLoadError = computed(() => store.taskLoadError)
@@ -38,20 +41,25 @@ onMounted(() => {
       </button>
     </div>
 
-    <!-- 视图切换 -->
-    <div class="transfer-tabs" role="tablist" aria-label="传输视图">
-      <button
-        v-for="tab in tabs"
-        :key="tab.value"
-        type="button"
-        role="tab"
-        class="transfer-tab"
-        :class="{ 'is-active': store.progressesPaneTabName === tab.value }"
-        :aria-selected="store.progressesPaneTabName === tab.value"
-        @click="store.progressesPaneTabName = tab.value">
-        {{ tab.label }}
-        <span v-if="tab.count > 0" class="tab-count">{{ tab.count }}</span>
-      </button>
+    <!-- 视图切换与聚合速率 -->
+    <div class="transfer-nav-row">
+      <div class="transfer-tabs" role="tablist" aria-label="传输视图">
+        <button
+          v-for="tab in tabs"
+          :key="tab.value"
+          type="button"
+          role="tab"
+          class="transfer-tab"
+          :class="{ 'is-active': store.progressesPaneTabName === tab.value }"
+          :aria-selected="store.progressesPaneTabName === tab.value"
+          @click="store.progressesPaneTabName = tab.value">
+          {{ tab.label }}
+          <span v-if="tab.count > 0" class="tab-count">{{ tab.count }}</span>
+        </button>
+      </div>
+      <div v-if="store.downloadSpeed" class="speed-pill">
+        ⚡ {{ store.downloadSpeed }}
+      </div>
     </div>
 
     <div class="transfer-body">
@@ -105,13 +113,33 @@ onMounted(() => {
   cursor: pointer;
 }
 
-.transfer-tabs {
+.transfer-nav-row {
   display: flex;
   flex: 0 0 auto;
-  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
   margin-top: 8px;
   padding: 0 var(--jm-gutter);
   border-bottom: 1px solid var(--jm-line);
+}
+
+.transfer-tabs {
+  display: flex;
+  gap: 18px;
+}
+
+.speed-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  color: var(--jm-brand);
+  border: 1px solid rgba(251, 114, 153, 0.25);
+  border-radius: var(--jm-r-pill);
+  background: var(--jm-brand-soft);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .transfer-tab {
