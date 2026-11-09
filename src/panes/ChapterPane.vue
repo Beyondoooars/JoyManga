@@ -90,15 +90,35 @@ const hasDownloadedChapter = computed(() => {
   return store.pickedComic?.chapterInfos.some((c) => c.isDownloaded) ?? false
 })
 
+const hasReadingProgress = computed(() => {
+  const comic = store.pickedComic
+  if (!comic) return false
+  return !!store.readingState.progress[String(comic.id)]
+})
+
 function openFirstDownloadedChapterReader() {
   if (!store.pickedComic) return
   if (store.isArchiving(store.pickedComic.id)) {
     message.warning('正在整合 CBZ，完成后即可阅读')
     return
   }
+  if (hasReadingProgress.value) {
+    store.continueReading(store.pickedComic)
+    return
+  }
   const target = store.pickedComic.chapterInfos.find((c) => c.isDownloaded) || store.pickedComic.chapterInfos[0]
   if (target) {
     store.openReader(store.pickedComic.id, target.chapterId, store.pickedComic.name)
+  }
+}
+
+function handleChapterClick(item: ChapterInfo & { state: State }) {
+  if (item.isDownloaded && store.pickedComic) {
+    if (store.isArchiving(store.pickedComic.id)) {
+      message.warning('正在整合 CBZ，完成后即可阅读')
+      return
+    }
+    store.openReader(store.pickedComic.id, item.chapterId, store.pickedComic.name)
   }
 }
 
@@ -135,13 +155,20 @@ const chapterInfos = computed<(ChapterInfo & { state: State })[]>(() => {
   })
 })
 
-/** 可勾选章节：未下载、未在下载中，且不是刚失败的章节。 */
+/** 可手动勾选章节：未下载、未在下载中（允许失败章节重新勾选下载） */
 const selectableChapterIds = computed(() =>
+  chapterInfos.value
+    .filter((c) => c.isDownloaded !== true && !isDownloading(c.state))
+    .map((c) => c.chapterId),
+)
+const selectableChapterIdSet = computed(() => new Set(selectableChapterIds.value))
+
+/** 一键全选未下载：排除正在下载与失败的章节，避免批量误选刚失败的章节 */
+const undownloadedIds = computed(() =>
   chapterInfos.value
     .filter((c) => c.isDownloaded !== true && !isDownloading(c.state) && c.state !== 'Failed')
     .map((c) => c.chapterId),
 )
-const selectableChapterIdSet = computed(() => new Set(selectableChapterIds.value))
 
 watch(
   // 只比较漫画 ID：刷新详情会整体替换 pickedComic 对象，引用变化不应清空用户已勾选的章节
@@ -155,8 +182,6 @@ watchEffect(() => {
   if (store.pickedComic === undefined) {
     return
   }
-  // 只保留可勾选章节。失败(Failed)的章节虽然也"未下载"，但用户刚点过下载，
-  // 不应自动重新出现在可勾选集合里——否则一次"全选未下载"会把刚失败的章节再次提交。
   const selectable = selectableChapterIdSet.value
   checkedIds.value = checkedIds.value.filter((id) => selectable.has(id))
 })
@@ -164,11 +189,11 @@ watchEffect(() => {
 const notDownloadedCount = computed(() => selectableChapterIds.value.length)
 
 function toggleSelectAllUndownloaded() {
-  const notDownloadedChapterIds = selectableChapterIds.value
-  if (checkedIds.value.length >= notDownloadedChapterIds.length && notDownloadedChapterIds.length > 0) {
+  const targetIds = undownloadedIds.value.length > 0 ? undownloadedIds.value : selectableChapterIds.value
+  if (checkedIds.value.length >= targetIds.length && targetIds.length > 0) {
     checkedIds.value = []
   } else {
-    checkedIds.value = [...notDownloadedChapterIds]
+    checkedIds.value = [...targetIds]
   }
 }
 
@@ -315,37 +340,15 @@ function isDownloading(state: State) {
     </div>
 
     <template v-else>
-      <!-- 顶栏：返回 + 书名 + 图标操作 -->
-      <header class="chapter-top-bar">
-        <button type="button" class="back-circle" title="返回列表 (Esc)" aria-label="返回列表" @click="handleBack">
-          <PhArrowLeft :size="20" weight="bold" />
-        </button>
-
-        <div class="comic-header-title">
-          <strong class="comic-name-truncate">{{ store.pickedComic.name }}</strong>
-          <span class="comic-header-sub">
-            <span class="comic-id-badge">JM{{ store.pickedComic.id }}</span>
-          </span>
-        </div>
-
-        <div class="chapter-top-actions">
-          <FavoriteButton
-            variant="icon"
-            :comic-id="store.pickedComic.id"
-            :initial-state="store.pickedComic.is_favorite"
-            :initial-epoch="store.pickedComicFavoriteEpoch" />
-          <IconButton title="刷新章节" aria-label="刷新章节" :disabled="refreshing" @click="refreshChapters">
-            <PhArrowClockwise :size="19" :class="{ 'jm-spin': refreshing }" />
-          </IconButton>
-          <IconButton
-            v-if="store.pickedComic.isDownloaded"
-            title="打开下载目录"
-            aria-label="打开下载目录"
-            @click="showComicDownloadDirInFileManager">
-            <PhFolderOpen :size="19" />
-          </IconButton>
-        </div>
-      </header>
+      <!-- 悬浮返回按键：彻底移除冗余实体顶栏，轻量通透 -->
+      <button
+        type="button"
+        class="hero-floating-back"
+        title="返回列表 (Esc)"
+        aria-label="返回列表"
+        @click="handleBack">
+        <PhArrowLeft :size="20" weight="bold" />
+      </button>
 
       <!-- 作品信息卡 -->
       <section class="comic-meta-card">
@@ -355,7 +358,15 @@ function isDownloading(state: State) {
           alt=""
           referrerpolicy="no-referrer" />
         <div class="comic-meta-info">
-          <h2 class="comic-meta-name">{{ store.pickedComic.name }}</h2>
+          <div class="comic-name-row">
+            <h2 class="comic-meta-name">{{ store.pickedComic.name }}</h2>
+            <FavoriteButton
+              class="hero-fav-btn"
+              :comic-id="store.pickedComic.id"
+              :initial-state="store.pickedComic.is_favorite"
+              :initial-epoch="store.pickedComicFavoriteEpoch" />
+          </div>
+          <div class="comic-id-text">JM{{ store.pickedComic.id }}</div>
 
           <div class="meta-tags">
             <button
@@ -432,7 +443,7 @@ function isDownloading(state: State) {
           </div>
         </header>
 
-        <div class="selection-container custom-scrollbar" @contextmenu="onContextMenu">
+        <div class="selection-container custom-scrollbar" @contextmenu.prevent="onContextMenu">
           <n-checkbox-group v-model:value="checkedIds" class="chapter-checkbox-group">
             <n-virtual-list
               class="chapter-list"
@@ -448,6 +459,7 @@ function isDownloading(state: State) {
                     downloaded: item.isDownloaded,
                     downloading: !item.isDownloaded && isDownloading(item.state),
                   }"
+                  @click="handleChapterClick(item)"
                   @dblclick="handleChapterDoubleClick(item.chapterId, item.isDownloaded)">
                   <span class="chapter-name">{{ item.chapterTitle }}</span>
                   <span v-if="item.isDownloaded" class="chapter-state is-done">已下载</span>
@@ -459,6 +471,54 @@ function isDownloading(state: State) {
           </n-checkbox-group>
         </div>
       </section>
+
+      <!-- 底部常驻悬浮下载/阅读操作坞：大拇指热区直达 -->
+      <nav class="chapter-bottom-dock">
+        <div class="dock-left-actions">
+          <FavoriteButton
+            variant="icon"
+            :comic-id="store.pickedComic.id"
+            :initial-state="store.pickedComic.is_favorite"
+            :initial-epoch="store.pickedComicFavoriteEpoch" />
+          <IconButton title="刷新章节" aria-label="刷新章节" :disabled="refreshing" @click="refreshChapters">
+            <PhArrowClockwise :size="19" :class="{ 'jm-spin': refreshing }" />
+          </IconButton>
+          <IconButton
+            v-if="store.pickedComic.isDownloaded"
+            title="打开下载目录"
+            aria-label="打开下载目录"
+            @click="showComicDownloadDirInFileManager">
+            <PhFolderOpen :size="19" />
+          </IconButton>
+        </div>
+
+        <button
+          v-if="checkedIds.length > 0"
+          type="button"
+          class="dock-cta-btn is-download"
+          :disabled="downloadingSelected"
+          @click="downloadChapters">
+          <PhDownloadSimple :size="18" weight="bold" />
+          <span>{{ downloadingSelected ? '正在加入…' : `下载勾选 (${checkedIds.length})` }}</span>
+        </button>
+        <button
+          v-else-if="hasDownloadedChapter"
+          type="button"
+          class="dock-cta-btn is-read"
+          :disabled="store.isArchiving(store.pickedComic.id)"
+          @click="openFirstDownloadedChapterReader">
+          <PhBookOpen :size="18" weight="bold" />
+          <span>{{ hasReadingProgress ? '继续阅读' : '开始阅读' }}</span>
+        </button>
+        <button
+          v-else
+          type="button"
+          class="dock-cta-btn is-download"
+          @click="toggleSelectAllUndownloaded">
+          <PhDownloadSimple :size="18" weight="bold" />
+          <span>选择章节下载</span>
+        </button>
+      </nav>
 
       <n-dropdown
         placement="bottom-start"
@@ -529,85 +589,110 @@ function isDownloading(state: State) {
   background: var(--jm-surface);
 }
 
-/* 顶栏：与一级页同一套 52px 高度 + 安全区 */
-.chapter-top-bar {
-  display: flex;
-  height: calc(var(--jm-header-h) + var(--safe-top));
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 10px;
-  padding: var(--safe-top) var(--jm-gutter) 0;
-  border-bottom: 1px solid var(--jm-line);
-  background: rgba(255, 255, 255, 0.96);
-  backdrop-filter: saturate(180%) blur(12px);
-}
-
-.back-circle {
+/* 悬浮轻量返回按键：替代实体顶栏，轻量通透 */
+.hero-floating-back {
+  position: absolute;
+  top: max(var(--safe-top), 12px);
+  left: 14px;
+  z-index: 20;
   display: grid;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
   place-items: center;
   padding: 0;
   color: var(--jm-text);
   border: 1px solid var(--jm-line);
   border-radius: var(--jm-r-pill);
-  background: var(--jm-sunken);
+  background: var(--jm-surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   cursor: pointer;
-  transition:
-    color 160ms ease,
-    border-color 160ms ease,
-    background-color 160ms ease,
-    transform 120ms ease;
+  box-shadow: var(--jm-shadow-1);
+  transition: all 160ms ease;
 }
 
-.back-circle:hover {
+.hero-floating-back:hover {
   color: var(--jm-brand);
   border-color: rgba(251, 114, 153, 0.35);
   background: var(--jm-brand-soft);
 }
 
-.back-circle:active {
-  transform: scale(0.94);
+.hero-floating-back:active {
+  transform: scale(0.92);
 }
 
-.comic-header-title {
+.comic-name-row {
   display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
 }
 
-.comic-name-truncate {
-  overflow: hidden;
-  color: var(--jm-text);
-  font-size: 15px;
-  font-weight: 750;
-  letter-spacing: -0.01em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.hero-fav-btn {
+  flex-shrink: 0;
 }
 
-.comic-header-sub {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.comic-id-badge {
+.comic-id-text {
   color: var(--jm-brand);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
 }
 
-.chapter-top-actions {
+/* 底部常驻悬浮下载/阅读操作坞 */
+.chapter-bottom-dock {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px var(--jm-gutter) max(var(--safe-bottom), 10px);
+  background: var(--jm-surface);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid var(--jm-line);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.25);
+  z-index: 30;
+}
+
+.dock-left-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dock-cta-btn {
+  flex: 1;
+  height: 42px;
+  border-radius: var(--jm-r-pill);
+  border: 0;
+  font-size: 14px;
+  font-weight: 750;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all 160ms ease;
+}
+
+.dock-cta-btn.is-read {
+  background: linear-gradient(135deg, var(--jm-brand) 0%, var(--jm-brand-hover) 100%);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(251, 114, 153, 0.4);
+}
+
+.dock-cta-btn.is-download {
+  background: linear-gradient(135deg, var(--jm-accent) 0%, #0088CC 100%);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(0, 194, 255, 0.4);
+}
+
+.dock-cta-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 /* 作品信息卡 */
@@ -615,7 +700,7 @@ function isDownloading(state: State) {
   display: flex;
   flex: 0 0 auto;
   gap: 14px;
-  margin: 12px var(--jm-gutter) 0;
+  margin: calc(var(--safe-top, 0px) + 12px) var(--jm-gutter) 0;
   padding: 14px;
   border: 1px solid var(--jm-line);
   border-radius: var(--jm-r-lg);
@@ -857,6 +942,11 @@ function isDownloading(state: State) {
 /* 已下载用蓝色（信息/内容），避免与「选中」的粉色混淆 */
 .selection-container .downloaded {
   background-color: var(--jm-accent-soft) !important;
+  cursor: pointer;
+}
+
+.selection-container .downloaded :deep(.n-checkbox__label) {
+  cursor: pointer;
 }
 
 .selection-container .downloading {

@@ -11,7 +11,6 @@ import {
   PhChecks,
   PhTrash,
   PhCaretRight,
-  PhCheck,
   PhCloudArrowDown,
   PhClock,
   PhWarningCircle,
@@ -45,8 +44,16 @@ function toggleSelect(chapterId: number) {
   else selectedIds.value.add(chapterId)
 }
 
-function selectAll() {
-  selectedIds.value = new Set(uncompletedProgresses.value.map(([chapterId]) => chapterId))
+const allSelected = computed(
+  () => uncompletedProgresses.value.length > 0 && selectedIds.value.size >= uncompletedProgresses.value.length,
+)
+
+function toggleSelectAll() {
+  if (allSelected.value) {
+    selectedIds.value.clear()
+  } else {
+    selectedIds.value = new Set(uncompletedProgresses.value.map(([chapterId]) => chapterId))
+  }
 }
 
 function clearSelection() {
@@ -137,58 +144,85 @@ async function removeFailedTask(chapterId: number) {
   }
 }
 
-async function resumeSelected() {
-  for (const chapterId of [...selectedIds.value]) {
-    const progressData = store.progresses.get(chapterId)
-    if (progressData === undefined) continue
+const batchOperating = ref(false)
 
-    const { state, comic } = progressData
-    const result =
-      state === 'Cancelled' || state === 'Completed' || state === 'Failed'
-        ? await commands.createDownloadTask(comic, chapterId, null)
-        : await commands.resumeDownloadTask(chapterId)
-    if (result.status === 'error') {
-      console.error(result.error)
+async function resumeSelected() {
+  if (batchOperating.value) return
+  batchOperating.value = true
+  let failed = 0
+  try {
+    for (const chapterId of [...selectedIds.value]) {
+      const progressData = store.progresses.get(chapterId)
+      if (progressData === undefined) continue
+
+      const { state, comic } = progressData
+      const result =
+        state === 'Cancelled' || state === 'Completed' || state === 'Failed'
+          ? await commands.createDownloadTask(comic, chapterId, null)
+          : await commands.resumeDownloadTask(chapterId)
+      if (result.status === 'error') {
+        console.error(result.error)
+        failed += 1
+      }
     }
+    if (failed > 0) message.warning(`${failed} 个任务继续失败`)
+  } finally {
+    batchOperating.value = false
   }
 }
 
 async function pauseSelected() {
-  for (const chapterId of [...selectedIds.value]) {
-    const progressData = store.progresses.get(chapterId)
-    if (
-      progressData === undefined ||
-      progressData.state === 'Cancelled' ||
-      progressData.state === 'Completed' ||
-      progressData.state === 'Failed'
-    ) {
-      continue
+  if (batchOperating.value) return
+  batchOperating.value = true
+  let failed = 0
+  try {
+    for (const chapterId of [...selectedIds.value]) {
+      const progressData = store.progresses.get(chapterId)
+      if (
+        progressData === undefined ||
+        progressData.state === 'Cancelled' ||
+        progressData.state === 'Completed' ||
+        progressData.state === 'Failed'
+      ) {
+        continue
+      }
+      const result = await commands.pauseDownloadTask(chapterId)
+      if (result.status === 'error') {
+        console.error(result.error)
+        failed += 1
+      }
     }
-    const result = await commands.pauseDownloadTask(chapterId)
-    if (result.status === 'error') {
-      console.error(result.error)
-    }
+    if (failed > 0) message.warning(`${failed} 个任务暂停失败`)
+  } finally {
+    batchOperating.value = false
   }
 }
 
 async function cancelSelected() {
-  for (const chapterId of [...selectedIds.value]) {
-    const progressData = store.progresses.get(chapterId)
-    if (
-      progressData === undefined ||
-      progressData.state === 'Cancelled' ||
-      progressData.state === 'Completed'
-    ) {
-      continue
+  if (batchOperating.value) return
+  batchOperating.value = true
+  let failed = 0
+  try {
+    for (const chapterId of [...selectedIds.value]) {
+      const progressData = store.progresses.get(chapterId)
+      if (
+        progressData === undefined ||
+        progressData.state === 'Cancelled' ||
+        progressData.state === 'Completed'
+      ) {
+        continue
+      }
+      const result = await commands.cancelDownloadTask(chapterId)
+      if (result.status === 'error') {
+        console.error(result.error)
+        failed += 1
+      }
     }
-    const result = await commands.cancelDownloadTask(chapterId)
-    if (result.status === 'error') {
-      console.error(result.error)
-    }
+    if (failed > 0) message.warning(`${failed} 个任务取消失败`)
+  } finally {
+    batchOperating.value = false
   }
 }
-
-const batchOperating = ref(false)
 
 const hasActiveTasks = computed(() =>
   uncompletedProgresses.value.some(([, { state }]) => state === 'Downloading' || state === 'Pending'),
@@ -316,24 +350,24 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
     <template v-else>
       <div class="transfer-toolbar">
         <template v-if="selectionMode">
-          <button type="button" class="batch-btn is-neutral" @click="clearSelection">
+          <button type="button" class="batch-btn is-neutral" :disabled="batchOperating" @click="clearSelection">
             <PhX :size="13" weight="bold" />
             退出
           </button>
           <span class="sel-count">已选 {{ selectedIds.size }} 个</span>
-          <button type="button" class="batch-btn is-neutral" @click="selectAll">
+          <button type="button" class="batch-btn is-neutral" :disabled="batchOperating" @click="toggleSelectAll">
             <PhChecks :size="13" weight="bold" />
-            全选
+            {{ allSelected ? '取消全选' : '全选' }}
           </button>
-          <button type="button" class="batch-btn is-accent" @click="resumeSelected">
+          <button type="button" class="batch-btn is-accent" :disabled="batchOperating" @click="resumeSelected">
             <PhCaretRight :size="13" weight="bold" />
             继续
           </button>
-          <button type="button" class="batch-btn" @click="pauseSelected">
+          <button type="button" class="batch-btn" :disabled="batchOperating" @click="pauseSelected">
             <PhPause :size="13" weight="bold" />
             暂停
           </button>
-          <button type="button" class="batch-btn is-danger" @click="cancelSelected">
+          <button type="button" class="batch-btn is-danger" :disabled="batchOperating" @click="cancelSelected">
             <PhTrash :size="13" weight="bold" />
             取消
           </button>
@@ -380,10 +414,21 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
               <strong :title="comic.name">{{ comic.name }}</strong>
               <span :title="chapterInfo.chapterTitle">{{ chapterInfo.chapterTitle }}</span>
             </div>
-            <span v-if="selectionMode" class="task-check" :class="{ 'is-on': selectedIds.has(chapterId) }" aria-hidden="true">
-              <PhCheck v-if="selectedIds.has(chapterId)" :size="12" weight="bold" />
-            </span>
+            <span v-if="selectionMode" class="task-check" :class="{ 'is-on': selectedIds.has(chapterId) }" aria-hidden="true"></span>
             <span class="task-indicator">{{ indicator }}</span>
+            <button
+              v-if="!selectionMode"
+              type="button"
+              class="task-action-btn"
+              :class="{ 'is-failed': state === 'Failed', 'is-paused': state === 'Paused' }"
+              :disabled="pendingActions.has(chapterId)"
+              :title="state === 'Downloading' || state === 'Pending' ? '暂停' : state === 'Paused' ? '继续' : '重试'"
+              :aria-label="state === 'Downloading' || state === 'Pending' ? '暂停' : state === 'Paused' ? '继续' : '重试'"
+              @click.stop="handleProgressDoubleClick(state, chapterId)">
+              <PhPause v-if="state === 'Downloading' || state === 'Pending'" :size="13" weight="bold" />
+              <PhCaretRight v-else-if="state === 'Paused'" :size="13" weight="fill" />
+              <PhArrowClockwise v-else-if="state === 'Failed'" :size="13" weight="bold" />
+            </button>
           </div>
 
           <n-progress
@@ -576,7 +621,6 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
   width: 20px;
   height: 20px;
   flex: 0 0 auto;
-  color: transparent;
   place-items: center;
   border: 1.5px solid var(--jm-line);
   border-radius: var(--jm-r-pill);
@@ -584,9 +628,57 @@ function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {
 }
 
 .task-check.is-on {
-  color: #fff;
   border-color: var(--jm-brand);
   background: var(--jm-brand);
+}
+
+.task-check.is-on::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+.task-action-btn {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--jm-text-2);
+  border: 1px solid var(--jm-line);
+  border-radius: 50%;
+  background: var(--jm-surface);
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    transform 120ms ease;
+}
+
+.task-action-btn:hover {
+  border-color: var(--jm-brand);
+  color: var(--jm-brand);
+}
+
+.task-action-btn:active {
+  transform: scale(0.92);
+}
+
+.task-action-btn.is-paused {
+  color: var(--jm-accent);
+  border-color: rgba(0, 194, 255, 0.35);
+  background: var(--jm-accent-soft);
+}
+
+.task-action-btn.is-failed {
+  color: var(--jm-danger);
+  border-color: rgba(222, 59, 59, 0.35);
+  background: var(--jm-danger-soft);
 }
 
 .task-indicator {

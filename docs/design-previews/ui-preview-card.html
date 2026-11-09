@@ -1,0 +1,2911 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JoyManga UI & 按键分布重构设计预览卡片</title>
+  <style>
+    :root {
+      --bg: #0B0C10;
+      --card-bg: #14161F;
+      --card-border: #232738;
+      --brand-cherry: #FF4D80;
+      --brand-cherry-hover: #FF6694;
+      --brand-cherry-soft: rgba(255, 77, 128, 0.15);
+      --accent-cyan: #00C2FF;
+      --accent-cyan-soft: rgba(0, 194, 255, 0.14);
+      --gold: #FFB300;
+      --text-1: #F3F5FA;
+      --text-2: #9DA5B8;
+      --text-3: #626A7E;
+      --success: #10B981;
+      --radius-sm: 8px;
+      --radius-md: 14px;
+      --radius-lg: 22px;
+      --radius-pill: 9999px;
+      --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Noto Sans SC", sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text-1);
+      font-family: var(--font-family);
+      padding: 32px 20px 80px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .header-banner {
+      text-align: center;
+      max-width: 900px;
+      margin-bottom: 40px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--brand-cherry-soft);
+      color: var(--brand-cherry);
+      border: 1px solid rgba(255, 77, 128, 0.3);
+      padding: 5px 14px;
+      border-radius: var(--radius-pill);
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      margin-bottom: 10px;
+      background: linear-gradient(135deg, #FFF 30%, #FFB2C9 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      color: var(--text-2);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .showcase-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 32px;
+      width: 100%;
+      max-width: 1200px;
+    }
+
+    .device-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+
+    .device-card-header {
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 14px;
+    }
+
+    .device-title {
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .device-desc {
+      font-size: 13px;
+      color: var(--text-2);
+    }
+
+    /* 手机框架仿真 */
+    .mockup-frame {
+      background: #000;
+      border: 3px solid #2A2E3D;
+      border-radius: 36px;
+      height: 640px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      box-shadow: inset 0 0 0 1px #111;
+    }
+
+    /* 状态栏 */
+    .phone-status-bar {
+      height: 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 18px;
+      font-size: 11px;
+      color: var(--text-2);
+      background: rgba(14, 16, 21, 0.85);
+      backdrop-filter: blur(10px);
+      z-index: 10;
+    }
+
+    /* 手机内容视口 */
+    .phone-screen {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+      background: #0F1015;
+    }
+
+    /* ================= 画面 1：漫画详情页（无冗余顶栏） ================= */
+    .detail-hero {
+      position: relative;
+      display: flex;
+      gap: 14px;
+      padding: 38px 16px 14px; /* 留出左上角浮动返回键空间，无整条实体顶栏 */
+      background: linear-gradient(180deg, rgba(255, 77, 128, 0.12) 0%, rgba(15, 16, 21, 0) 100%);
+    }
+    .hero-floating-back {
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: rgba(25, 28, 38, 0.85);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #FFF;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      cursor: pointer;
+      z-index: 5;
+      transition: all 0.15s ease;
+    }
+    .hero-floating-back:hover {
+      background: rgba(255, 255, 255, 0.18);
+      transform: scale(1.06);
+    }
+    .mock-cover {
+      width: 80px;
+      height: 110px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #FF4D80, #7B2CBF);
+      flex-shrink: 0;
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: #FFF;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+    }
+    .mock-info {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .mock-title-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .mock-title {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    /* 收藏按键：置于作品信息区，与作品元数据统一，不霸占顶栏 */
+    .hero-fav-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: var(--radius-pill);
+      background: rgba(255, 77, 128, 0.14);
+      border: 1px solid rgba(255, 77, 128, 0.38);
+      color: var(--brand-cherry);
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.16s ease;
+    }
+    .hero-fav-pill:hover {
+      background: var(--brand-cherry);
+      color: #FFF;
+    }
+    .mock-author { font-size: 12px; color: var(--brand-cherry); }
+    .mock-tags { display: flex; gap: 5px; flex-wrap: wrap; }
+    .mock-tag { font-size: 10px; background: rgba(255,255,255,0.08); padding: 2px 7px; border-radius: 4px; color: var(--text-2); }
+
+    .chapter-list-preview {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 14px 72px; /* 留出底部悬浮坞 */
+    }
+    .chapter-sec-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      font-size: 12px;
+      color: var(--text-2);
+    }
+    .chapter-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .chapter-row.is-checked {
+      background: var(--brand-cherry-soft);
+      border: 1px solid rgba(255, 77, 128, 0.3);
+    }
+    .chapter-check {
+      width: 18px;
+      height: 18px;
+      border-radius: 5px;
+      border: 1.5px solid var(--text-3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 10px;
+      transition: background-color 160ms ease, border-color 160ms ease;
+    }
+    .chapter-check.checked {
+      background: var(--brand-cherry);
+      border-color: var(--brand-cherry);
+      box-shadow: 0 0 8px rgba(255, 77, 128, 0.35);
+    }
+    .chapter-badge-done {
+      font-size: 11px;
+      color: var(--accent-cyan);
+      background: var(--accent-cyan-soft);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* 核心创新：拇指常驻悬浮操作坞 */
+    .sticky-action-dock {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+      height: 56px;
+      background: rgba(26, 29, 39, 0.94);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius-pill);
+      padding: 0 8px 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.6);
+      z-index: 20;
+    }
+    .dock-stat-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .dock-quick-fav {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: rgba(255, 77, 128, 0.12);
+      border: 1px solid rgba(255, 77, 128, 0.3);
+      color: var(--brand-cherry);
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .dock-quick-fav:hover {
+      background: var(--brand-cherry);
+      color: #FFF;
+    }
+    .dock-stat { font-size: 14px; font-weight: 700; color: #FFF; }
+    .dock-btns {
+      display: flex;
+      gap: 8px;
+    }
+    .btn-download-primary {
+      height: 42px;
+      padding: 0 24px;
+      min-width: 128px;
+      border-radius: var(--radius-pill);
+      background: linear-gradient(135deg, var(--brand-cherry), #FF3366);
+      color: #FFF;
+      font-size: 14px;
+      font-weight: 700;
+      border: 0;
+      box-shadow: 0 4px 16px rgba(255, 77, 128, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+
+    /* ================= 画面 2：漫画阅读器沉浸 HUD ================= */
+    .reader-page-mock {
+      background: #000;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+    }
+    .reader-art-panel {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #050508;
+    }
+    .art-page-canvas {
+      width: 82%;
+      height: 90%;
+      background: #191B24;
+      border: 1px solid #282C3D;
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      gap: 8px;
+    }
+    .manga-bubble {
+      background: #FFF;
+      color: #111;
+      padding: 6px 10px;
+      border-radius: 12px;
+      font-size: 10px;
+      font-weight: 700;
+      align-self: flex-start;
+      border: 2px solid #000;
+    }
+    .manga-panel {
+      flex: 1;
+      background: #111219;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #4A5164;
+      font-size: 12px;
+    }
+
+    /* 阅读器顶部极简 HUD */
+    .reader-top-hud {
+      position: relative;
+      z-index: 10;
+      background: linear-gradient(180deg, rgba(0,0,0,0.85) 0%, transparent 100%);
+      padding: 12px 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .reader-top-title { font-size: 13px; font-weight: 700; color: #FFF; }
+    .reader-top-tools { display: flex; gap: 8px; }
+
+    /* 阅读器底部极简 HUD：仅精简保留进度条 */
+    .reader-bottom-hud {
+      position: relative;
+      z-index: 10;
+      background: linear-gradient(0deg, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.6) 60%, transparent 100%);
+      padding: 20px 18px 24px;
+      display: flex;
+      flex-direction: column;
+    }
+    .slider-track-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .mock-slider {
+      flex: 1;
+      height: 6px;
+      background: rgba(255,255,255,0.18);
+      border-radius: 999px;
+      position: relative;
+    }
+    .mock-slider-fill {
+      width: 58%;
+      height: 100%;
+      background: var(--brand-cherry);
+      border-radius: 999px;
+    }
+    .mock-slider-thumb {
+      position: absolute;
+      left: 58%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 16px;
+      height: 16px;
+      background: #FFF;
+      border-radius: 50%;
+      box-shadow: 0 0 8px rgba(255, 77, 128, 0.8);
+    }
+    .page-num-pill {
+      font-size: 12px;
+      font-weight: 700;
+      color: #FFF;
+      background: rgba(255,255,255,0.1);
+      padding: 3px 8px;
+      border-radius: var(--radius-pill);
+    }
+
+    /* ================= 画面 3：发现与搜索页 ================= */
+    .search-top-bar {
+      padding: 10px 14px 6px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .search-input-pill {
+      flex: 1;
+      height: 38px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: var(--radius-pill);
+      padding: 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-2);
+      font-size: 13px;
+    }
+    .single-filter-row {
+      display: flex;
+      gap: 8px;
+      padding: 6px 14px 10px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .single-filter-row::-webkit-scrollbar { display: none; }
+    .filter-chip-sleek {
+      height: 30px;
+      padding: 0 12px;
+      border-radius: var(--radius-pill);
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-2);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+    .filter-chip-sleek.is-active {
+      background: var(--brand-cherry-soft);
+      border-color: rgba(255, 77, 128, 0.4);
+      color: var(--brand-cherry);
+    }
+    .weekly-banner-head {
+      padding: 10px 14px 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .weekly-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .weekly-text {
+      font-size: 16px;
+      font-weight: 800;
+      color: #FFF;
+      letter-spacing: -0.2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .weekly-issue-btn {
+      height: 28px;
+      padding: 0 10px;
+      border-radius: var(--radius-pill);
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: var(--text-2);
+      font-size: 11.5px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+    }
+    .comic-grid-preview {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px 10px;
+      padding: 6px 14px 20px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .grid-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .grid-cover-wrap {
+      aspect-ratio: 3 / 4;
+      border-radius: 10px;
+      background: #191B24;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: bold;
+      color: #9DA5B8;
+    }
+    .grid-cover-wrap.is-selected {
+      border: 2px solid var(--brand-cherry);
+      box-shadow: 0 0 12px rgba(255, 77, 128, 0.5);
+    }
+    .grid-select-indicator {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 18px;
+      height: 18px;
+      border-radius: 5px;
+      background: var(--brand-cherry);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+    }
+    .grid-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-1);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      line-height: 1.3;
+    }
+    .grid-sub {
+      font-size: 10.5px;
+      color: var(--text-3);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* ================= 画面 4：书库与批量操作 ================= */
+    .library-segment-nav {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .segment-capsule {
+      display: flex;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: var(--radius-pill);
+      padding: 3px;
+      gap: 2px;
+    }
+    .segment-item {
+      padding: 4px 14px;
+      border-radius: var(--radius-pill);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-2);
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+    }
+    .segment-item.is-active {
+      background: var(--card-bg);
+      color: #FFF;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    }
+    .batch-bottom-dock {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      right: 12px;
+      height: 56px;
+      background: rgba(26, 29, 39, 0.94);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius-pill);
+      padding: 0 10px 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.6);
+      z-index: 20;
+    }
+    .btn-delete-danger {
+      height: 42px;
+      padding: 0 22px;
+      border-radius: var(--radius-pill);
+      background: rgba(222, 59, 59, 0.2);
+      border: 1px solid rgba(222, 59, 59, 0.5);
+      color: #FF5A5A;
+      font-size: 13.5px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    /* ================= 应用常驻底部主导航栏 (Bottom Tab Bar) ================= */
+    .app-bottom-tabbar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 56px;
+      background: rgba(16, 18, 26, 0.95);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 0 4px;
+      z-index: 30;
+    }
+    .app-tab-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      flex: 1;
+      height: 100%;
+      cursor: pointer;
+      color: #6C7284;
+      font-size: 10.5px;
+      font-weight: 500;
+      transition: all 0.16s ease;
+      border: 0;
+      background: transparent;
+      position: relative;
+    }
+    .app-tab-item:hover {
+      color: var(--text-2);
+    }
+    .app-tab-item.is-active {
+      color: var(--brand-cherry);
+      font-weight: 700;
+    }
+    .app-tab-icon {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+    }
+    .app-tab-icon svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+    }
+    .tab-badge-bubble {
+      position: absolute;
+      top: -3px;
+      right: -8px;
+      background: var(--accent-cyan);
+      color: #0E1015;
+      font-size: 8.5px;
+      font-weight: 800;
+      padding: 1px 4px;
+      border-radius: 999px;
+      line-height: 1;
+    }
+
+    /* ================= 画面 5：系统设置页 ================= */
+    .settings-scroll-view {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 14px 72px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .settings-header-bar {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      position: relative;
+    }
+    .settings-header-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #FFF;
+    }
+    .settings-card {
+      background: #141722;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .settings-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2px;
+    }
+    .settings-card-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: var(--text-2);
+      letter-spacing: 0.3px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      font-size: 13px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    }
+    .settings-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 2px;
+    }
+    .settings-row-label {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .settings-row-main {
+      font-weight: 600;
+      color: var(--text-1);
+    }
+    .settings-row-sub {
+      font-size: 11px;
+      color: var(--text-3);
+    }
+    /* 现代开关 Toggle */
+    .mock-toggle {
+      width: 40px;
+      height: 22px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.12);
+      position: relative;
+      cursor: pointer;
+      transition: background-color 0.2s ease;
+      flex-shrink: 0;
+    }
+    .mock-toggle::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #FFF;
+      transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    }
+    .mock-toggle.is-active {
+      background: var(--brand-cherry);
+    }
+    .mock-toggle.is-active::after {
+      transform: translateX(18px);
+    }
+    /* 迷你分段胶囊 */
+    .mini-segment {
+      display: inline-flex;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: var(--radius-pill);
+      padding: 2px;
+      gap: 2px;
+    }
+    .mini-segment-btn {
+      padding: 3px 9px;
+      border-radius: var(--radius-pill);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-2);
+      border: 0;
+      background: transparent;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .mini-segment-btn.is-active {
+      background: var(--brand-cherry);
+      color: #FFF;
+      box-shadow: 0 2px 6px rgba(255, 77, 128, 0.35);
+    }
+    /* 测速徽章与轻按键 */
+    .speed-pill-btn {
+      padding: 4px 10px;
+      border-radius: var(--radius-pill);
+      background: rgba(255, 77, 128, 0.15);
+      border: 1px solid rgba(255, 77, 128, 0.4);
+      color: var(--brand-cherry);
+      font-size: 11.5px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+    }
+    .speed-pill-btn:hover {
+      background: var(--brand-cherry);
+      color: #FFF;
+    }
+    .network-badge-pass {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11.5px;
+      color: var(--success);
+      font-weight: 600;
+    }
+    .network-badge-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+    }
+
+    /* ================= 画面 6：云端收藏页 ================= */
+    .fav-header-bar {
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .fav-folder-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: var(--radius-pill);
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #FFF;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .fav-tools-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px 6px;
+    }
+    .fav-heart-badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: rgba(14, 16, 21, 0.78);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--brand-cherry);
+      font-size: 11px;
+    }
+
+    /* ================= 画面 7：个人中心与签到（忠实原版架构） ================= */
+    .account-scroll-view {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 14px 72px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .profile-hero {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 16px;
+      border: 1px solid rgba(255, 77, 128, 0.2);
+      border-radius: 18px;
+      background:
+        radial-gradient(120% 90% at 100% 0%, rgba(0, 194, 255, 0.1) 0%, transparent 58%),
+        linear-gradient(135deg, rgba(255, 77, 128, 0.12) 0%, #151722 62%);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+    .hero-top {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .hero-avatar {
+      position: relative;
+      width: 54px;
+      height: 54px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--brand-cherry), #7B2CBF);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #FFF;
+      font-weight: 800;
+      font-size: 18px;
+      box-shadow: 0 0 0 2px #151722, 0 0 0 4px rgba(255, 77, 128, 0.35);
+      flex-shrink: 0;
+    }
+    .hero-identity {
+      display: flex;
+      min-width: 0;
+      flex: 1;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .hero-name-row {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .hero-name {
+      overflow: hidden;
+      max-width: 64%;
+      color: #FFF;
+      font-size: 17px;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hero-level-badge {
+      flex: 0 0 auto;
+      padding: 2px 8px;
+      color: #FFF;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--brand-cherry) 0%, #FF3366 100%);
+      box-shadow: 0 2px 6px rgba(255, 77, 128, 0.4);
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .hero-uid {
+      color: var(--text-3);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+    .hero-settings-btn {
+      display: grid;
+      width: 36px;
+      height: 36px;
+      flex: 0 0 auto;
+      margin-left: auto;
+      align-self: flex-start;
+      padding: 0;
+      color: var(--text-2);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.05);
+      cursor: pointer;
+      place-items: center;
+      transition: color 160ms ease, background 160ms ease;
+    }
+    .hero-settings-btn:hover {
+      color: var(--brand-cherry);
+      background: rgba(255, 77, 128, 0.15);
+    }
+    .hero-stats {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .hero-stat {
+      display: flex;
+      min-width: 0;
+      flex: 1;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+    }
+    .hero-stat-value {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #FFF;
+      font-size: 15px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+    }
+    .hero-stat-label {
+      color: var(--text-3);
+      font-size: 10px;
+    }
+    .hero-stat-divider {
+      width: 1px;
+      height: 22px;
+      flex: 0 0 auto;
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .exp-track {
+      height: 5px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .exp-fill {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent-cyan) 0%, var(--brand-cherry) 100%);
+      width: 85%;
+    }
+
+    /* 原版 DailyCheckInCard 完整日历与进度 */
+    .checkin-card-full {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      background: #141722;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    }
+    .checkin-head-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .checkin-title-wrap {
+      display: flex;
+      min-width: 0;
+      flex: 1;
+      align-items: center;
+      gap: 6px;
+    }
+    .checkin-title-wrap h4 {
+      margin: 0;
+      color: #FFF;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .checkin-progress-tag {
+      color: var(--text-3);
+      font-size: 11px;
+    }
+    .checkin-refresh-btn {
+      display: flex;
+      width: 28px;
+      height: 28px;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-3);
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      cursor: pointer;
+    }
+    .checkin-calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 6px 4px;
+    }
+    .checkin-weekday-lbl {
+      color: var(--text-3);
+      font-size: 10px;
+      font-weight: 600;
+      text-align: center;
+      user-select: none;
+    }
+    .checkin-day-cell {
+      display: flex;
+      height: 28px;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-2);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 11.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      user-select: none;
+    }
+    .checkin-day-cell.is-blank {
+      border-color: transparent;
+      background: transparent;
+    }
+    .checkin-day-cell.is-signed {
+      color: #FFF;
+      border-color: var(--brand-cherry);
+      background: var(--brand-cherry);
+    }
+    .checkin-day-cell.is-today {
+      border-color: var(--brand-cherry);
+      box-shadow: 0 0 0 2px rgba(255, 77, 128, 0.25);
+    }
+    .checkin-day-cell.is-bonus {
+      color: var(--gold);
+      border-color: rgba(245, 158, 11, 0.4);
+      background: rgba(245, 158, 11, 0.12);
+    }
+    .checkin-bonus-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 2px;
+    }
+    .checkin-bonus-bar {
+      height: 5px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .checkin-bonus-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--brand-cherry) 0%, var(--accent-cyan) 100%);
+      width: 71%;
+    }
+    .checkin-bonus-legend {
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-3);
+      font-size: 10.5px;
+    }
+    .checkin-submit-btn {
+      align-self: flex-start;
+      border-radius: 999px;
+      padding: 6px 18px;
+      background: var(--brand-cherry);
+      color: #FFF;
+      font-size: 12px;
+      font-weight: 700;
+      border: 0;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(255, 77, 128, 0.3);
+    }
+
+    /* 原版退出登录行 */
+    .logout-row-pure {
+      display: flex;
+      min-height: 48px;
+      align-items: center;
+      gap: 9px;
+      padding: 0 16px;
+      color: #FF5A5A;
+      border: 1px solid rgba(255, 90, 90, 0.2);
+      border-radius: 14px;
+      background: rgba(255, 90, 90, 0.06);
+      font-size: 13.5px;
+      font-weight: 600;
+      text-align: left;
+      cursor: pointer;
+    }
+    .logout-note-pure {
+      margin-left: auto;
+      color: var(--text-3);
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    /* ================= 画面 8：传输与下载管理 ================= */
+    .transfer-sub-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 14px 10px;
+    }
+    .transfer-speed-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: rgba(0, 194, 255, 0.12);
+      border: 1px solid rgba(0, 194, 255, 0.25);
+      color: var(--accent-cyan);
+      font-size: 11px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .transfer-task-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 0 14px 130px;
+      overflow-y: auto;
+      flex: 1;
+    }
+    .transfer-task-card {
+      background: #141722;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 14px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      position: relative;
+      transition: all 0.2s ease;
+    }
+    .transfer-task-card.is-downloading {
+      border-color: rgba(0, 194, 255, 0.35);
+      box-shadow: 0 4px 16px rgba(0, 194, 255, 0.08);
+    }
+    .transfer-task-card.is-paused {
+      border-color: rgba(255, 255, 255, 0.05);
+      opacity: 0.85;
+    }
+    .transfer-task-card.is-failed {
+      border-color: rgba(255, 90, 90, 0.35);
+      background: rgba(255, 90, 90, 0.04);
+    }
+    .transfer-task-main {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .transfer-task-icon {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 15px;
+      flex-shrink: 0;
+    }
+    .transfer-task-info {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .transfer-task-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: #FFF;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .transfer-task-chapter {
+      font-size: 11.5px;
+      color: var(--text-2);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .transfer-task-action-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.15s ease;
+    }
+    .transfer-task-action-btn:hover {
+      background: rgba(255, 255, 255, 0.12);
+      color: #FFF;
+    }
+    .transfer-task-progress-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .transfer-bar-track {
+      flex: 1;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .transfer-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--accent-cyan);
+    }
+    .transfer-task-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10.5px;
+      color: var(--text-3);
+      font-variant-numeric: tabular-nums;
+    }
+    .transfer-batch-dock {
+      position: absolute;
+      bottom: 56px;
+      left: 0;
+      right: 0;
+      padding: 10px 14px;
+      background: rgba(14, 16, 21, 0.92);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      z-index: 20;
+    }
+    .transfer-batch-btn {
+      flex: 1;
+      height: 38px;
+      border-radius: var(--radius-pill);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-1);
+      font-size: 12.5px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .transfer-batch-btn.is-primary {
+      background: rgba(0, 194, 255, 0.15);
+      border-color: rgba(0, 194, 255, 0.35);
+      color: var(--accent-cyan);
+    }
+
+    /* 优化亮点解析标注 */
+    .feature-points {
+      margin-top: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .point-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-2);
+      line-height: 1.5;
+    }
+    .point-icon {
+      color: var(--brand-cherry);
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+    .point-item strong { color: var(--text-1); }
+
+    /* 交互式卡片切换导航器 */
+    .preview-switcher {
+      position: sticky;
+      top: 16px;
+      z-index: 1000;
+      background: rgba(17, 19, 27, 0.92);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius-pill);
+      padding: 8px 14px;
+      margin-bottom: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      max-width: 960px;
+      width: 100%;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+    }
+    .switcher-pills {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pill-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-2);
+      font-size: 13.5px;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: var(--radius-pill);
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .pill-btn:hover {
+      color: var(--text-1);
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .pill-btn.is-active {
+      background: var(--brand-cherry);
+      color: #FFF;
+      box-shadow: 0 4px 14px rgba(255, 77, 128, 0.35);
+    }
+    .pill-btn.pill-mode {
+      border: 1px solid var(--card-border);
+      background: #181A24;
+      color: var(--text-2);
+    }
+    .pill-btn.pill-mode.is-active {
+      background: var(--accent-cyan);
+      color: #0E1015;
+      border-color: var(--accent-cyan);
+      font-weight: 700;
+      box-shadow: 0 4px 14px rgba(0, 194, 255, 0.35);
+    }
+    .switcher-stepper {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .stepper-arrow {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: #181A24;
+      border: 1px solid var(--card-border);
+      color: var(--text-1);
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .stepper-arrow:hover {
+      background: #232738;
+      border-color: var(--brand-cherry);
+      color: var(--brand-cherry);
+    }
+    .stepper-indicator {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-2);
+      min-width: 44px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* 单卡片聚焦模式与平铺模式控制 */
+    .showcase-grid.mode-single {
+      display: flex;
+      justify-content: center;
+      max-width: 520px;
+      width: 100%;
+    }
+    .showcase-grid.mode-single .device-card {
+      display: none;
+      width: 100%;
+      animation: cardFadeIn 0.25s ease-out forwards;
+    }
+    .showcase-grid.mode-single .device-card.is-active {
+      display: flex;
+    }
+    .showcase-grid.mode-grid .device-card {
+      display: flex;
+    }
+    @keyframes cardFadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="header-banner">
+    <div class="badge">🎨 JoyManga Ergonomic UI 2.0</div>
+    <h1>JoyManga 全新 UI 与按键分布重构预览</h1>
+    <p class="subtitle">
+      基于单手竖屏握持人体工程学（Thumb-Zone Ergonomics），彻底下沉核心决策按键，<br>
+      引入暗夜画册视觉系统，消灭长列表勾选后“回滑找下载”与阅读器顶栏“抬手误触”。
+    </p>
+  </header>
+
+  <!-- 顶层交互式卡片切换导航器 -->
+  <nav class="preview-switcher" id="switcherNav">
+    <div class="switcher-pills">
+      <button class="pill-btn is-active" data-target="0">01 漫画详情页</button>
+      <button class="pill-btn" data-target="1">02 极简阅读器</button>
+      <button class="pill-btn" data-target="2">03 发现与每周必看</button>
+      <button class="pill-btn" data-target="3">04 本地书库批量</button>
+      <button class="pill-btn" data-target="4">05 极简系统设置</button>
+      <button class="pill-btn" data-target="5">06 云端收藏中心</button>
+      <button class="pill-btn" data-target="6">07 个人与签到 (原版精髓)</button>
+      <button class="pill-btn" data-target="7">08 传输与下载管理</button>
+      <span style="width:1px;height:18px;background:var(--card-border);margin:0 4px"></span>
+      <button class="pill-btn pill-mode" id="btnModeAll" data-target="all">平铺查看全部</button>
+    </div>
+    <div class="switcher-stepper" id="stepperWrap">
+      <button class="stepper-arrow" id="btnPrev" title="上一个卡片 (支持 ← 键盘快捷键)">←</button>
+      <span class="stepper-indicator" id="stepCounter">1 / 8</span>
+      <button class="stepper-arrow" id="btnNext" title="下一个卡片 (支持 → 键盘快捷键)">→</button>
+    </div>
+  </nav>
+
+  <div class="showcase-grid">
+
+    <!-- 方案 A：漫画详情页与底部悬浮下载坞 -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>01. 漫画详情页：常驻底部悬浮下载坞</span>
+        </div>
+        <div class="device-desc">解决痛点：选话后下载按钮滚出屏幕，需频繁上下滑动的断层感</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 封面英雄区：彻底移除冗余顶栏，浮动返回键 + 作品信息区直置收藏 -->
+          <div class="detail-hero">
+            <button class="hero-floating-back" id="btnDetailBack" title="返回 (支持系统侧滑返回)">←</button>
+            <div class="mock-cover">芙莉莲</div>
+            <div class="mock-info">
+              <div class="mock-title-row">
+                <div class="mock-title">葬送的芙莉莲</div>
+                <!-- 收藏按键：置于作品信息核心区，精致胶囊轻按键 -->
+                <button class="hero-fav-pill" title="收藏作品">
+                  <span>♥</span>
+                  <span>已收藏</span>
+                </button>
+              </div>
+              <div class="mock-author">山田钟人 / 阿部司</div>
+              <div class="mock-tags">
+                <span class="mock-tag">奇幻</span>
+                <span class="mock-tag">治愈</span>
+                <span class="mock-tag">冒险</span>
+              </div>
+              <div style="font-size:11px;color:var(--text-3);margin-top:auto">JM 439812 · 共 130 话</div>
+            </div>
+          </div>
+
+          <!-- 章节列表 -->
+          <div class="chapter-list-preview">
+            <div class="chapter-sec-head">
+              <span>共 130 话</span>
+              <button style="background:none;border:0;color:var(--text-2);font-size:12px;cursor:pointer">⇅ 倒序</button>
+            </div>
+            <div class="chapter-row">
+              <div style="display:flex;align-items:center">
+                <span>第 1 话 冒险的结束</span>
+              </div>
+              <span class="chapter-badge-done">已入库</span>
+            </div>
+            <div class="chapter-row is-checked">
+              <div style="display:flex;align-items:center">
+                <span class="chapter-check checked"></span>
+                <span>第 125 话 旅途的终点</span>
+              </div>
+            </div>
+            <div class="chapter-row is-checked">
+              <div style="display:flex;align-items:center">
+                <span class="chapter-check checked"></span>
+                <span>第 126 话 新的启程</span>
+              </div>
+            </div>
+            <div class="chapter-row">
+              <div style="display:flex;align-items:center">
+                <span class="chapter-check"></span>
+                <span>第 127 话 魔法使的考核</span>
+              </div>
+            </div>
+            <div class="chapter-row">
+              <div style="display:flex;align-items:center">
+                <span class="chapter-check"></span>
+                <span>第 128 话 遗迹的魔物</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 常驻底部悬浮操作坞：左侧快捷收藏+已选统计，右侧主按键 -->
+          <div class="sticky-action-dock">
+            <div class="dock-stat-wrap">
+              <button class="dock-quick-fav" title="单手快捷收藏">♥</button>
+              <div class="dock-stat">已选 2 话</div>
+            </div>
+            <div class="dock-btns">
+              <button class="btn-download-primary">立即下载 (2)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>彻底砍掉实体顶栏与重复标题</strong>：封面已具有大字标题，移除整条占用高度的顶栏，采用极简半透明悬浮返回键，视觉高度纯净。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>收藏按键自然归位</strong>：移至作品信息核心区（书名旁），语义与漫画属性深度贴合；同时在底部悬浮操作坞提供单手盲操快捷入口。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>常驻悬浮下载坞 (Sticky Dock)</strong>：选话与下载按钮始终悬浮在单手拇指热区，无论滑动到长列表何处均触手可及。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 B：漫画阅读器沉浸 HUD -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>02. 漫画阅读器：下沉式拇指操控 HUD</span>
+        </div>
+        <div class="device-desc">解决痛点：顶部6个图标难点且拥挤；底部按键与手势翻页严重冗余</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar" style="background:transparent;position:absolute;width:100%">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <div class="reader-page-mock">
+            <!-- 漫画画芯模拟 -->
+            <div class="reader-art-panel">
+              <div class="art-page-canvas">
+                <div class="manga-bubble">“这就是人类的寿命吗…”</div>
+                <div class="manga-panel">
+                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#3A4052" stroke-width="1.5">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                    <path d="M21 15l-5-5L5 21"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+
+            <!-- 顶部极简 HUD：纯粹单行标题与必要操作 -->
+            <div class="reader-top-hud">
+              <div class="reader-top-title">葬送的芙莉莲 · 第 125 话</div>
+              <div class="reader-top-tools">
+                <button class="icon-btn" title="书签">🔖</button>
+                <button class="icon-btn" title="退出">✕</button>
+              </div>
+            </div>
+
+            <!-- 底部极简 HUD：仅精简保留进度条 -->
+            <div class="reader-bottom-hud">
+              <div class="slider-track-wrap">
+                <div class="mock-slider">
+                  <div class="mock-slider-fill"></div>
+                  <div class="mock-slider-thumb"></div>
+                </div>
+                <span class="page-num-pill">28 / 48</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>极致精简，仅留进度条</strong>：彻底砍掉上一章、下一章、目录/书签等冗余按键，底部零视觉负担，空间全部让给漫画画面。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>全宽细腻滑条</strong>：轻触呼出 HUD 时，仅呈现悬浮轻盈的进度条与页码（28 / 48），拖拽定位精准丝滑，杜绝误触。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 C：发现页（每周必看默认首页） -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>03. 发现页：每周必看榜单（默认首页）</span>
+        </div>
+        <div class="device-desc">默认呈现精选热榜，常驻极简搜索，期数与分类轻量切换</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 搜索输入条：纯净文本，无俗气放大镜 -->
+          <div class="search-top-bar">
+            <div class="search-input-pill">
+              <span>搜索漫画、作者或 JM 编号...</span>
+            </div>
+          </div>
+
+          <!-- 每周必看标头：纯粹文字标题 + 期数选择 -->
+          <div class="weekly-banner-head" style="padding-bottom:12px">
+            <div class="weekly-title-wrap">
+              <span class="weekly-text">每周必看</span>
+            </div>
+            <button class="weekly-issue-btn">2026年第45期 ▾</button>
+          </div>
+
+          <!-- 3列精选热榜网格：纯净封面，无#1#2#3角标遮挡 -->
+          <div class="comic-grid-preview">
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #FF4D80, #7B2CBF)">
+                <span style="color:#FFF">芙莉莲</span>
+              </div>
+              <div class="grid-title">葬送的芙莉莲</div>
+              <div class="grid-sub">山田钟人 · 130话</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #00C2FF, #1D2A68)">
+                <span style="color:#FFF">迷宫饭</span>
+              </div>
+              <div class="grid-title">迷宫饭</div>
+              <div class="grid-sub">九井谅子 · 97话</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #F59E0B, #B45309)">
+                <span style="color:#FFF">电锯人</span>
+              </div>
+              <div class="grid-title">电锯人 第二部</div>
+              <div class="grid-sub">藤本树 · 162话</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #10B981, #065F46)">
+                <span style="color:#FFF">间谍过家家</span>
+              </div>
+              <div class="grid-title">间谍过家家</div>
+              <div class="grid-sub">远藤达哉 · 98话</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #EC4899, #831843)">
+                <span style="color:#FFF">我推的孩子</span>
+              </div>
+              <div class="grid-title">我推的孩子</div>
+              <div class="grid-sub">赤坂明 · 150话</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #6366F1, #312E81)">
+                <span style="color:#FFF">咒术回战</span>
+              </div>
+              <div class="grid-title">咒术回战</div>
+              <div class="grid-sub">芥见下下 · 271话</div>
+            </div>
+          </div>
+
+          <!-- 应用内底部主导航栏 (Bottom Tab Bar)：支持在界面内直接点击切换页面 -->
+          <nav class="app-bottom-tabbar">
+            <button class="app-tab-item is-active" data-nav-target="2" title="发现">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-122.34-56,24a8,8,0,0,0-4.32,4.32l-24,56a8,8,0,0,0,10.66,10.66l56-24a8,8,0,0,0,4.32-4.32l24-56A8,8,0,0,0,173.66,93.66ZM133.5,133.5a8,8,0,1,1,0-11,8,8,0,0,1,0,11Z"/></svg>
+              </div>
+              <span>发现</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="5" title="收藏">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M240,102c0,70-103.79,126.66-108.21,129a8,8,0,0,1-7.58,0C119.79,228.66,16,172,16,102A62.07,62.07,0,0,1,78,40c20.65,0,38.73,8.88,50,23.89C139.27,48.88,157.35,40,178,40A62.07,62.07,0,0,1,240,102Z"/></svg>
+              </div>
+              <span>收藏</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="3" title="书库">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M224,48V192a8,8,0,0,1-8,8H160a24,24,0,0,0-24,24,8,8,0,0,1-16,0,24,24,0,0,0-24-24H40a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8h56a39.88,39.88,0,0,1,32,16A39.88,39.88,0,0,1,160,40h56A8,8,0,0,1,224,48ZM96,56H48V184H96a24,24,0,0,1,24,24V64A24,24,0,0,0,96,56Zm112,0H160a24,24,0,0,0-24,8V208a24,24,0,0,1,24-24h48Z"/></svg>
+                <span class="tab-badge-bubble">3</span>
+              </div>
+              <span>书库</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="6" title="我的">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>
+              </div>
+              <span>我的</span>
+            </button>
+          </nav>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>纯粹日漫精选流</strong>：彻底砍掉韩漫分类与分类切换标签，首屏直接呈现纯粹的日漫榜单，纵向空间再次大幅释放。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>搜索无缝切入与退回</strong>：点击顶部搜索条即滑入输入状态，清空后自动秒切回每周必看精选流。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 D：本地书库与批量管理 -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>04. 本地书库：下沉式批量管理操作坞</span>
+        </div>
+        <div class="device-desc">解决痛点：多选时删除/整理按钮悬在顶部，单手极难操作</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 顶栏分段控件：居中对称，无令人困惑的✕按钮 -->
+          <div class="library-segment-nav" style="justify-content:center">
+            <div class="segment-capsule">
+              <button class="segment-item is-active">已入库 (142)</button>
+              <button class="segment-item" data-nav-target="7" title="切换至传输管理">传输 (3)</button>
+            </div>
+          </div>
+
+          <!-- 书库网格：多选态 -->
+          <div class="comic-grid-preview" style="padding-bottom:76px">
+            <div class="grid-card">
+              <div class="grid-cover-wrap is-selected" style="background:linear-gradient(135deg, #FF4D80, #7B2CBF)">
+                <span class="grid-select-indicator"></span>
+                <span style="color:#FFF">芙莉莲</span>
+              </div>
+              <div class="grid-title">葬送的芙莉莲</div>
+              <div class="grid-sub">130 话 · 2.4 GB</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap is-selected" style="background:linear-gradient(135deg, #00C2FF, #1D2A68)">
+                <span class="grid-select-indicator"></span>
+                <span style="color:#FFF">迷宫饭</span>
+              </div>
+              <div class="grid-title">迷宫饭</div>
+              <div class="grid-sub">97 话 · 1.8 GB</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #F59E0B, #B45309)">
+                <span style="color:#FFF">电锯人</span>
+              </div>
+              <div class="grid-title">电锯人 第二部</div>
+              <div class="grid-sub">162 话 · 3.1 GB</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap is-selected" style="background:linear-gradient(135deg, #10B981, #065F46)">
+                <span class="grid-select-indicator"></span>
+                <span style="color:#FFF">间谍过家家</span>
+              </div>
+              <div class="grid-title">间谍过家家</div>
+              <div class="grid-sub">98 话 · 1.5 GB</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #EC4899, #831843)">
+                <span style="color:#FFF">我推的孩子</span>
+              </div>
+              <div class="grid-title">我推的孩子</div>
+              <div class="grid-sub">150 话 · 2.8 GB</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #6366F1, #312E81)">
+                <span style="color:#FFF">咒术回战</span>
+              </div>
+              <div class="grid-title">咒术回战</div>
+              <div class="grid-sub">271 话 · 5.2 GB</div>
+            </div>
+          </div>
+
+          <!-- 正常态应用底栏：未勾选时常驻，支持在界面内直接点击切换页面 -->
+          <nav class="app-bottom-tabbar" id="libraryNormalTabBar" style="display:none">
+            <button class="app-tab-item" data-nav-target="2" title="发现">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-122.34-56,24a8,8,0,0,0-4.32,4.32l-24,56a8,8,0,0,0,10.66,10.66l56-24a8,8,0,0,0,4.32-4.32l24-56A8,8,0,0,0,173.66,93.66ZM133.5,133.5a8,8,0,1,1,0-11,8,8,0,0,1,0,11Z"/></svg>
+              </div>
+              <span>发现</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="5" title="收藏">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M240,102c0,70-103.79,126.66-108.21,129a8,8,0,0,1-7.58,0C119.79,228.66,16,172,16,102A62.07,62.07,0,0,1,78,40c20.65,0,38.73,8.88,50,23.89C139.27,48.88,157.35,40,178,40A62.07,62.07,0,0,1,240,102Z"/></svg>
+              </div>
+              <span>收藏</span>
+            </button>
+            <button class="app-tab-item is-active" data-nav-target="3" title="书库">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M224,48V192a8,8,0,0,1-8,8H160a24,24,0,0,0-24,24,8,8,0,0,1-16,0,24,24,0,0,0-24-24H40a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8h56a39.88,39.88,0,0,1,32,16A39.88,39.88,0,0,1,160,40h56A8,8,0,0,1,224,48ZM96,56H48V184H96a24,24,0,0,1,24,24V64A24,24,0,0,0,96,56Zm112,0H160a24,24,0,0,0-24,8V208a24,24,0,0,1,24-24h48Z"/></svg>
+                <span class="tab-badge-bubble">3</span>
+              </div>
+              <span>书库</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="6" title="我的">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>
+              </div>
+              <span>我的</span>
+            </button>
+          </nav>
+
+          <!-- 常驻底部批量操作坞：多选时下沉覆盖主导航栏，唯一批量删除主键 -->
+          <div class="batch-bottom-dock" id="libraryBatchDock">
+            <span style="font-size:14px;font-weight:700;color:#FFF">已选 3 本</span>
+            <button class="btn-delete-danger" id="btnBatchDelete">批量删除 (3)</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>纯粹批量删除，移除冗余按键</strong>：彻底砍掉底层维护黑话“整理 CBZ”，多选操作坞 100% 专一为批量删除与腾挪存储设计。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>下沉式拇指热区</strong>：操作坞常驻底缘，单手就地完成删除确认，杜绝手指频繁够往顶部。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 E：系统设置页与高频线路调度 -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>05. 系统设置：网络高频直达与逻辑纠偏</span>
+        </div>
+        <div class="device-desc">解决痛点：“仅Wi-Fi”错放阅读中、测速藏在深折叠、设置项层级过深</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 顶栏标题与返回个人中心 -->
+          <div class="settings-header-bar">
+            <button class="hero-floating-back" style="position:static;width:28px;height:28px" data-nav-target="6" title="返回个人中心">←</button>
+            <span class="settings-header-title" style="flex:1;text-align:center;padding-right:28px">系统设置</span>
+          </div>
+
+          <!-- 设置分组滚动视口 -->
+          <div class="settings-scroll-view">
+
+            <!-- 卡片 1：网络与线路调度（核心高频，痛点纠偏） -->
+            <div class="settings-card">
+              <div class="settings-card-head">
+                <span class="settings-card-title">网络与连接</span>
+                <button class="speed-pill-btn" id="btnMockSpeed" title="测速全部线路">
+                  <span>⚡ 线路测速</span>
+                </button>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">当前图片分流线路</span>
+                  <span class="settings-row-sub">分流线路 01 · 官方加速</span>
+                </div>
+                <div class="network-badge-pass">
+                  <span class="network-badge-dot"></span>
+                  <span>42 ms</span>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">仅 Wi-Fi 下载</span>
+                  <span class="settings-row-sub">移动数据下禁止自动下载</span>
+                </div>
+                <div class="mock-toggle is-active" title="切换仅Wi-Fi下载"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">网络代理模式</span>
+                </div>
+                <div class="mini-segment">
+                  <button class="mini-segment-btn is-active">跟随系统</button>
+                  <button class="mini-segment-btn">直连</button>
+                  <button class="mini-segment-btn">手动</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 卡片 2：阅读偏好（核心体验） -->
+            <div class="settings-card">
+              <div class="settings-card-head">
+                <span class="settings-card-title">阅读偏好</span>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">翻页模式</span>
+                </div>
+                <div class="mini-segment">
+                  <button class="mini-segment-btn is-active">从右往左 (日漫)</button>
+                  <button class="mini-segment-btn">上下连续滚动</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">阅读时屏幕常亮</span>
+                </div>
+                <div class="mock-toggle is-active" title="切换常亮"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">音量键翻页</span>
+                  <span class="settings-row-sub">音量下键翻下一页</span>
+                </div>
+                <div class="mock-toggle" title="切换音量键翻页"></div>
+              </div>
+            </div>
+
+            <!-- 卡片 3：下载与书库存储 -->
+            <div class="settings-card">
+              <div class="settings-card-head">
+                <span class="settings-card-title">存储与书库</span>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">本地书库位置</span>
+                  <span class="settings-row-sub">/storage/emulated/0/Download/JoyManga</span>
+                </div>
+                <button class="mini-segment-btn" style="border:1px solid rgba(255,255,255,0.15)">更改</button>
+              </div>
+            </div>
+
+            <!-- 卡片 4：数据与版本 -->
+            <div class="settings-card">
+              <div class="settings-card-head">
+                <span class="settings-card-title">数据维护 & 关于</span>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">清理临时缓存</span>
+                  <span class="settings-row-sub">已占用 128 MB · 不影响已下载漫画</span>
+                </div>
+                <button class="mini-segment-btn" style="color:var(--brand-cherry);border:1px solid rgba(255,77,128,0.3)">清理</button>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-label">
+                  <span class="settings-row-main">JoyManga v0.3.15</span>
+                  <span class="settings-row-sub">当前已是最新稳定版本</span>
+                </div>
+                <button class="mini-segment-btn" style="border:1px solid rgba(255,255,255,0.15)">检查更新</button>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- 应用内底部主导航栏 (Bottom Tab Bar)：设置属于「我的」二级面板 -->
+          <nav class="app-bottom-tabbar">
+            <button class="app-tab-item" data-nav-target="2" title="发现">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-122.34-56,24a8,8,0,0,0-4.32,4.32l-24,56a8,8,0,0,0,10.66,10.66l56-24a8,8,0,0,0,4.32-4.32l24-56A8,8,0,0,0,173.66,93.66ZM133.5,133.5a8,8,0,1,1,0-11,8,8,0,0,1,0,11Z"/></svg>
+              </div>
+              <span>发现</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="5" title="收藏">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M240,102c0,70-103.79,126.66-108.21,129a8,8,0,0,1-7.58,0C119.79,228.66,16,172,16,102A62.07,62.07,0,0,1,78,40c20.65,0,38.73,8.88,50,23.89C139.27,48.88,157.35,40,178,40A62.07,62.07,0,0,1,240,102Z"/></svg>
+              </div>
+              <span>收藏</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="3" title="书库">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M224,48V192a8,8,0,0,1-8,8H160a24,24,0,0,0-24,24,8,8,0,0,1-16,0,24,24,0,0,0-24-24H40a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8h56a39.88,39.88,0,0,1,32,16A39.88,39.88,0,0,1,160,40h56A8,8,0,0,1,224,48ZM96,56H48V184H96a24,24,0,0,1,24,24V64A24,24,0,0,0,96,56Zm112,0H160a24,24,0,0,0-24,8V208a24,24,0,0,1,24-24h48Z"/></svg>
+                <span class="tab-badge-bubble">3</span>
+              </div>
+              <span>书库</span>
+            </button>
+            <button class="app-tab-item is-active" data-nav-target="6" title="我的 (个人中心)">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>
+              </div>
+              <span>我的</span>
+            </button>
+          </nav>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>“仅 Wi-Fi 下载”纠偏归位</strong>：将原本错放在“阅读”底下的网络下载开关挪入“网络与连接”卡片首屏，彻底消灭层级错位。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>线路测速与时延直通</strong>：当前线路 42ms 延迟与状态直接显式透出，一键测速与自动选择最快线路位于右上角常驻，告别多层折叠抽屉。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>大拇指胶囊触控</strong>：日漫翻页方向（从右往左）、阅读模式、代理模式全部改用大拇指友好触摸的胶囊选择器，消灭呆板下拉列表。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 F：云端收藏中心 -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>06. 云端收藏中心：分类筛选与一键同步</span>
+        </div>
+        <div class="device-desc">解决痛点：工具栏按键拥挤、文件夹菜单弹窗遮挡、排序与同步操作割裂</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 收藏顶栏：文件夹胶囊 + 纯净同步按键 -->
+          <div class="fav-header-bar">
+            <button class="fav-folder-pill" title="切换收藏夹">
+              <span>全部收藏 (48)</span>
+              <span style="font-size:10px;color:var(--text-3)">▾</span>
+            </button>
+            <button class="mini-segment-btn" style="border:1px solid rgba(255,255,255,0.12)" title="同步云端收藏">
+              <span>🔄 同步</span>
+            </button>
+          </div>
+
+          <!-- 二级工具栏：排序微型胶囊 + 全部下载 -->
+          <div class="fav-tools-row">
+            <div class="mini-segment">
+              <button class="mini-segment-btn is-active">收藏时间</button>
+              <button class="mini-segment-btn">更新时间</button>
+            </div>
+            <button class="mini-segment-btn" style="color:var(--accent-cyan);border:1px solid rgba(0,194,255,0.3)">
+              <span>一键下载全部</span>
+            </button>
+          </div>
+
+          <!-- 收藏网格：带右上角优雅红心标 -->
+          <div class="comic-grid-preview" style="padding-bottom:72px">
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #FF4D80, #7B2CBF)">
+                <span class="fav-heart-badge">♥</span>
+                <span style="color:#FFF">芙莉莲</span>
+              </div>
+              <div class="grid-title">葬送的芙莉莲</div>
+              <div class="grid-sub">130 话 · 连载中</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #00C2FF, #1D2A68)">
+                <span class="fav-heart-badge">♥</span>
+                <span style="color:#FFF">迷宫饭</span>
+              </div>
+              <div class="grid-title">迷宫饭</div>
+              <div class="grid-sub">97 话 · 已完结</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #F59E0B, #B45309)">
+                <span class="fav-heart-badge">♥</span>
+                <span style="color:#FFF">电锯人</span>
+              </div>
+              <div class="grid-title">电锯人 第二部</div>
+              <div class="grid-sub">162 话 · 连载中</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #10B981, #065F46)">
+                <span class="fav-heart-badge">♥</span>
+                <span style="color:#FFF">间谍过家家</span>
+              </div>
+              <div class="grid-title">间谍过家家</div>
+              <div class="grid-sub">98 话 · 连载中</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #EC4899, #831843)">
+                <span class="fav-heart-badge">♥</span>
+                <span style="color:#FFF">我推的孩子</span>
+              </div>
+              <div class="grid-title">我推的孩子</div>
+              <div class="grid-sub">150 话 · 连载中</div>
+            </div>
+            <div class="grid-card">
+              <div class="grid-cover-wrap" style="background:linear-gradient(135deg, #6366F1, #312E81)">
+                <span class="fav-heart-badge">♥</span>
+                <span style="color:#FFF">咒术回战</span>
+              </div>
+              <div class="grid-title">咒术回战</div>
+              <div class="grid-sub">271 话 · 连载中</div>
+            </div>
+          </div>
+
+          <!-- 应用内底部主导航栏 (Bottom Tab Bar)：收藏处于激活态 -->
+          <nav class="app-bottom-tabbar">
+            <button class="app-tab-item" data-nav-target="2" title="发现">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-122.34-56,24a8,8,0,0,0-4.32,4.32l-24,56a8,8,0,0,0,10.66,10.66l56-24a8,8,0,0,0,4.32-4.32l24-56A8,8,0,0,0,173.66,93.66ZM133.5,133.5a8,8,0,1,1,0-11,8,8,0,0,1,0,11Z"/></svg>
+              </div>
+              <span>发现</span>
+            </button>
+            <button class="app-tab-item is-active" data-nav-target="5" title="收藏">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M240,102c0,70-103.79,126.66-108.21,129a8,8,0,0,1-7.58,0C119.79,228.66,16,172,16,102A62.07,62.07,0,0,1,78,40c20.65,0,38.73,8.88,50,23.89C139.27,48.88,157.35,40,178,40A62.07,62.07,0,0,1,240,102Z"/></svg>
+              </div>
+              <span>收藏</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="3" title="书库">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M224,48V192a8,8,0,0,1-8,8H160a24,24,0,0,0-24,24,8,8,0,0,1-16,0,24,24,0,0,0-24-24H40a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8h56a39.88,39.88,0,0,1,32,16A39.88,39.88,0,0,1,160,40h56A8,8,0,0,1,224,48ZM96,56H48V184H96a24,24,0,0,1,24,24V64A24,24,0,0,0,96,56Zm112,0H160a24,24,0,0,0-24,8V208a24,24,0,0,1,24-24h48Z"/></svg>
+                <span class="tab-badge-bubble">3</span>
+              </div>
+              <span>书库</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="6" title="我的">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>
+              </div>
+              <span>我的</span>
+            </button>
+          </nav>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>文件夹胶囊轻量切换</strong>：彻底告别弹大半屏的生硬 Sheet 菜单，轻触胶囊即可无缝切换不同收藏文件夹。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>双维度极速排序与批量下载</strong>：收藏时间 / 更新时间一键瞬切，右侧贴合一键全量下载入口。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>纯净毛玻璃心标</strong>：右上角精致半透明小红心代表云端同步状态，不遮挡漫画原画封面。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 G：个人中心与签到中心（忠实原版架构） -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>07. 个人中心与签到看板（继承原版精髓）</span>
+        </div>
+        <div class="device-desc">忠实保留原版完整 7 列日历签到网格、连签进度条与极简资料卡，不做多余菜单堆砌</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 个人中心滚动视口 -->
+          <div class="account-scroll-view">
+
+            <!-- 原版 profile-hero 资料卡 -->
+            <section class="profile-hero">
+              <div class="hero-top">
+                <div class="hero-avatar">
+                  <span>JM</span>
+                </div>
+                <div class="hero-identity">
+                  <div class="hero-name-row">
+                    <strong class="hero-name">MangaMaster</strong>
+                    <span class="hero-level-badge">Lv.4 漫宗</span>
+                  </div>
+                  <span class="hero-uid">UID 892104 · 云端已同步</span>
+                </div>
+                <button
+                  type="button"
+                  class="hero-settings-btn"
+                  aria-label="打开设置"
+                  data-nav-target="4"
+                  title="打开系统设置">
+                  <svg viewBox="0 0 256 256" width="19" height="19" fill="currentColor">
+                    <path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.6,107.6,0,0,0-10.88-26.25,8,8,0,0,0-6-4.22L192,68.4a83.8,83.8,0,0,0-7.46-4.31l-4.11-23.51a8,8,0,0,0-5.26-6.19,107.62,107.62,0,0,0-27.72-6.57,8,8,0,0,0-7.14,3.22L128,48.74a83.6,83.6,0,0,0-8.31,0L106.69,31a8,8,0,0,0-7.14-3.22A107.62,107.62,0,0,0,71.83,34.39a8,8,0,0,0-5.26,6.19L62.46,64.09A83.8,83.8,0,0,0,55,68.4L31.48,69.67a8,8,0,0,0-6,4.22A107.6,107.6,0,0,0,14.6,100.14a8,8,0,0,0,1.48,7.06L31,125.84q-.06,2.16,0,4.32L16.08,148.8a8,8,0,0,0-1.48,7.06,107.6,107.6,0,0,0,10.88,26.25,8,8,0,0,0,6,4.22l23.52,1.27a83.8,83.8,0,0,0,7.46,4.31l4.11,23.51a8,8,0,0,0,5.26,6.19,107.62,107.62,0,0,0,27.72,6.57,8,8,0,0,0,7.14-3.22L128,207.26a83.6,83.6,0,0,0,8.31,0l13,17.7a8,8,0,0,0,7.14,3.22,107.62,107.62,0,0,0,27.72-6.57,8,8,0,0,0,5.26-6.19l4.11-23.51a83.8,83.8,0,0,0,7.46-4.31l23.52-1.27a8,8,0,0,0,6-4.22,107.6,107.6,0,0,0,10.88-26.25,8,8,0,0,0-1.48-7.06ZM200.75,142.6a8,8,0,0,0-2.31,6.53,68,68,0,0,1-4.7,11.35,8,8,0,0,0,1,6.85l10.93,13.66a91.73,91.73,0,0,1-13.88,13.88l-13.66-10.93a8,8,0,0,0-6.85-1,68,68,0,0,1-11.35,4.7,8,8,0,0,0-6.53,2.31l-3,17.2a91.68,91.68,0,0,1-19.64,0l-3-17.2a8,8,0,0,0-6.53-2.31,68,68,0,0,1-11.35-4.7,8,8,0,0,0-6.85,1L90.76,194.87a91.73,91.73,0,0,1-13.88-13.88l10.93-13.66a8,8,0,0,0,1-6.85,68,68,0,0,1-4.7-11.35,8,8,0,0,0-2.31-6.53L64.6,139.75a91.68,91.68,0,0,1,0-19.64l17.2-3a8,8,0,0,0,2.31-6.53,68,68,0,0,1,4.7-11.35,8,8,0,0,0-1-6.85L76.88,78.72a91.73,91.73,0,0,1,13.88-13.88l13.66,10.93a8,8,0,0,0,6.85,1,68,68,0,0,1,11.35-4.7,8,8,0,0,0,6.53-2.31l3-17.2a91.68,91.68,0,0,1,19.64,0l3,17.2a8,8,0,0,0,6.53,2.31,68,68,0,0,1,11.35,4.7,8,8,0,0,0,6.85-1l13.66-10.93a91.73,91.73,0,0,1,13.88,13.88l-10.93,13.66a8,8,0,0,0-1,6.85,68,68,0,0,1,4.7,11.35,8,8,0,0,0,2.31,6.53l17.2,3a91.68,91.68,0,0,1,0,19.64Z"/>
+                  </svg>
+                </button>
+              </div>
+
+              <!-- 三项资产数据统计 -->
+              <div class="hero-stats">
+                <div class="hero-stat">
+                  <span class="hero-stat-value">
+                    <span style="color:var(--gold)">🪙</span>
+                    <span>2,580</span>
+                  </span>
+                  <span class="hero-stat-label">金币</span>
+                </div>
+                <span class="hero-stat-divider"></span>
+                <div class="hero-stat">
+                  <span class="hero-stat-value">
+                    <span style="color:var(--accent-cyan)">📈</span>
+                    <span>850</span>
+                  </span>
+                  <span class="hero-stat-label">经验 / 1000</span>
+                </div>
+                <span class="hero-stat-divider"></span>
+                <div class="hero-stat">
+                  <span class="hero-stat-value">
+                    <span style="color:var(--brand-cherry)">♥</span>
+                    <span>48</span>
+                  </span>
+                  <span class="hero-stat-label">云端收藏</span>
+                </div>
+              </div>
+
+              <!-- 等级经验条 -->
+              <div class="exp-track" role="progressbar">
+                <span class="exp-fill"></span>
+              </div>
+            </section>
+
+            <!-- 原版 DailyCheckInCard 完整 7 列日历网格卡片 -->
+            <section class="checkin-card-full">
+              <header class="checkin-head-row">
+                <div class="checkin-title-wrap">
+                  <span style="color:var(--brand-cherry)">🎁</span>
+                  <h4>每日签到</h4>
+                  <span class="checkin-progress-tag">本月已签 5 天</span>
+                </div>
+                <button type="button" class="checkin-refresh-btn" title="刷新签到状态">
+                  <svg viewBox="0 0 256 256" width="15" height="15" fill="currentColor">
+                    <path d="M224,128a96,96,0,0,1-94.71,96H128A95.38,95.38,0,0,1,62.1,197.8a8,8,0,0,1,11-11.6A79.36,79.36,0,0,0,128,208a80,80,0,1,0-77.94-98.36L68.69,128H40a8,8,0,0,1-8-8V72a8,8,0,0,1,16,0v25.29A96,96,0,0,1,224,128Z"/>
+                  </svg>
+                </button>
+              </header>
+
+              <!-- 完整 7 列星期与月度签到网格 -->
+              <div class="checkin-calendar-grid">
+                <span class="checkin-weekday-lbl">一</span>
+                <span class="checkin-weekday-lbl">二</span>
+                <span class="checkin-weekday-lbl">三</span>
+                <span class="checkin-weekday-lbl">四</span>
+                <span class="checkin-weekday-lbl">五</span>
+                <span class="checkin-weekday-lbl">六</span>
+                <span class="checkin-weekday-lbl">日</span>
+
+                <!-- 第一周 -->
+                <span class="checkin-day-cell is-signed">✓</span>
+                <span class="checkin-day-cell is-signed">✓</span>
+                <span class="checkin-day-cell is-signed">✓</span>
+                <span class="checkin-day-cell is-signed">✓</span>
+                <span class="checkin-day-cell is-today">5</span>
+                <span class="checkin-day-cell">6</span>
+                <span class="checkin-day-cell is-bonus">🎁</span>
+
+                <!-- 第二周 -->
+                <span class="checkin-day-cell">8</span>
+                <span class="checkin-day-cell">9</span>
+                <span class="checkin-day-cell">10</span>
+                <span class="checkin-day-cell">11</span>
+                <span class="checkin-day-cell">12</span>
+                <span class="checkin-day-cell">13</span>
+                <span class="checkin-day-cell is-bonus">🎁</span>
+
+                <!-- 第三周 -->
+                <span class="checkin-day-cell">15</span>
+                <span class="checkin-day-cell">16</span>
+                <span class="checkin-day-cell">17</span>
+                <span class="checkin-day-cell">18</span>
+                <span class="checkin-day-cell">19</span>
+                <span class="checkin-day-cell">20</span>
+                <span class="checkin-day-cell is-bonus">🎁</span>
+
+                <!-- 第四周 -->
+                <span class="checkin-day-cell">22</span>
+                <span class="checkin-day-cell">23</span>
+                <span class="checkin-day-cell">24</span>
+                <span class="checkin-day-cell">25</span>
+                <span class="checkin-day-cell">26</span>
+                <span class="checkin-day-cell">27</span>
+                <span class="checkin-day-cell">28</span>
+              </div>
+
+              <!-- 连签奖励进度与图例 -->
+              <div class="checkin-bonus-group">
+                <div class="checkin-bonus-bar">
+                  <div class="checkin-bonus-fill"></div>
+                </div>
+                <div class="checkin-bonus-legend">
+                  <span>🪙 连签 3 天 +10 / 20 exp</span>
+                  <span>📈 连签 7 天 +30 / 50 exp</span>
+                </div>
+              </div>
+
+              <!-- 签到主按键 -->
+              <button class="checkin-submit-btn" id="btnCheckIn">立即签到</button>
+            </section>
+
+            <!-- 原版退出登录行 -->
+            <button type="button" class="logout-row-pure">
+              <svg viewBox="0 0 256 256" width="18" height="18" fill="currentColor">
+                <path d="M120,216a8,8,0,0,1-8,8H48a16,16,0,0,1-16-16V48A16,16,0,0,1,48,32h64a8,8,0,0,1,0,16H48V208h64A8,8,0,0,1,120,216Zm109.66-93.66-40-40a8,8,0,0,0-11.32,11.32L204.69,120H112a8,8,0,0,0,0,16h92.69l-26.35,26.34a8,8,0,0,0,11.32,11.32l40-40A8,8,0,0,0,229.66,122.34Z"/>
+              </svg>
+              <span>退出登录</span>
+              <span class="logout-note-pure">同时清除记住的账密</span>
+            </button>
+
+          </div>
+
+          <!-- 应用内底部主导航栏 (Bottom Tab Bar)：我的处于激活态 -->
+          <nav class="app-bottom-tabbar">
+            <button class="app-tab-item" data-nav-target="2" title="发现">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-122.34-56,24a8,8,0,0,0-4.32,4.32l-24,56a8,8,0,0,0,10.66,10.66l56-24a8,8,0,0,0,4.32-4.32l24-56A8,8,0,0,0,173.66,93.66ZM133.5,133.5a8,8,0,1,1,0-11,8,8,0,0,1,0,11Z"/></svg>
+              </div>
+              <span>发现</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="5" title="收藏">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M240,102c0,70-103.79,126.66-108.21,129a8,8,0,0,1-7.58,0C119.79,228.66,16,172,16,102A62.07,62.07,0,0,1,78,40c20.65,0,38.73,8.88,50,23.89C139.27,48.88,157.35,40,178,40A62.07,62.07,0,0,1,240,102Z"/></svg>
+              </div>
+              <span>收藏</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="3" title="书库">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M224,48V192a8,8,0,0,1-8,8H160a24,24,0,0,0-24,24,8,8,0,0,1-16,0,24,24,0,0,0-24-24H40a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8h56a39.88,39.88,0,0,1,32,16A39.88,39.88,0,0,1,160,40h56A8,8,0,0,1,224,48ZM96,56H48V184H96a24,24,0,0,1,24,24V64A24,24,0,0,0,96,56Zm112,0H160a24,24,0,0,0-24,8V208a24,24,0,0,1,24-24h48Z"/></svg>
+                <span class="tab-badge-bubble">3</span>
+              </div>
+              <span>书库</span>
+            </button>
+            <button class="app-tab-item is-active" data-nav-target="6" title="我的">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>
+              </div>
+              <span>我的</span>
+            </button>
+          </nav>
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>忠实继承原版资料卡架构</strong>：保留头像双重圆环、等级徽章、右上角轻量设置齿轮、三项资产统计与等级经验细条。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>完整 7 列周日历签到网格</strong>：一~日规整对齐，真实展现已签到、今日、奖励日与连签双档奖励条，严禁粗暴削减。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>去除一切臆造冗余菜单</strong>：不堆砌多余的下载管理/缓存清理占位行，直奔纯粹账号与签到诉求。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 方案 H：传输管理（下载队列与已完成） -->
+    <div class="device-card">
+      <div class="device-card-header">
+        <div class="device-title">
+          <span>08. 传输管理：单手队列触控与聚合速率</span>
+        </div>
+        <div class="device-desc">解决痛点：桌面端双击操作在移动端极易误触、顶部批量按钮拥挤难触达</div>
+      </div>
+
+      <div class="mockup-frame">
+        <div class="phone-status-bar">
+          <span>09:41</span>
+          <span>5G · 100%</span>
+        </div>
+        <div class="phone-screen">
+          <!-- 顶栏分段控件：居中对称，[已入库] 与 [传输] 联动 -->
+          <div class="library-segment-nav" style="justify-content:center">
+            <div class="segment-capsule">
+              <button class="segment-item" data-nav-target="3" title="切换回已入库">已入库 (142)</button>
+              <button class="segment-item is-active">传输 (3)</button>
+            </div>
+          </div>
+
+          <!-- 传输二级分段：进行中 / 已完成 + 实时聚合速率 -->
+          <div class="transfer-sub-bar">
+            <div class="mini-segment">
+              <button class="mini-segment-btn is-active">进行中 (3)</button>
+              <button class="mini-segment-btn">已完成 (24)</button>
+            </div>
+            <div class="transfer-speed-pill">
+              <span>⚡</span>
+              <span>4.8 MB/s</span>
+            </div>
+          </div>
+
+          <!-- 传输任务列表 -->
+          <div class="transfer-task-list">
+
+            <!-- 任务 1：下载中 -->
+            <div class="transfer-task-card is-downloading">
+              <div class="transfer-task-main">
+                <div class="transfer-task-icon" style="background:rgba(0,194,255,0.15);color:var(--accent-cyan)">
+                  <svg viewBox="0 0 256 256" width="18" height="18" fill="currentColor">
+                    <path d="M224,144v64a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V144a8,8,0,0,1,16,0v56H208V144a8,8,0,0,1,16,0Zm-101.66,7.66a8,8,0,0,0,11.32,0l40-40a8,8,0,0,0-11.32-11.32L136,126.69V32a8,8,0,0,0-16,0v94.69L93.66,100.34A8,8,0,0,0,82.34,111.66Z"/>
+                  </svg>
+                </div>
+                <div class="transfer-task-info">
+                  <div class="transfer-task-title">葬送的芙莉莲</div>
+                  <div class="transfer-task-chapter">第 130 话 · 旅途的终点与开端</div>
+                </div>
+                <!-- 明确的单手单点暂停键，告别双击误触 -->
+                <button class="transfer-task-action-btn" title="暂停任务">
+                  <svg viewBox="0 0 256 256" width="14" height="14" fill="currentColor">
+                    <path d="M216,48V208a16,16,0,0,1-16,16H160a16,16,0,0,1-16-16V48a16,16,0,0,1,16-16h40A16,16,0,0,1,216,48ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Z"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="transfer-task-progress-row">
+                <div class="transfer-bar-track">
+                  <div class="transfer-bar-fill" style="width:68%"></div>
+                </div>
+              </div>
+              <div class="transfer-task-meta">
+                <span>19 / 28 页 (68%)</span>
+                <span style="color:var(--accent-cyan)">3.2 MB/s · 剩余 4 秒</span>
+              </div>
+            </div>
+
+            <!-- 任务 2：已暂停 -->
+            <div class="transfer-task-card is-paused">
+              <div class="transfer-task-main">
+                <div class="transfer-task-icon" style="background:rgba(255,255,255,0.06);color:var(--text-3)">
+                  <svg viewBox="0 0 256 256" width="18" height="18" fill="currentColor">
+                    <path d="M216,48V208a16,16,0,0,1-16,16H160a16,16,0,0,1-16-16V48a16,16,0,0,1,16-16h40A16,16,0,0,1,216,48ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Z"/>
+                  </svg>
+                </div>
+                <div class="transfer-task-info">
+                  <div class="transfer-task-title">迷宫饭</div>
+                  <div class="transfer-task-chapter">第 97 话 · 饕餮者的决胜盛宴</div>
+                </div>
+                <button class="transfer-task-action-btn" title="继续任务">
+                  <svg viewBox="0 0 256 256" width="14" height="14" fill="currentColor">
+                    <path d="M240,128a15.74,15.74,0,0,1-7.6,13.51L88.32,229.65a16,16,0,0,1-16.2.3A15.86,15.86,0,0,1,64,216.13V39.87a15.86,15.86,0,0,1,8.12-13.82,16,16,0,0,1,16.2.3L232.4,114.49A15.74,15.74,0,0,1,240,128Z"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="transfer-task-progress-row">
+                <div class="transfer-bar-track">
+                  <div class="transfer-bar-fill" style="width:42%;background:var(--text-3)"></div>
+                </div>
+              </div>
+              <div class="transfer-task-meta">
+                <span>12 / 32 页 (42%)</span>
+                <span>已暂停 · 点按右侧恢复</span>
+              </div>
+            </div>
+
+            <!-- 任务 3：下载失败（明确内联重试） -->
+            <div class="transfer-task-card is-failed">
+              <div class="transfer-task-main">
+                <div class="transfer-task-icon" style="background:rgba(255,90,90,0.15);color:#FF5A5A">
+                  <svg viewBox="0 0 256 256" width="18" height="18" fill="currentColor">
+                    <path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm-8,56a8,8,0,0,1,16,0v56a8,8,0,0,1-16,0Zm8,104a12,12,0,1,1,12-12A12,12,0,0,1,128,184Z"/>
+                  </svg>
+                </div>
+                <div class="transfer-task-info">
+                  <div class="transfer-task-title">电锯人 第二部</div>
+                  <div class="transfer-task-chapter">第 162 话 · 寿司的狂欢</div>
+                </div>
+                <button class="transfer-task-action-btn" style="color:#FF5A5A;border-color:rgba(255,90,90,0.3)" title="重试失败任务">
+                  <svg viewBox="0 0 256 256" width="14" height="14" fill="currentColor">
+                    <path d="M224,128a96,96,0,0,1-94.71,96H128A95.38,95.38,0,0,1,62.1,197.8a8,8,0,0,1,11-11.6A79.36,79.36,0,0,0,128,208a80,80,0,1,0-77.94-98.36L68.69,128H40a8,8,0,0,1-8-8V72a8,8,0,0,1,16,0v25.29A96,96,0,0,1,224,128Z"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="transfer-task-meta" style="color:#FF5A5A">
+                <span>分卷切片连接超时</span>
+                <span>点按右侧单项重试</span>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- 下沉式底部全局控制坞：大拇指热区盲操 -->
+          <div class="transfer-batch-dock">
+            <button class="transfer-batch-btn is-primary">
+              <svg viewBox="0 0 256 256" width="14" height="14" fill="currentColor">
+                <path d="M216,48V208a16,16,0,0,1-16,16H160a16,16,0,0,1-16-16V48a16,16,0,0,1,16-16h40A16,16,0,0,1,216,48ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Z"/>
+              </svg>
+              <span>全部暂停</span>
+            </button>
+            <button class="transfer-batch-btn" style="color:#FF5A5A;border-color:rgba(255,90,90,0.3)">
+              <svg viewBox="0 0 256 256" width="14" height="14" fill="currentColor">
+                <path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/>
+              </svg>
+              <span>全部取消</span>
+            </button>
+          </div>
+
+          <!-- 应用内底部主导航栏 (Bottom Tab Bar)：书库处于激活态，角标提示正在下载数 -->
+          <nav class="app-bottom-tabbar">
+            <button class="app-tab-item" data-nav-target="2" title="发现">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm45.66-122.34-56,24a8,8,0,0,0-4.32,4.32l-24,56a8,8,0,0,0,10.66,10.66l56-24a8,8,0,0,0,4.32-4.32l24-56A8,8,0,0,0,173.66,93.66ZM133.5,133.5a8,8,0,1,1,0-11,8,8,0,0,1,0,11Z"/></svg>
+              </div>
+              <span>发现</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="5" title="收藏">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M240,102c0,70-103.79,126.66-108.21,129a8,8,0,0,1-7.58,0C119.79,228.66,16,172,16,102A62.07,62.07,0,0,1,78,40c20.65,0,38.73,8.88,50,23.89C139.27,48.88,157.35,40,178,40A62.07,62.07,0,0,1,240,102Z"/></svg>
+              </div>
+              <span>收藏</span>
+            </button>
+            <button class="app-tab-item is-active" data-nav-target="3" title="书库">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M224,48V192a8,8,0,0,1-8,8H160a24,24,0,0,0-24,24,8,8,0,0,1-16,0,24,24,0,0,0-24-24H40a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8h56a39.88,39.88,0,0,1,32,16A39.88,39.88,0,0,1,160,40h56A8,8,0,0,1,224,48ZM96,56H48V184H96a24,24,0,0,1,24,24V64A24,24,0,0,0,96,56Zm112,0H160a24,24,0,0,0-24,8V208a24,24,0,0,1,24-24h48Z"/></svg>
+                <span class="tab-badge-bubble">3</span>
+              </div>
+              <span>书库</span>
+            </button>
+            <button class="app-tab-item" data-nav-target="6" title="我的">
+              <div class="app-tab-icon">
+                <svg viewBox="0 0 256 256"><path d="M230.92,212c-15.23-26.33-38.7-45.21-66.09-54.16a72,72,0,1,0-73.66,0C63.78,166.78,40.31,185.66,25.08,212a8,8,0,1,0,13.85,8c18.84-32.56,52.14-52,89.07-52s70.23,19.44,89.07,52a8,8,0,1,0,13.85-8ZM72,96a56,56,0,1,1,56,56A56.06,56.06,0,0,1,72,96Z"/></svg>
+              </div>
+              <span>我的</span>
+            </button>
+          </nav>
+
+        </div>
+      </div>
+
+      <div class="feature-points">
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>消灭双击误触，改用大拇指触控键</strong>：每个任务右侧配有清晰圆环按键（⏸ / ▶ / 🔄），单手一点即启停，告别触屏双击的卡顿与误判。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>下沉式批量控制坞</strong>：将原版挤在顶部的“全部暂停/全部取消”搬至底部常驻浮动坞，手持手机下沿时大拇指就地盲操。</div>
+        </div>
+        <div class="point-item">
+          <span class="point-icon">✦</span>
+          <div><strong>实时聚合速率监控</strong>：顶栏右侧常驻青色速度胶囊（如 ⚡ 4.8 MB/s），并发状态一目了然。</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    (function() {
+      const grid = document.querySelector('.showcase-grid');
+      const cards = Array.from(document.querySelectorAll('.device-card'));
+      const pills = Array.from(document.querySelectorAll('.pill-btn'));
+      const btnPrev = document.getElementById('btnPrev');
+      const btnNext = document.getElementById('btnNext');
+      const stepCounter = document.getElementById('stepCounter');
+      const stepperWrap = document.getElementById('stepperWrap');
+      let currentIndex = 0;
+      let isSingleMode = true;
+
+      // 默认单卡片聚焦模式
+      grid.classList.add('mode-single');
+      updateView();
+
+      function updateView() {
+        if (isSingleMode) {
+          grid.classList.remove('mode-grid');
+          grid.classList.add('mode-single');
+          stepperWrap.style.display = 'flex';
+          cards.forEach((card, idx) => {
+            if (idx === currentIndex) {
+              card.classList.add('is-active');
+            } else {
+              card.classList.remove('is-active');
+            }
+          });
+          pills.forEach(p => {
+            const target = p.dataset.target;
+            if (target === String(currentIndex)) {
+              p.classList.add('is-active');
+            } else {
+              p.classList.remove('is-active');
+            }
+          });
+          stepCounter.textContent = `${currentIndex + 1} / ${cards.length}`;
+        } else {
+          grid.classList.remove('mode-single');
+          grid.classList.add('mode-grid');
+          stepperWrap.style.display = 'none';
+          cards.forEach(card => card.classList.remove('is-active'));
+          pills.forEach(p => {
+            if (p.dataset.target === 'all') {
+              p.classList.add('is-active');
+            } else {
+              p.classList.remove('is-active');
+            }
+          });
+        }
+      }
+
+      pills.forEach(pill => {
+        pill.addEventListener('click', () => {
+          const target = pill.dataset.target;
+          if (target === 'all') {
+            isSingleMode = false;
+            updateView();
+          } else {
+            isSingleMode = true;
+            currentIndex = parseInt(target, 10);
+            updateView();
+          }
+        });
+      });
+
+      btnPrev.addEventListener('click', () => {
+        if (!isSingleMode) {
+          isSingleMode = true;
+        }
+        currentIndex = (currentIndex - 1 + cards.length) % cards.length;
+        updateView();
+      });
+
+      btnNext.addEventListener('click', () => {
+        if (!isSingleMode) {
+          isSingleMode = true;
+        }
+        currentIndex = (currentIndex + 1) % cards.length;
+        updateView();
+      });
+
+      // 键盘左右方向键支持快速切换卡片
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowLeft') {
+          btnPrev.click();
+        } else if (e.key === 'ArrowRight') {
+          btnNext.click();
+        }
+      });
+
+      // 应用内底部导航栏直接点击切换页面 (实现"在界面里切换")
+      document.querySelectorAll('[data-nav-target]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const target = btn.dataset.navTarget;
+          isSingleMode = true;
+          currentIndex = parseInt(target, 10);
+          updateView();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+      });
+
+      // 漫画详情页点击浮动返回按钮回到发现页
+      const btnDetailBack = document.getElementById('btnDetailBack');
+      if (btnDetailBack) {
+        btnDetailBack.addEventListener('click', (e) => {
+          e.stopPropagation();
+          isSingleMode = true;
+          currentIndex = 2; // 回到发现页
+          updateView();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+      }
+
+      // 发现页点击漫画卡片进入详情页
+      const discoverCards = document.querySelectorAll('.device-card:nth-child(3) .grid-card');
+      discoverCards.forEach(card => {
+        card.style.cursor = 'pointer';
+        card.addEventListener('click', (e) => {
+          e.stopPropagation();
+          isSingleMode = true;
+          currentIndex = 0; // 进入详情页
+          updateView();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+      });
+
+      // 详情页点击主按键进入阅读器
+      const btnDownload = document.querySelector('.btn-download-primary');
+      if (btnDownload) {
+        btnDownload.addEventListener('click', (e) => {
+          e.stopPropagation();
+          isSingleMode = true;
+          currentIndex = 1; // 进入阅读器
+          updateView();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+      }
+
+      // 阅读器点击任意处返回详情页
+      const readerMock = document.querySelector('.reader-page-mock');
+      if (readerMock) {
+        readerMock.style.cursor = 'pointer';
+        readerMock.addEventListener('click', () => {
+          isSingleMode = true;
+          currentIndex = 0; // 回到详情页
+          updateView();
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+      }
+
+      // 书库多选删除与正常底栏切换模拟
+      const btnBatchDelete = document.getElementById('btnBatchDelete');
+      const libraryBatchDock = document.getElementById('libraryBatchDock');
+      const libraryNormalTabBar = document.getElementById('libraryNormalTabBar');
+      if (btnBatchDelete && libraryBatchDock && libraryNormalTabBar) {
+        btnBatchDelete.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (libraryBatchDock.style.display === 'none') {
+            libraryBatchDock.style.display = 'flex';
+            libraryNormalTabBar.style.display = 'none';
+          } else {
+            libraryBatchDock.style.display = 'none';
+            libraryNormalTabBar.style.display = 'flex';
+          }
+        });
+      }
+
+      // 设置页开关与微型分段胶囊模拟交互
+      document.querySelectorAll('.mock-toggle').forEach(t => {
+        t.addEventListener('click', (e) => {
+          e.stopPropagation();
+          t.classList.toggle('is-active');
+        });
+      });
+      document.querySelectorAll('.mini-segment').forEach(seg => {
+        seg.addEventListener('click', (e) => {
+          const btn = e.target.closest('.mini-segment-btn');
+          if (btn) {
+            e.stopPropagation();
+            seg.querySelectorAll('.mini-segment-btn').forEach(b => b.classList.remove('is-active'));
+            btn.classList.add('is-active');
+          }
+        });
+      });
+      // 签到按钮模拟交互
+      const btnCheckIn = document.getElementById('btnCheckIn');
+      if (btnCheckIn) {
+        btnCheckIn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const todayCell = document.querySelector('.checkin-day-cell.is-today');
+          if (btnCheckIn.textContent.trim() === '立即签到') {
+            btnCheckIn.textContent = '今日已签到';
+            btnCheckIn.style.background = 'rgba(255, 77, 128, 0.2)';
+            btnCheckIn.style.color = 'var(--brand-cherry)';
+            btnCheckIn.style.boxShadow = 'none';
+            if (todayCell) {
+              todayCell.classList.add('is-signed');
+              todayCell.textContent = '✓';
+            }
+          } else {
+            btnCheckIn.textContent = '立即签到';
+            btnCheckIn.style.background = 'var(--brand-cherry)';
+            btnCheckIn.style.color = '#FFF';
+            btnCheckIn.style.boxShadow = '0 2px 8px rgba(255, 77, 128, 0.3)';
+            if (todayCell) {
+              todayCell.classList.remove('is-signed');
+              todayCell.textContent = '5';
+            }
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

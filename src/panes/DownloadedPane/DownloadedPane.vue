@@ -9,7 +9,6 @@ import {
   PhArrowClockwise,
   PhFunnel,
   PhImage,
-  PhMagnifyingGlass,
   PhPlus,
   PhTrash,
   PhWarningCircle,
@@ -22,7 +21,6 @@ import { hasAllFilesAccess, requestAllFilesAccessAndWait, withAndroidSelection }
 import { isAndroid } from '../../composables/useIsMobile.ts'
 import { filterLibrary } from '../../utils/librarySearch.ts'
 import { libraryApi } from '../../libraryApi.ts'
-import { isMergeableComic } from '../../utils/mergeableComics.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -32,24 +30,21 @@ const checkedIds = ref<Set<number>>(new Set())
 const loading = ref(false)
 const importing = ref(false)
 const searchQuery = ref('')
-const libraryFilter = ref<'all' | 'reading' | 'bookmarks' | 'imported' | 'mergeable'>('all')
+const libraryFilter = ref<'all' | 'reading' | 'bookmarks' | 'imported'>('all')
 const sortOrder = ref<'added' | 'read' | 'title'>('added')
 const filterSheetOpen = ref(false)
 
 const PAGE_SIZE = 24
 
-const mergeableComics = computed(() => store.downloadedComics.filter(isMergeableComic))
 // 选中项按整个书库取，而不是只看当前页：下载完成会刷新列表并重排，
 // 选中的漫画可能被挤到其它页，只看当前页会弹出「删除 0 本」的空操作。
 const checkedComics = computed(() => store.downloadedComics.filter((comic) => checkedIds.value.has(comic.id)))
-const checkedMergeableComics = computed(() => checkedComics.value.filter(isMergeableComic))
 
 const filters = computed(() => [
   { value: 'all' as const, label: '全部', count: store.downloadedComics.length },
   { value: 'reading' as const, label: '在读', count: store.downloadedComics.filter((comic) => !!store.readingState.progress[String(comic.id)]).length },
   { value: 'bookmarks' as const, label: '有书签', count: store.downloadedComics.filter((comic) => store.readingState.bookmarks.some((bookmark) => bookmark.comicId === comic.id)).length },
   { value: 'imported' as const, label: '本地导入', count: store.downloadedComics.filter((comic) => comic.id < 0).length },
-  { value: 'mergeable' as const, label: '可整理', count: mergeableComics.value.length },
 ])
 
 const sortOptions = [
@@ -62,8 +57,7 @@ const activeFilterLabel = computed(() => filters.value.find((filter) => filter.v
 
 const filteredComics = computed(() => {
   let comics = store.downloadedComics
-  if (libraryFilter.value === 'mergeable') comics = comics.filter(isMergeableComic)
-  else if (libraryFilter.value === 'reading') comics = comics.filter((comic) => !!store.readingState.progress[String(comic.id)])
+  if (libraryFilter.value === 'reading') comics = comics.filter((comic) => !!store.readingState.progress[String(comic.id)])
   else if (libraryFilter.value === 'bookmarks') comics = comics.filter((comic) => store.readingState.bookmarks.some((bookmark) => bookmark.comicId === comic.id))
   else if (libraryFilter.value === 'imported') comics = comics.filter((comic) => comic.id < 0)
 
@@ -230,26 +224,6 @@ watch(
   { immediate: true },
 )
 
-async function mergeSelectedComics(comics: Comic[] = checkedMergeableComics.value) {
-  if (comics.length === 0) return
-
-  let submitted = 0
-  for (const comic of comics) {
-    if (store.isArchiving(comic.id)) continue
-    const result = await commands.promoteComicArchive(comic.id, 'merge')
-    if (result.status === 'error') {
-      console.error(result.error)
-      message.error(`${comic.name} 整理失败：${result.error.err_message}`)
-    } else {
-      submitted += 1
-    }
-  }
-  if (submitted > 0) {
-    message.success(`已开始整理 ${submitted} 本；完成后分话文件自动清理`)
-  }
-  checkedIds.value.clear()
-}
-
 function deleteDownloadedComics() {
   if (checkedIds.value.size === 0) return
   confirmDeleteComics([...checkedComics.value])
@@ -403,7 +377,6 @@ const pendingCount = computed(() => {
       <!-- 搜索 + 筛选 -->
       <div class="library-tools">
         <div class="search-box">
-          <PhMagnifyingGlass :size="17" weight="bold" class="search-ico" aria-hidden="true" />
           <input
             v-model="searchQuery"
             class="search-input"
@@ -462,7 +435,7 @@ const pendingCount = computed(() => {
         </div>
       </div>
 
-      <!-- 选择模式工具条 -->
+      <!-- 选择模式工具条：移动端大拇指热区，极简批量删除 -->
       <div v-if="selectionMode" class="selection-bar">
         <button type="button" class="sel-btn" @click="clearSelection">
           <PhX :size="16" weight="bold" />
@@ -473,17 +446,8 @@ const pendingCount = computed(() => {
           {{ allChecked ? '取消全选' : '全选' }}
         </button>
         <button type="button" class="sel-icon is-danger" title="删除所选漫画" @click="deleteDownloadedComics">
-          <PhTrash :size="17" />
-          删除
-        </button>
-        <button
-          v-if="checkedMergeableComics.length > 0"
-          type="button"
-          class="sel-icon is-brand"
-          title="多话合并为整本 CBZ，并清理分话文件"
-          @click="mergeSelectedComics()">
-          <PhArchive :size="17" />
-          整理
+          <PhTrash :size="17" weight="bold" />
+          删除 ({{ checkedIds.size }})
         </button>
       </div>
 
@@ -499,14 +463,12 @@ const pendingCount = computed(() => {
 
         <div v-else-if="currentPageComics.length === 0" class="jm-empty">
           <div class="jm-empty-icon is-muted">
-            <PhMagnifyingGlass v-if="searchQuery.trim()" :size="28" weight="duotone" />
-            <PhArchive v-else :size="28" weight="duotone" />
+            <PhArchive :size="28" weight="duotone" />
           </div>
           <strong v-if="searchQuery.trim()">没有匹配「{{ searchQuery.trim() }}」的漫画</strong>
           <strong v-else-if="libraryFilter !== 'all'">这个筛选下还没有漫画</strong>
           <strong v-else>书库还是空的</strong>
           <p v-if="searchQuery.trim()">试试更短的关键词，或清空搜索框。</p>
-          <p v-else-if="libraryFilter === 'mergeable'">同一本漫画至少下载两话后，才能整理为整本。</p>
           <template v-else-if="diagnosis">
             <p>{{ diagnosis.message }}</p>
             <ul v-if="diagnosis.skipped.length" class="diagnosis-list">
