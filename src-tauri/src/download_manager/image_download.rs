@@ -25,12 +25,14 @@ use super::{DownloadManager, DownloadTaskState};
 const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PAGES: usize = 10_000;
 
-/// 单张图片的网络请求状态。
+/// 单张图片的网络请求与缓冲许可状态。
 ///
-/// `in_request` 只覆盖 `get_img_data_and_format` 的 await：暂停发生在本地处理/落盘
-/// 时不能重建 future，否则已经完成的页面会被重复计数。
+/// 从拿到 `buffer_sem` 到网络响应读取完毕期间（含等待 `img_sem` 与重试），
+/// 暂停都必须立即归还两类许可并重建 future；进入 `save_img` 后缓冲许可移交
+/// 给落盘流程，在写盘结束时立即释放，既不阻塞其他章节，也不重复计数已完成页面。
 #[derive(Default)]
 pub(crate) struct NetworkRequestState {
+    pub(crate) buffer_permit: Option<DownloadPermit>,
     pub(crate) permit: Option<DownloadPermit>,
     pub(crate) in_request: bool,
 }
@@ -88,7 +90,10 @@ impl DownloadImgTask {
             }
             tokio::select! {
                 () = &mut download_img_task, if state == DownloadTaskState::Downloading => break,
-                _ = state_receiver.changed() => {
+                changed = state_receiver.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
                     match self.handle_state_change(&mut state_receiver) {
                         ControlFlow::Continue(()) => continue,
                         ControlFlow::Break(()) => break,
@@ -107,8 +112,7 @@ impl DownloadImgTask {
         let index_filename = format!("{:04}", self.index + 1);
 
         // 只保留原始格式：未混淆图片按源格式原样落盘，需反混淆的图片编码为无损 WebP。
-        let already_saved = find_existing_page(temp_download_path, self.index + 1)
-            .is_some_and(|path| is_valid_saved_image(&path));
+        let already_saved = find_existing_page(temp_download_path, self.index + 1).is_some();
         if already_saved {
             // 如果图片已经存在，直接返回
             self.download_task
@@ -125,7 +129,13 @@ impl DownloadImgTask {
 
         // 限制同时持有已下载图片的任务数；网络许可只限制请求并发，
         // 这里防止多章节并发时缓冲图片随章节数放大。
-        let _buffer_permit = self.download_manager.buffer_sem.acquire().await;
+        // 放入 `network_request` 以便在等待 `img_sem` 或网络传输期间暂停时能立即归还。
+        let buffer_permit = self.download_manager.buffer_sem.acquire().await;
+        {
+            let mut request = self.network_request.lock();
+            request.buffer_permit = Some(buffer_permit);
+            request.in_request = true;
+        }
 
         // CDN 偶发在响应体读到一半时断开（日志里的 peer closed connection）。
         // 断流发生在读取阶段，图片客户端自身的中间件重试覆盖不到，这里补一次
@@ -146,12 +156,8 @@ impl DownloadImgTask {
             self.download_task
                 .transfer_network_nanos
                 .fetch_add(elapsed_nanos(request_started), Ordering::Relaxed);
-            // 成功或失败都先归还许可，再决定重试或进入本地处理。
-            {
-                let mut request = self.network_request.lock();
-                request.permit = None;
-                request.in_request = false;
-            }
+            // 成功或失败都先归还网络许可，再决定重试或进入本地处理。
+            self.network_request.lock().permit = None;
 
             match result {
                 Ok(data) => break data,
@@ -171,6 +177,11 @@ impl DownloadImgTask {
                     );
                 }
                 Err(err) => {
+                    {
+                        let mut request = self.network_request.lock();
+                        request.buffer_permit = None;
+                        request.in_request = false;
+                    }
                     let err_title = format!("下载图片`{url}`失败");
                     let string_chain = err.to_string_chain();
                     tracing::error!(err_title, message = string_chain);
@@ -184,6 +195,10 @@ impl DownloadImgTask {
                 }
             }
         };
+        // 网络接收已完成，进入本地处理/落盘：将 `in_request` 置为 false，防止落盘期间
+        // 暂停导致已完成页面被重建重复计数；缓冲许可保留在 `network_request` 中，
+        // 无论正常写完还是写盘期间被暂停都能立即释放，绝不阻塞其他章节。
+        self.network_request.lock().in_request = false;
         let img_data_len = img_data.len() as u64;
 
         tracing::trace!(url, comic_title, chapter_title, "图片成功下载到内存");
@@ -193,15 +208,16 @@ impl DownloadImgTask {
 
         let block_num = self.block_num;
         // 保存图片（网络许可已归还，本地处理/写盘不再占用网络并发名额）
-        match save_img(
+        let save_result = save_img(
             &save_path,
             block_num,
             img_data,
             format,
             self.download_task.file_writes.clone(),
         )
-        .await
-        {
+        .await;
+        self.network_request.lock().buffer_permit = None;
+        match save_result {
             Ok(metrics) => {
                 self.download_task
                     .image_processing_nanos
@@ -261,7 +277,7 @@ impl DownloadImgTask {
                 tracing::trace!(comic_title, chapter_title, url, "图片暂停下载");
                 ControlFlow::Continue(())
             }
-            DownloadTaskState::Cancelled => {
+            DownloadTaskState::Cancelled | DownloadTaskState::Failed => {
                 tracing::trace!(comic_title, chapter_title, url, "图片取消下载");
                 ControlFlow::Break(())
             }
@@ -270,10 +286,11 @@ impl DownloadImgTask {
     }
 }
 
-/// 释放非下载状态下的网络许可；返回是否需要重建下载 future。
+/// 释放非下载状态下的网络与缓冲许可；返回是否需要重建下载 future。
 ///
-/// 请求已经发出时仅释放许可不够：future 会停在 await 上，恢复后不会再获取许可。
-/// 返回 true 让调用方丢弃并重建 future，恢复时重新走许可获取。
+/// 请求阶段（含已拿到 `buffer_sem` 等待 `img_sem`、或网络请求已发出）仅释放许可不够：
+/// future 会停在 await 上，恢复后不会再重新获取许可。返回 true 让调用方丢弃并重建 future。
+/// 进入本地落盘后 `in_request` 为 false：此时释放 `buffer_permit` 但不重建 future，避免重复计数。
 pub(crate) fn release_inactive_image_permit(
     state: DownloadTaskState,
     request: &mut NetworkRequestState,
@@ -283,6 +300,7 @@ pub(crate) fn release_inactive_image_permit(
     }
     // watch 可能合并 Paused -> Pending 通知，不能只在观察到 Paused 时释放名额。
     let restart = request.in_request;
+    request.buffer_permit = None;
     request.permit = None;
     request.in_request = false;
     restart
@@ -306,21 +324,9 @@ pub(crate) async fn save_img(
     src_format: ImageFormat,
     file_writes: Arc<TaskFileWrites>,
 ) -> anyhow::Result<SaveImgMetrics> {
-    if src_format == ImageFormat::Gif {
-        // GIF 原样保存，避免二次编码丢帧
-        let write_started = Instant::now();
-        file_writes
-            .run(|| atomic_fs::write(save_path, src_img_data))
-            .context(format!("保存图片`{}`失败", save_path.display()))?;
-        return Ok(SaveImgMetrics {
-            processing_nanos: 0,
-            write_nanos: elapsed_nanos(write_started),
-        });
-    }
-
-    if block_num == 0 {
-        // 未切片混淆：直接写入网络原始字节，避免二次编解码的 CPU 开销
-        // 与 JPEG 二次有损压缩导致的画质损失
+    if src_format == ImageFormat::Gif || block_num == 0 {
+        // GIF 原样保存避免二次编码丢帧；未切片混淆的图片直接写入网络原始字节，
+        // 避免二次编解码的 CPU 开销与 JPEG 二次有损压缩导致的画质损失。
         let write_started = Instant::now();
         file_writes
             .run(|| atomic_fs::write(save_path, src_img_data))
@@ -596,6 +602,7 @@ mod permit_release_tests {
     #[test]
     fn pause_mid_request_requires_future_restart() {
         let mut request = NetworkRequestState {
+            buffer_permit: None,
             permit: None,
             in_request: true,
         };
@@ -608,9 +615,31 @@ mod permit_release_tests {
     }
 
     #[tokio::test]
+    async fn pause_while_holding_buffer_permit_releases_it() {
+        let buffer_limiter = crate::download_scheduler::DownloadLimiter::new(1);
+        let mut request = NetworkRequestState {
+            buffer_permit: Some(buffer_limiter.acquire().await),
+            permit: None,
+            in_request: true,
+        };
+        assert!(release_inactive_image_permit(
+            DownloadTaskState::Paused,
+            &mut request
+        ));
+        assert!(request.buffer_permit.is_none());
+        let reacquired = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            buffer_limiter.acquire(),
+        )
+        .await;
+        assert!(reacquired.is_ok());
+    }
+
+    #[tokio::test]
     async fn downloading_state_keeps_permit() {
         let limiter = crate::download_scheduler::DownloadLimiter::new(1);
         let mut request = NetworkRequestState {
+            buffer_permit: None,
             permit: Some(limiter.acquire().await),
             in_request: true,
         };
