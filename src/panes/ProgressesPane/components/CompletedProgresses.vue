@@ -30,9 +30,15 @@ function openReader(comicId: number, chapterId: number, comicTitle: string) {
   store.openReader(comicId, chapterId, comicTitle)
 }
 
+const isAndroid = /Android/i.test(navigator.userAgent)
+
 async function showComicDir(comic: Comic) {
   const dir = comic.comicDownloadDir
   if (!dir) return
+  if (!isAndroid) {
+    const result = await commands.showPathInFileManager(dir)
+    if (result.status === 'ok') return
+  }
   try {
     await navigator.clipboard.writeText(dir)
     message.success('已复制下载目录到剪贴板')
@@ -77,7 +83,13 @@ async function showComicDir(comic: Comic) {
             <button type="button" class="row-action is-brand" :aria-label="`阅读 ${comic.name} ${chapterInfo.chapterTitle}`" @click="openReader(comic.id, chapterInfo.chapterId, comic.name)">
               <PhBookOpen :size="17" />
             </button>
-            <button v-if="comic.comicDownloadDir" type="button" class="row-action" aria-label="复制下载目录" title="复制下载目录" @click="showComicDir(comic)">
+            <button
+              v-if="comic.comicDownloadDir"
+              type="button"
+              class="row-action"
+              :aria-label="isAndroid ? '复制下载目录' : '打开下载目录'"
+              :title="isAndroid ? '复制下载目录' : '打开下载目录'"
+              @click="showComicDir(comic)">
               <PhFolderOpen :size="17" />
             </button>
           </div>

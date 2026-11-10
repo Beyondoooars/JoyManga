@@ -67,6 +67,7 @@ function pickComic() {
     return
   }
   store.showComic(props.comic)
+  void store.probeComicFavorite(props.comic.id)
 }
 
 function openReader() {

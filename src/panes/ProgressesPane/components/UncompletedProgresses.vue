@@ -25,7 +25,7 @@ const dialog = useDialog()
 const pendingActions = ref(new Set<number>())
 
 const selectedIds = ref<Set<number>>(new Set())
-const selectionMode = computed(() => selectedIds.value.size > 0)
+const selectionMode = ref(false)
 
 const uncompletedProgresses = computed<[number, ProgressData][]>(() =>
   Array.from(store.progresses.entries())
@@ -37,9 +37,13 @@ watchEffect(() => {
   // 只保留未完成的章节id
   const uncompletedIds = new Set(uncompletedProgresses.value.map(([chapterId]) => chapterId))
   selectedIds.value = new Set([...selectedIds.value].filter((chapterId) => uncompletedIds.has(chapterId)))
+  if (uncompletedIds.size === 0) {
+    selectionMode.value = false
+  }
 })
 
 function toggleSelect(chapterId: number) {
+  selectionMode.value = true
   if (selectedIds.value.has(chapterId)) selectedIds.value.delete(chapterId)
   else selectedIds.value.add(chapterId)
 }
@@ -49,6 +53,7 @@ const allSelected = computed(
 )
 
 function toggleSelectAll() {
+  selectionMode.value = true
   if (allSelected.value) {
     selectedIds.value.clear()
   } else {
@@ -58,6 +63,7 @@ function toggleSelectAll() {
 
 function clearSelection() {
   selectedIds.value.clear()
+  selectionMode.value = false
 }
 
 // 长按进入选择：手机上没有右键，长按是批量操作的入口。
@@ -85,6 +91,7 @@ function startPress(event: PointerEvent, chapterId: number) {
     pressTimer = undefined
     longPressed = true
     if (navigator.vibrate) navigator.vibrate(12)
+    selectionMode.value = true
     selectedIds.value.add(chapterId)
   }, 480)
 }
@@ -156,12 +163,20 @@ async function resumeSelected() {
       if (progressData === undefined) continue
 
       const { state, comic } = progressData
-      const result =
-        state === 'Cancelled' || state === 'Completed' || state === 'Failed'
-          ? await commands.createDownloadTask(comic, chapterId, null)
-          : await commands.resumeDownloadTask(chapterId)
-      if (result.status === 'error') {
-        console.error(result.error)
+      if (state === 'Completed' || state === 'Downloading' || state === 'Pending') {
+        continue
+      }
+      try {
+        const result =
+          state === 'Cancelled' || state === 'Failed'
+            ? await commands.createDownloadTask(comic, chapterId, null)
+            : await commands.resumeDownloadTask(chapterId)
+        if (result.status === 'error') {
+          console.error(result.error)
+          failed += 1
+        }
+      } catch (error) {
+        console.error(error)
         failed += 1
       }
     }
@@ -186,9 +201,14 @@ async function pauseSelected() {
       ) {
         continue
       }
-      const result = await commands.pauseDownloadTask(chapterId)
-      if (result.status === 'error') {
-        console.error(result.error)
+      try {
+        const result = await commands.pauseDownloadTask(chapterId)
+        if (result.status === 'error') {
+          console.error(result.error)
+          failed += 1
+        }
+      } catch (error) {
+        console.error(error)
         failed += 1
       }
     }
@@ -212,9 +232,14 @@ async function cancelSelected() {
       ) {
         continue
       }
-      const result = await commands.cancelDownloadTask(chapterId)
-      if (result.status === 'error') {
-        console.error(result.error)
+      try {
+        const result = await commands.cancelDownloadTask(chapterId)
+        if (result.status === 'error') {
+          console.error(result.error)
+          failed += 1
+        }
+      } catch (error) {
+        console.error(error)
         failed += 1
       }
     }

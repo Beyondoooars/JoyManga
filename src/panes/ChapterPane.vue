@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import FavoriteButton from '../components/FavoriteButton.vue'
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
-import { ChapterInfo, commands, DownloadTaskState, type CbzMode, type Config } from '../bindings.ts'
+import { ChapterInfo, commands, DownloadTaskState, type CbzMode } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { PhArrowClockwise, PhArrowLeft, PhBookOpen, PhDownloadSimple, PhFolderOpen } from '@phosphor-icons/vue'
 import IconButton from '../components/IconButton.vue'
@@ -112,16 +112,6 @@ function openFirstDownloadedChapterReader() {
   }
 }
 
-function handleChapterClick(item: ChapterInfo & { state: State }) {
-  if (item.isDownloaded && store.pickedComic) {
-    if (store.isArchiving(store.pickedComic.id)) {
-      message.warning('正在整合 CBZ，完成后即可阅读')
-      return
-    }
-    store.openReader(store.pickedComic.id, item.chapterId, store.pickedComic.name)
-  }
-}
-
 function handleChapterDoubleClick(chapterId: number, isDownloaded: boolean | null | undefined) {
   if (isDownloaded && store.pickedComic) {
     if (store.isArchiving(store.pickedComic.id)) {
@@ -186,11 +176,20 @@ watchEffect(() => {
   checkedIds.value = checkedIds.value.filter((id) => selectable.has(id))
 })
 
-const notDownloadedCount = computed(() => selectableChapterIds.value.length)
+const targetUndownloadedIds = computed(() =>
+  undownloadedIds.value.length > 0 ? undownloadedIds.value : selectableChapterIds.value,
+)
+
+const allUndownloadedSelected = computed(() => {
+  const targetIds = targetUndownloadedIds.value
+  if (targetIds.length === 0) return false
+  const checked = new Set(checkedIds.value)
+  return targetIds.every((id) => checked.has(id))
+})
 
 function toggleSelectAllUndownloaded() {
-  const targetIds = undownloadedIds.value.length > 0 ? undownloadedIds.value : selectableChapterIds.value
-  if (checkedIds.value.length >= targetIds.length && targetIds.length > 0) {
+  const targetIds = targetUndownloadedIds.value
+  if (allUndownloadedSelected.value) {
     checkedIds.value = []
   } else {
     checkedIds.value = [...targetIds]
@@ -198,6 +197,7 @@ function toggleSelectAllUndownloaded() {
 }
 
 async function onContextMenu(e: MouseEvent) {
+  e.preventDefault()
   showDropdown.value = false
   await nextTick()
   showDropdown.value = true
@@ -205,9 +205,6 @@ async function onContextMenu(e: MouseEvent) {
   dropdownY.value = e.clientY
 }
 
-const showCbzModeDialog = ref(false)
-const chosenCbzMode = ref<CbzMode>('merge')
-const rememberCbzMode = ref(false)
 const pendingChapterIds = ref<number[]>([])
 
 function defaultCbzMode(): CbzMode {
@@ -219,7 +216,7 @@ function downloadChapters() {
   if (comic === undefined || downloadingSelected.value) {
     return
   }
-  // 下载勾选的章节
+  // 下载勾选的章节（默认自动封包为 CBZ，无需弹窗询问）
   const checked = new Set(checkedIds.value)
   const chapterIdsToDownload = comic.chapterInfos
     .filter((c) => c.isDownloaded !== true && checked.has(c.chapterId))
@@ -228,28 +225,7 @@ function downloadChapters() {
     return
   }
   pendingChapterIds.value = chapterIdsToDownload
-  if (comic.chapterInfos.length > 1) {
-    // 多话本子：提供「合并全部话」与「逐话」两种整理方式
-    chosenCbzMode.value = defaultCbzMode()
-    rememberCbzMode.value = false
-    showCbzModeDialog.value = true
-  } else {
-    void runDownloadChapters(defaultCbzMode())
-  }
-}
-
-async function confirmCbzModeDialog() {
-  showCbzModeDialog.value = false
-  if (rememberCbzMode.value && store.config && store.config.defaultCbzMode !== chosenCbzMode.value) {
-    try {
-      const snapshot = JSON.parse(JSON.stringify(store.config)) as Config
-      snapshot.defaultCbzMode = chosenCbzMode.value
-      await store.persistConfig(snapshot)
-    } catch (error) {
-      message.warning(`默认整理方式保存失败：${getErrorMessage(error)}`)
-    }
-  }
-  await runDownloadChapters(chosenCbzMode.value)
+  void runDownloadChapters(defaultCbzMode())
 }
 
 async function runDownloadChapters(cbzMode: CbzMode) {
@@ -309,6 +285,8 @@ async function refreshChapters() {
   // TODO: 如果pickedComic已下载，则更新元数据
 }
 
+const isAndroid = /Android/i.test(navigator.userAgent)
+
 async function showComicDownloadDirInFileManager() {
   if (store.pickedComic === undefined) {
     return
@@ -320,10 +298,20 @@ async function showComicDownloadDirInFileManager() {
     return
   }
 
-  const result = await commands.showPathInFileManager(comicDownloadDir)
-  if (result.status === 'error') {
-    console.error(result.error)
-    message.error(formatCommandError(result.error))
+  if (!isAndroid) {
+    const result = await commands.showPathInFileManager(comicDownloadDir)
+    if (result.status === 'ok') return
+  }
+
+  try {
+    await navigator.clipboard.writeText(comicDownloadDir)
+    message.success('已复制下载目录到剪贴板')
+  } catch {
+    const result = await commands.showPathInFileManager(comicDownloadDir)
+    if (result.status === 'error') {
+      console.error(result.error)
+      message.error(formatCommandError(result.error))
+    }
   }
 }
 
@@ -438,12 +426,12 @@ function isDownloading(state: State) {
           </div>
           <div class="chapters-tools">
             <button type="button" class="select-all-chip" @click="toggleSelectAllUndownloaded">
-              {{ checkedIds.length >= notDownloadedCount && notDownloadedCount > 0 ? '取消全选' : '全选未下载' }}
+              {{ allUndownloadedSelected ? '取消全选' : '全选未下载' }}
             </button>
           </div>
         </header>
 
-        <div class="selection-container custom-scrollbar" @contextmenu.prevent="onContextMenu">
+        <div class="selection-container custom-scrollbar" @contextmenu="onContextMenu">
           <n-checkbox-group v-model:value="checkedIds" class="chapter-checkbox-group">
             <n-virtual-list
               class="chapter-list"
@@ -459,7 +447,6 @@ function isDownloading(state: State) {
                     downloaded: item.isDownloaded,
                     downloading: !item.isDownloaded && isDownloading(item.state),
                   }"
-                  @click="handleChapterClick(item)"
                   @dblclick="handleChapterDoubleClick(item.chapterId, item.isDownloaded)">
                   <span class="chapter-name">{{ item.chapterTitle }}</span>
                   <span v-if="item.isDownloaded" class="chapter-state is-done">已下载</span>
@@ -528,44 +515,6 @@ function isDownloading(state: State) {
         :options="dropdownOptions"
         :show="showDropdown"
         :on-clickoutside="() => (showDropdown = false)" />
-
-      <n-modal
-        v-model:show="showCbzModeDialog"
-        :mask-closable="false"
-        preset="card"
-        title="整理方式"
-        class="cbz-mode-modal"
-        style="max-width: 460px; width: 92vw">
-        <div class="cbz-mode-options">
-          <button
-            type="button"
-            class="cbz-mode-option"
-            :class="{ active: chosenCbzMode === 'merge' }"
-            @click="chosenCbzMode = 'merge'">
-            <div class="cbz-mode-title">合并全部话（推荐）</div>
-            <div class="cbz-mode-desc">整本一个文件，下载完自动合并分话。</div>
-          </button>
-          <button
-            type="button"
-            class="cbz-mode-option"
-            :class="{ active: chosenCbzMode === 'perChapter' }"
-            @click="chosenCbzMode = 'perChapter'">
-            <div class="cbz-mode-title">逐话保留</div>
-            <div class="cbz-mode-desc">每话一个文件，适合追更。</div>
-          </button>
-        </div>
-        <n-checkbox v-model:checked="rememberCbzMode" class="cbz-mode-remember">
-          设为默认
-        </n-checkbox>
-        <template #footer>
-          <div class="cbz-mode-actions">
-            <n-button @click="showCbzModeDialog = false">取消</n-button>
-            <n-button type="primary" @click="confirmCbzModeDialog">
-              开始下载（{{ pendingChapterIds.length }} 话）
-            </n-button>
-          </div>
-        </template>
-      </n-modal>
     </template>
   </div>
 </template>

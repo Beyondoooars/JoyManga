@@ -655,7 +655,7 @@ const readingSummary = computed(() => {
               :min="1"
               :max="10"
               :step="1"
-              :marks="{ 1: '1', 3: '3', 10: '10' }" />
+              :marks="{ 1: '1', 2: '2', 10: '10' }" />
             <span class="field-hint">同时下载几话。新配置默认 2；网络不稳定时调低更稳。</span>
           </div>
           <div class="field">
@@ -665,7 +665,7 @@ const readingSummary = computed(() => {
               :min="1"
               :max="50"
               :step="1"
-              :marks="{ 1: '1', 10: '10', 50: '50' }" />
+              :marks="{ 1: '1', 8: '8', 50: '50' }" />
             <span class="field-hint">
               同一话内同时下载几张图。所有章节共用此总上限；新配置默认 8，网络易超时时调低。
             </span>

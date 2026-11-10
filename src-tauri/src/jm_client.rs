@@ -1071,7 +1071,13 @@ impl JmClient {
             profile.jar.clear();
             profile.photo = absolute_profile_photo(&current.get_image_domain(), &profile.photo);
             let mut state = self.session.write();
-            state.epoch += 1;
+            let same_user = state
+                .profile
+                .as_ref()
+                .is_some_and(|existing| existing.uid == profile.uid);
+            if !same_user || state.epoch == 0 {
+                state.epoch += 1;
+            }
             state.token = token;
             state.profile = Some(profile.clone());
             Ok((saved, state.epoch))
@@ -1171,35 +1177,42 @@ impl JmClient {
         anyhow::ensure!(aid > 0, "本地导入漫画不能加入云端收藏");
         let _guard = self.favorite_lock.lock().await;
         self.ensure_session_epoch(session_epoch)?;
-        let before = self.get_comic(aid).await?;
-        self.ensure_session_epoch(session_epoch)?;
-        let actual = if before.is_favorite == desired {
-            desired
-        } else {
-            match self.toggle_favorite_comic(aid).await {
-                Ok(response) => matches!(response.toggle_type, ToggleType::Add),
-                Err(error) => {
-                    // 服务端可能已经执行；只读回查，不重复 toggle。
-                    let verified = self.get_comic(aid).await;
-                    self.ensure_session_epoch(session_epoch)?;
-                    match verified {
-                        Ok(comic) if comic.is_favorite == desired => desired,
-                        Ok(comic) => {
-                            let _ = FavoriteChangedEvent {
-                                comic_id: aid,
-                                is_favorite: comic.is_favorite,
-                                session_epoch,
-                            }
-                            .emit(&self.app);
-                            return Err(error.context("收藏操作未确认成功，已重新核对状态"));
-                        }
-                        Err(_) => {
-                            return Err(
-                                error.context("收藏结果未知，请刷新状态后重试；未重复提交操作")
-                            )
-                        }
+        let reconcile_after_error = |error: anyhow::Error| async move {
+            let verified = self.get_comic(aid).await;
+            self.ensure_session_epoch(session_epoch)?;
+            match verified {
+                Ok(comic) => {
+                    let _ = FavoriteChangedEvent {
+                        comic_id: aid,
+                        is_favorite: comic.is_favorite,
+                        session_epoch,
                     }
+                    .emit(&self.app);
+                    Err(error.context("收藏操作未确认成功，已重新核对状态"))
                 }
+                Err(_) => Err(error.context("收藏结果未知，请刷新状态后重试；未重复提交操作")),
+            }
+        };
+
+        let first = match self
+            .toggle_favorite_comic_with_auth_retry(aid, session_epoch)
+            .await
+        {
+            Ok(response) => matches!(response.toggle_type, ToggleType::Add),
+            Err(error) => return reconcile_after_error(error).await,
+        };
+        self.ensure_session_epoch(session_epoch)?;
+
+        let actual = if first == desired {
+            first
+        } else {
+            // 本地缓存状态与云端初始状态不一致导致首次 toggle 方向相反，立即再切换一次以收敛到目标状态
+            match self
+                .toggle_favorite_comic_with_auth_retry(aid, session_epoch)
+                .await
+            {
+                Ok(response) => matches!(response.toggle_type, ToggleType::Add),
+                Err(error) => return reconcile_after_error(error).await,
             }
         };
         self.ensure_session_epoch(session_epoch)?;
@@ -1214,6 +1227,21 @@ impl JmClient {
             "服务端返回的收藏状态与目标不一致，请刷新后重试"
         );
         Ok(event)
+    }
+
+    async fn toggle_favorite_comic_with_auth_retry(
+        &self,
+        aid: i64,
+        session_epoch: u64,
+    ) -> anyhow::Result<ToggleFavoriteRespData> {
+        match self.toggle_favorite_comic(aid).await {
+            Err(error) if is_authentication_error(&error) => {
+                self.refresh_session(session_epoch).await?;
+                self.ensure_session_epoch(session_epoch)?;
+                self.toggle_favorite_comic(aid).await
+            }
+            other => other,
+        }
     }
 
     fn ensure_session_epoch(&self, epoch: u64) -> anyhow::Result<()> {
