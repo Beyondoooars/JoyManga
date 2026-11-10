@@ -19,7 +19,10 @@ pub fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResul
             .get_download_manager()
             .pause_active_tasks_for_metered_network();
         if paused > 0 {
-            tracing::info!(paused, "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务");
+            tracing::info!(
+                paused,
+                "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务"
+            );
         }
     }
     Ok(())

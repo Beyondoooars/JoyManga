@@ -102,15 +102,16 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
     {
         app.get_download_manager().reload_concurrency();
     }
-    if !previous.download_only_wifi
-        && next.download_only_wifi
-        && crate::network_state::is_metered()
+    if !previous.download_only_wifi && next.download_only_wifi && crate::network_state::is_metered()
     {
         let paused = app
             .get_download_manager()
             .pause_active_tasks_for_metered_network();
         if paused > 0 {
-            tracing::info!(paused, "开启仅 Wi-Fi 下载且当前为计费网络，自动暂停在途下载任务");
+            tracing::info!(
+                paused,
+                "开启仅 Wi-Fi 下载且当前为计费网络，自动暂停在途下载任务"
+            );
         }
     }
 }

@@ -133,11 +133,14 @@ impl DownloadManager {
 
     pub fn restore_pending(&self) {
         let mut tasks = self.download_tasks.write();
-        let config_guard = self.app.get_config();
-        let settings = DownloadSettings::from(&*config_guard.read());
-        let pause_for_metered =
-            crate::network_state::download_allowed(config_guard.read().download_only_wifi).is_err();
-        drop(config_guard);
+        let (settings, pause_for_metered) = {
+            let state = self.app.get_config();
+            let config = state.read();
+            (
+                DownloadSettings::from(&*config),
+                crate::network_state::download_allowed(config.download_only_wifi).is_err(),
+            )
+        };
         for entry in self.queue.entries() {
             if entry.snapshot.state == DownloadTaskState::Failed
                 || tasks.contains_key(&entry.snapshot.chapter_info.chapter_id)
