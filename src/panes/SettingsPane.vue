@@ -14,7 +14,6 @@ import { getVersion } from '@tauri-apps/api/app'
 import { useDialog, useMessage } from 'naive-ui'
 import {
   commands,
-  type CbzMode,
   type ImageDomainPreset,
   type ImageSpeedReport,
   type LogLevel,
@@ -197,16 +196,6 @@ const proxyPort = computed<number | null>({
     if (store.config) store.config.proxyPort = value === null || !Number.isFinite(value) ? 7890 : value
   },
 })
-const cbzModeOptions = [
-  { label: '合并为整本 CBZ', value: 'merge' },
-  { label: '逐话保留 CBZ', value: 'perChapter' },
-]
-const cbzMode = computed({
-  get: () => store.config?.defaultCbzMode ?? 'merge',
-  set: (value: CbzMode) => {
-    if (store.config) store.config.defaultCbzMode = value
-  },
-})
 const logLevel = computed({
   get: () => store.config?.logLevel ?? 'INFO',
   set: (value: LogLevel) => {
@@ -254,10 +243,10 @@ const downloadOnlyWifi = computed({
 // 并发上限与后端 validate() 保持一致：越界会让整份配置保存失败。
 // 输入框清空时 naive-ui 给 null，同样兜底到默认值而不是写入 0。
 const chapterConcurrency = computed({
-  get: () => store.config?.chapterConcurrency ?? 1,
+  get: () => store.config?.chapterConcurrency ?? 2,
   set: (value: number | null) => {
     if (!store.config) return
-    const next = value === null || !Number.isFinite(value) ? 1 : Math.round(value)
+    const next = value === null || !Number.isFinite(value) ? 2 : Math.round(value)
     store.config.chapterConcurrency = Math.min(10, Math.max(1, next))
   },
 })
@@ -275,6 +264,7 @@ const networkKey = computed(() => {
     ? JSON.stringify([
         config.apiDomainMode,
         config.customApiDomain,
+        config.imageDomainMode,
         config.customImageDomain,
         config.proxyMode,
         config.proxyHost,
@@ -650,12 +640,14 @@ const readingSummary = computed(() => {
             <PathField v-model:value="store.config.downloadDir" label="漫画书库" />
             <n-button secondary size="small" block @click="showStoragePicker = true">更改位置</n-button>
           </div>
-          <div class="field">
-            <label class="field-label">下载整理</label>
-            <n-select v-model:value="cbzMode" :options="cbzModeOptions" />
-          </div>
-          <p class="note">下载后自动整理；单次下载时可在章节页临时选择。更改后只影响新下载。</p>
           <p v-if="isAndroid" class="note">公共下载书库（Download/JoyManga）卸载后保留；应用专用书库会随卸载清理。</p>
+          <div v-if="isAndroid" class="row">
+            <div class="row-copy">
+              <strong>仅 Wi-Fi 下载</strong>
+              <span>移动数据下自动暂停下载</span>
+            </div>
+            <n-switch v-model:value="downloadOnlyWifi" aria-label="仅 Wi-Fi 下载" />
+          </div>
           <div class="field">
             <label class="field-label">章节并发数</label>
             <n-slider
@@ -663,7 +655,7 @@ const readingSummary = computed(() => {
               :min="1"
               :max="10"
               :step="1"
-              :marks="{ 1: '1', 3: '3', 10: '10' }" />
+              :marks="{ 1: '1', 2: '2', 10: '10' }" />
             <span class="field-hint">同时下载几话。新配置默认 2；网络不稳定时调低更稳。</span>
           </div>
           <div class="field">
@@ -673,7 +665,7 @@ const readingSummary = computed(() => {
               :min="1"
               :max="50"
               :step="1"
-              :marks="{ 1: '1', 10: '10', 50: '50' }" />
+              :marks="{ 1: '1', 8: '8', 50: '50' }" />
             <span class="field-hint">
               同一话内同时下载几张图。所有章节共用此总上限；新配置默认 8，网络易超时时调低。
             </span>
@@ -833,13 +825,6 @@ const readingSummary = computed(() => {
               <span>音量减为下一页</span>
             </div>
             <n-switch v-model:value="volumeKeyPaging" aria-label="音量键翻页" />
-          </div>
-          <div v-if="isAndroid" class="row">
-            <div class="row-copy">
-              <strong>仅 Wi-Fi 下载</strong>
-              <span>移动数据下无法新建下载</span>
-            </div>
-            <n-switch v-model:value="downloadOnlyWifi" aria-label="仅 Wi-Fi 下载" />
           </div>
         </section>
       </template>

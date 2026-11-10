@@ -67,6 +67,7 @@ function pickComic() {
     return
   }
   store.showComic(props.comic)
+  void store.probeComicFavorite(props.comic.id)
 }
 
 function openReader() {
@@ -230,9 +231,7 @@ onBeforeUnmount(clearPress)
         <PhImage :size="24" weight="duotone" />
       </span>
 
-      <span v-if="selectionMode" class="tile-check" :class="{ 'is-on': checked }" aria-hidden="true">
-        <PhCheck v-if="checked" :size="13" weight="bold" />
-      </span>
+      <span v-if="selectionMode" class="tile-check" :class="{ 'is-on': checked }" aria-hidden="true"></span>
 
       <span v-if="comic.id < 0" class="tile-origin">导入</span>
       <span v-if="archiving" class="tile-archiving" :title="archivingTitle">{{ archivingLabel }}</span>
@@ -336,9 +335,16 @@ onBeforeUnmount(clearPress)
 }
 
 .tile-check.is-on {
-  color: #fff;
   border-color: var(--jm-brand);
   background: var(--jm-brand);
+}
+
+.tile-check.is-on::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
 }
 
 .tile-origin,

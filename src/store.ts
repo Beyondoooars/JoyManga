@@ -51,6 +51,7 @@ export const useStore = defineStore('store', () => {
   const searchResultEpoch = ref<number>()
   const weeklyResultEpoch = ref<number>()
   const favoriteResultEpoch = ref<number>()
+  const favoriteListStale = ref(false)
 
   function applyConfig(server: Config, discardLocal = false) {
     if (authoritativeConfig.value && (server.revision ?? 0) < (authoritativeConfig.value.revision ?? 0)) return
@@ -81,6 +82,7 @@ export const useStore = defineStore('store', () => {
       favoriteMutationRevisions.clear()
       favoriteRevision.value++
       getFavoriteResult.value = undefined
+      favoriteListStale.value = false
       searchResult.value = undefined
       getWeeklyResult.value = undefined
       pickedComicFavoriteEpoch.value = undefined
@@ -137,12 +139,30 @@ export const useStore = defineStore('store', () => {
       stateUnlisteners.push(await events.sessionChangedEvent.listen(({ payload }) => applySession(payload)))
       stateUnlisteners.push(await events.comicArchiveEvent.listen(({ payload }) => handleArchiveEvent(payload)))
       stateUnlisteners.push(await events.favoriteChangedEvent.listen(({ payload }) => {
+        const previousFavorite = favoriteStatuses.value.get(payload.comicId)
         applyFavoriteMutation(payload.comicId, payload.isFavorite, payload.sessionEpoch)
-        if (payload.sessionEpoch === sessionEpoch.value && getFavoriteResult.value) {
-          if (!payload.isFavorite) {
-            const previous = getFavoriteResult.value.list.length
-            getFavoriteResult.value.list = getFavoriteResult.value.list.filter((comic) => comic.id !== payload.comicId)
-            getFavoriteResult.value.total -= previous - getFavoriteResult.value.list.length
+        if (payload.sessionEpoch === sessionEpoch.value) {
+          if (userProfile.value && previousFavorite !== payload.isFavorite) {
+            const currentCount = userProfile.value.album_favorites ?? 0
+            userProfile.value.album_favorites = payload.isFavorite
+              ? currentCount + 1
+              : Math.max(0, currentCount - 1)
+          }
+          if (getFavoriteResult.value) {
+            if (!payload.isFavorite) {
+              const previous = getFavoriteResult.value.list.length
+              getFavoriteResult.value.list = getFavoriteResult.value.list.filter((comic) => comic.id !== payload.comicId)
+              const removed = previous - getFavoriteResult.value.list.length
+              getFavoriteResult.value.total = Math.max(
+                0,
+                getFavoriteResult.value.total - (removed > 0 ? removed : 1),
+              )
+              if (removed === 0 || getFavoriteResult.value.list.length === 0) {
+                favoriteListStale.value = true
+              }
+            } else {
+              favoriteListStale.value = true
+            }
           }
         }
       }))
@@ -443,6 +463,24 @@ export const useStore = defineStore('store', () => {
     chapterDetailShowing.value = true
   }
 
+  /** 本地书库打开漫画详情后静默探测云端收藏状态，离线失败时忽略，不影响本地离线阅读。 */
+  async function probeComicFavorite(comicId: number) {
+    if (comicId <= 0 || !userProfile.value || favoriteStatuses.value.has(comicId)) return
+    const epoch = sessionEpoch.value
+    const observedRevision = favoriteRevision.value
+    try {
+      const result = await commands.getComic(comicId)
+      if (epoch !== sessionEpoch.value || result.status === 'error') return
+      recordFavorite(comicId, result.data.is_favorite, epoch, observedRevision)
+      if (pickedComic.value?.id === comicId) {
+        pickedComic.value.is_favorite = result.data.is_favorite
+        pickedComicFavoriteEpoch.value = epoch
+      }
+    } catch {
+      // 离线查看本地书库时静默忽略网络探测错误
+    }
+  }
+
   /** 拉取指定漫画并更新详情数据；`revealDetail` 决定是否同时打开详情页。 */
   async function fetchPickedComic(comicId: number, revealDetail: boolean) {
     const generation = ++pickedComicRequestGeneration
@@ -646,7 +684,7 @@ function trimProgressHistory() {
     config,
     authoritativeConfig, apiDomainPresets, applyConfig, persistConfig, configIsDirty,
     openAccount, closeAccount, openSettings, closeSettings, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
-    searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch,
+    searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch, favoriteListStale,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
     archivingComics, isArchiving, archiveFailures, archiveFailure,
     initDownloadListener, reloadTasks, taskLoadError, loadingTasks,
@@ -685,6 +723,7 @@ function trimProgressHistory() {
     openReader,
     closeReader,
     showComic,
+    probeComicFavorite,
     openComic,
     refreshPickedComic,
     refreshDownloadedComics,
