@@ -142,6 +142,7 @@ pub fn pause_download_task(app: AppHandle, chapter_id: i64) -> CommandResult<()>
 #[tauri::command(async)]
 #[specta::specta]
 pub fn resume_download_task(app: AppHandle, chapter_id: i64) -> CommandResult<()> {
+    ensure_download_allowed(&app, "无法恢复下载")?;
     let download_manager = app.get_download_manager();
 
     download_manager

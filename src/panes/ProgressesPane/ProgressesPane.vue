@@ -57,8 +57,10 @@ onMounted(() => {
           <span v-if="tab.count > 0" class="tab-count">{{ tab.count }}</span>
         </button>
       </div>
-      <div v-if="store.downloadSpeed" class="speed-pill">
-        ⚡ {{ store.downloadSpeed }}
+      <div
+        v-if="store.activeDownloadCount > 0 && store.downloadSpeed && !store.downloadSpeed.startsWith('0.00')"
+        class="speed-pill">
+        {{ store.downloadSpeed }}
       </div>
     </div>
 

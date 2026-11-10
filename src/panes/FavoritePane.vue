@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onActivated, ref, watch } from 'vue'
 import { commands, type FavoriteSort } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
@@ -59,9 +59,9 @@ watch(
   { immediate: true },
 )
 
-async function getFavourite(folderId: number, page: number, sort: FavoriteSort) {
+async function getFavourite(folderId: number, page: number, sort: FavoriteSort): Promise<boolean> {
   const uid = store.userProfile?.uid
-  if (uid === undefined) return
+  if (uid === undefined) return false
 
   const generation = ++favoriteRequestGeneration
   const epoch = store.sessionEpoch
@@ -70,26 +70,35 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort) 
   errorMessage.value = ''
   try {
     const result = await commands.getFavoriteFolder(folderId, page, sort)
-    if (generation !== favoriteRequestGeneration || store.userProfile?.uid !== uid || epoch !== store.sessionEpoch) return
+    if (generation !== favoriteRequestGeneration || store.userProfile?.uid !== uid || epoch !== store.sessionEpoch) {
+      return false
+    }
     if (result.status === 'error') {
       console.error(result.error)
       errorMessage.value = result.error.err_message || result.error.err_title
       message.error(formatCommandError(result.error))
-      return
+      return false
+    }
+    if (result.data.list.length === 0 && page > 1 && result.data.total > 0) {
+      const maxPage = result.data.count > 0 ? Math.max(1, Math.ceil(result.data.total / result.data.count)) : 1
+      return await getFavourite(folderId, Math.min(page - 1, maxPage), sort)
     }
     store.getFavoriteResult = result.data
     store.favoriteResultEpoch = epoch
+    store.favoriteListStale = false
     for (const comic of result.data.list) store.recordFavorite(comic.id, true, epoch, observedRevision)
     folderIdSelected.value = folderId
     sortSelected.value = sort
     pageSelected.value = page
     errorMessage.value = ''
+    return true
   } catch (error) {
     if (generation === favoriteRequestGeneration && store.userProfile?.uid === uid) {
       console.error(error)
       errorMessage.value = getErrorMessage(error)
       message.error(`获取收藏夹失败：${errorMessage.value}`)
     }
+    return false
   } finally {
     if (generation === favoriteRequestGeneration) {
       loading.value = false
@@ -97,22 +106,33 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort) 
   }
 }
 
+watch(
+  () => store.getFavoriteResult?.list.length,
+  (length) => {
+    if (length === 0 && pageSelected.value > 1 && !loading.value && store.userProfile?.uid !== undefined) {
+      void getFavourite(folderIdSelected.value, pageSelected.value - 1, sortSelected.value)
+    }
+  },
+)
+
+onActivated(() => {
+  if (store.userProfile?.uid !== undefined && store.favoriteListStale && !loading.value) {
+    void getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
+  }
+})
+
 const syncing = ref(false)
 async function syncFavoriteFolder() {
-  // 防重：连点会重复发起同步 + 列表请求
-  if (syncing.value) return
+  // 防重：连点会重复发起同步请求
+  if (syncing.value || loading.value) return
   syncing.value = true
   try {
-    const result = await commands.syncFavoriteFolder()
-    if (result.status === 'error') {
-      console.error(result.error)
-      message.error(formatCommandError(result.error))
-      return
-    }
     // 同步后只刷新当前视图：回到「全部/第 1 页/默认排序」会把用户正在看的
     // 收藏夹、页码和排序全部重置掉。
-    await getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
-    message.success('收藏夹已同步')
+    const ok = await getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
+    if (ok) {
+      message.success('收藏夹已同步')
+    }
   } catch (error) {
     console.error(error)
     message.error(`同步收藏夹失败：${getErrorMessage(error)}`)
@@ -229,12 +249,12 @@ function pickFolder(folderId: number) {
           </div>
         </div>
 
-        <div v-else-if="store.getFavoriteResult && store.getFavoriteResult.list.length === 0" class="jm-empty">
+        <div v-else-if="store.getFavoriteResult && store.getFavoriteResult.list.length === 0 && pageSelected <= 1" class="jm-empty">
           <div class="jm-empty-icon is-muted"><PhHeart :size="28" weight="duotone" /></div>
           <strong>这里还没有收藏</strong>
           <p>在漫画详情页点收藏，或到 JM 添加收藏后回来同步。</p>
           <div class="jm-empty-actions">
-            <button type="button" class="jm-btn is-ghost" :loading="syncing" @click="syncFavoriteFolder">同步收藏夹</button>
+            <button type="button" class="jm-btn is-ghost" :disabled="loading || syncing" @click="syncFavoriteFolder">同步收藏夹</button>
           </div>
         </div>
 
@@ -257,7 +277,7 @@ function pickFolder(folderId: number) {
               :comic-downloaded="comic.isDownloaded" />
           </div>
 
-          <nav v-if="favoritePageCount > 1" class="pager" aria-label="收藏分页">
+          <nav v-if="favoritePageCount > 1 || pageSelected > 1" class="pager" aria-label="收藏分页">
             <button
               type="button"
               class="pager-btn"
