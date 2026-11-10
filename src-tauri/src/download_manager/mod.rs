@@ -133,7 +133,14 @@ impl DownloadManager {
 
     pub fn restore_pending(&self) {
         let mut tasks = self.download_tasks.write();
-        let settings = DownloadSettings::from(&*self.app.get_config().read());
+        let (settings, pause_for_metered) = {
+            let state = self.app.get_config();
+            let config = state.read();
+            (
+                DownloadSettings::from(&*config),
+                crate::network_state::download_allowed(config.download_only_wifi).is_err(),
+            )
+        };
         for entry in self.queue.entries() {
             if entry.snapshot.state == DownloadTaskState::Failed
                 || tasks.contains_key(&entry.snapshot.chapter_info.chapter_id)
@@ -141,7 +148,10 @@ impl DownloadManager {
                 continue;
             }
             let restore = (|| -> anyhow::Result<()> {
-                let resumed_state = entry.resumed_state(&settings)?;
+                let mut resumed_state = entry.resumed_state(&settings)?;
+                if pause_for_metered && resumed_state == DownloadTaskState::Pending {
+                    resumed_state = DownloadTaskState::Paused;
+                }
                 let task = DownloadTask::new(
                     self.app.clone(),
                     *entry.snapshot.comic.clone(),
@@ -250,6 +260,26 @@ impl DownloadManager {
             &[DownloadTaskState::Pending, DownloadTaskState::Downloading],
         );
         Ok(())
+    }
+
+    /// 当开启「仅 Wi-Fi 下载」且处于计费网络时，自动暂停所有排队中/下载中的任务。
+    pub fn pause_active_tasks_for_metered_network(&self) -> usize {
+        let tasks = self.download_tasks.read();
+        let mut paused = 0usize;
+        for task in tasks.values() {
+            let current = *task.state_sender.borrow();
+            if matches!(
+                current,
+                DownloadTaskState::Pending | DownloadTaskState::Downloading
+            ) {
+                task.change_state(
+                    DownloadTaskState::Paused,
+                    &[DownloadTaskState::Pending, DownloadTaskState::Downloading],
+                );
+                paused += 1;
+            }
+        }
+        paused
     }
 
     pub fn resume_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {

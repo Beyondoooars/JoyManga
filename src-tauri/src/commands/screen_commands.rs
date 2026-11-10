@@ -10,9 +10,21 @@ use crate::extensions::AppHandleExt;
 /// 前端在启动时与网络变化时各调一次，后端据此判断"仅 Wi-Fi 下载"。
 #[tauri::command(async)]
 #[specta::specta]
-pub fn set_network_metered(metered: bool) -> CommandResult<()> {
+#[allow(clippy::needless_pass_by_value)]
+pub fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResult<()> {
     crate::network_state::set_metered(metered);
     tracing::debug!(metered, "网络计费状态已更新");
+    if metered && app.get_config().read().download_only_wifi {
+        let paused = app
+            .get_download_manager()
+            .pause_active_tasks_for_metered_network();
+        if paused > 0 {
+            tracing::info!(
+                paused,
+                "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务"
+            );
+        }
+    }
     Ok(())
 }
 

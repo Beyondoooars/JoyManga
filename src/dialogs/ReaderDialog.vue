@@ -5,13 +5,10 @@ import { useStore } from '../store.ts'
 import { getErrorMessage } from '../utils/errors.ts'
 import { imageUrlFor } from '../utils/imageCache.ts'
 import { bookmarkId, type ReadingProgress } from '../utils/readingState.ts'
-import { useMessage } from 'naive-ui'
 import {
   PhX,
   PhCaretLeft,
   PhCaretRight,
-  PhCaretDoubleLeft,
-  PhCaretDoubleRight,
   PhArrowsHorizontal,
   PhArrowsVertical,
   PhBookmarkSimple,
@@ -46,7 +43,6 @@ import {
 } from '../utils/readerZoom.ts'
 
 const store = useStore()
-const message = useMessage()
 
 const hudVisible = ref(true)
 
@@ -486,48 +482,6 @@ function nextPage() {
   }
 }
 
-function handlePrevPageBtn() {
-  if (!chapterData.value) return
-  if (currentPage.value > 1) {
-    prevPage()
-  } else if (chapterData.value.prevChapter) {
-    goToChapter(chapterData.value.prevChapter)
-    message.info(`已切换至上一章：${chapterData.value.prevChapter.chapterTitle}`)
-  } else {
-    message.info('已经是第一章第一页了')
-  }
-}
-
-function handleNextPageBtn() {
-  if (!chapterData.value) return
-  if (currentPage.value < chapterData.value.totalImages) {
-    nextPage()
-  } else if (chapterData.value.nextChapter) {
-    goToChapter(chapterData.value.nextChapter)
-    message.info(`已切换至下一章：${chapterData.value.nextChapter.chapterTitle}`)
-  } else {
-    message.info('已经是最后一页了')
-  }
-}
-
-function handlePrevChapterBtn() {
-  if (!chapterData.value) return
-  if (chapterData.value.prevChapter) {
-    goToChapter(chapterData.value.prevChapter)
-  } else {
-    message.info('已经是第一章了')
-  }
-}
-
-function handleNextChapterBtn() {
-  if (!chapterData.value) return
-  if (chapterData.value.nextChapter) {
-    goToChapter(chapterData.value.nextChapter)
-  } else {
-    message.info('已经是最后一章了')
-  }
-}
-
 // 触摸手势控制（左右滑动翻页）
 let touchStartX = 0
 let touchStartY = 0
@@ -791,7 +745,7 @@ onMounted(() => {
   window.addEventListener('keydown', handleKeyDown)
   // 阅读器打开即保持常亮（可在设置关闭）；音量键仅 Android 生效
   keepScreenOnWatch = watch(
-    () => [store.config?.keepScreenOn ?? true, store.activeReaderTarget !== undefined] as const,
+    () => [store.config?.keepScreenOn ?? true, Boolean(store.activeReaderTarget)] as const,
     ([keepScreenOn, reading]) => setKeepScreenOn(keepScreenOn && reading),
     { immediate: true },
   )
@@ -1011,24 +965,6 @@ onUnmounted(() => {
         v-show="hudVisible"
         class="reader-footer mobile-footer">
         <div class="footer-controls">
-          <button
-            type="button"
-            class="nav-btn chapter-btn"
-            :class="{ disabled: !chapterData?.prevChapter }"
-            title="上一章"
-            @click="handlePrevChapterBtn">
-            <PhCaretDoubleLeft :size="16" />
-            <span>上一章</span>
-          </button>
-
-          <button
-            type="button"
-            class="nav-btn page-arrow-btn"
-            title="上一页 (← / A)"
-            @click="handlePrevPageBtn">
-            <PhCaretLeft :size="18" />
-          </button>
-
           <div class="page-slider-area" v-if="chapterData && chapterData.totalImages > 0">
             <n-slider
               v-model:value="currentPage"
@@ -1043,24 +979,6 @@ onUnmounted(() => {
               <strong>{{ currentPage }}</strong> / {{ chapterData.totalImages }}
             </span>
           </div>
-
-          <button
-            type="button"
-            class="nav-btn page-arrow-btn"
-            title="下一页 (→ / D)"
-            @click="handleNextPageBtn">
-            <PhCaretRight :size="18" />
-          </button>
-
-          <button
-            type="button"
-            class="nav-btn chapter-btn"
-            :class="{ disabled: !chapterData?.nextChapter }"
-            title="下一章"
-            @click="handleNextChapterBtn">
-            <span>下一章</span>
-            <PhCaretDoubleRight :size="16" />
-          </button>
         </div>
       </footer>
     </div>
@@ -1405,43 +1323,8 @@ onUnmounted(() => {
 .footer-controls {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.nav-btn {
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #9499A0;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  transition: all 120ms ease;
-  white-space: nowrap;
-}
-
-.nav-btn:hover:not(:disabled) {
-  color: #fff;
-  border-color: #FB7299;
-}
-
-.nav-btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-.page-arrow-btn {
-  padding: 4px 8px;
-  min-width: 32px;
   justify-content: center;
-}
-
-.chapter-btn.disabled {
-  opacity: 0.35;
+  gap: 12px;
 }
 
 .page-slider-area {
@@ -1530,24 +1413,9 @@ onUnmounted(() => {
   }
 
   .page-slider-area {
-    gap: 8px !important;
-  }
-
-  .chapter-btn span {
-    display: none;
-  }
-
-  .page-arrow-btn {
-    min-width: 34px;
-    height: 34px;
-    padding: 0;
-  }
-
-  .chapter-btn {
-    min-width: 34px;
-    height: 34px;
-    padding: 0;
-    justify-content: center;
+    max-width: 100% !important;
+    width: 100%;
+    gap: 12px !important;
   }
 
   .page-slider :deep(.n-slider-handle) {
