@@ -86,6 +86,8 @@ struct QueueState {
 pub struct DownloadQueue {
     path: PathBuf,
     state: Mutex<QueueState>,
+    #[cfg(test)]
+    save_count: std::sync::atomic::AtomicUsize,
 }
 
 fn should_restore(state: DownloadTaskState) -> bool {
@@ -191,6 +193,8 @@ impl DownloadQueue {
         Ok(Self {
             path,
             state: Mutex::new(state),
+            #[cfg(test)]
+            save_count: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -231,8 +235,11 @@ impl DownloadQueue {
         Ok(snapshot)
     }
 
-    pub fn update(&self, mut snapshot: DownloadTaskSnapshot) -> Option<DownloadTaskSnapshot> {
-        let mut state = self.state.lock();
+    fn update_locked(
+        &self,
+        state: &mut QueueState,
+        mut snapshot: DownloadTaskSnapshot,
+    ) -> Option<DownloadTaskSnapshot> {
         let entry = state.entries.get(&snapshot.chapter_info.chapter_id)?;
         // 重试会创建新的 task_id，丢弃旧任务迟到的事件。
         if entry.snapshot.task_id != snapshot.task_id {
@@ -251,14 +258,21 @@ impl DownloadQueue {
             .get_mut(&snapshot.chapter_info.chapter_id)?
             .snapshot = snapshot.clone();
         state.dirty |= persist;
+        Some(snapshot)
+    }
+
+    fn save_dirty(&self, state: &mut QueueState) {
         if state.dirty {
-            match self.save(&state) {
+            match self.save(state) {
                 Ok(()) => state.dirty = false,
                 Err(error) => {
                     tracing::error!(error = %error, "保存下载队列失败，重启后的任务状态可能过期");
                 }
             }
         }
+    }
+
+    fn trim_finished(&self, state: &mut QueueState) {
         // 未完成和失败任务始终保留；限制本次运行的完成历史大小。
         let finished: Vec<_> = state
             .entries
@@ -269,10 +283,34 @@ impl DownloadQueue {
         for id in finished.iter().take(finished.len().saturating_sub(500)) {
             state.entries.shift_remove(id);
         }
-        Some(snapshot)
+    }
+
+    pub fn update_many(&self, snapshots: Vec<DownloadTaskSnapshot>) -> Vec<DownloadTaskSnapshot> {
+        if snapshots.is_empty() {
+            return Vec::new();
+        }
+        let mut state = self.state.lock();
+        let updated: Vec<_> = snapshots
+            .into_iter()
+            .filter_map(|snapshot| self.update_locked(&mut state, snapshot))
+            .collect();
+        self.save_dirty(&mut state);
+        self.trim_finished(&mut state);
+        updated
+    }
+
+    pub fn update(&self, snapshot: DownloadTaskSnapshot) -> Option<DownloadTaskSnapshot> {
+        let mut state = self.state.lock();
+        let updated = self.update_locked(&mut state, snapshot);
+        self.save_dirty(&mut state);
+        self.trim_finished(&mut state);
+        updated
     }
 
     fn save(&self, state: &QueueState) -> anyhow::Result<()> {
+        #[cfg(test)]
+        self.save_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = QueueFile {
             version: 1,
             tasks: state
@@ -316,6 +354,31 @@ mod tests {
                 download_dir: PathBuf::from("downloads"),
             },
         }
+    }
+
+    #[test]
+    fn batch_updates_persist_the_queue_only_once() {
+        let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
+        let path = root.join("queue.json");
+        let queue = DownloadQueue::load(path.clone()).unwrap();
+        let mut first = queue
+            .insert(entry(1, DownloadTaskState::Downloading))
+            .unwrap();
+        let mut second = queue.insert(entry(2, DownloadTaskState::Pending)).unwrap();
+        let before = queue.save_count.load(std::sync::atomic::Ordering::Relaxed);
+        first.state = DownloadTaskState::Paused;
+        second.state = DownloadTaskState::Paused;
+        assert_eq!(queue.update_many(vec![first, second]).len(), 2);
+        assert_eq!(
+            queue.save_count.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+        assert_eq!(queue.update_many(Vec::new()).len(), 0);
+        let loaded = DownloadQueue::load(path).unwrap().entries();
+        assert!(loaded
+            .iter()
+            .all(|entry| entry.snapshot.state == DownloadTaskState::Paused));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -389,6 +452,8 @@ mod tests {
         let blocked = DownloadQueue {
             path: blocked_path.join("queue.json"),
             state: Mutex::default(),
+            #[cfg(test)]
+            save_count: std::sync::atomic::AtomicUsize::new(0),
         };
         assert!(blocked
             .insert(entry(2, DownloadTaskState::Pending))

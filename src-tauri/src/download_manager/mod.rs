@@ -132,16 +132,24 @@ impl DownloadManager {
     }
 
     pub fn restore_pending(&self) {
+        let entries = self.queue.entries();
+        let only_wifi = self.app.get_config().read().download_only_wifi;
+        crate::network_state::with_download_state(|| {
+            self.restore_pending_locked(entries, only_wifi)
+        });
+    }
+
+    fn restore_pending_locked(&self, entries: Vec<StoredDownload>, only_wifi: bool) {
         let mut tasks = self.download_tasks.write();
         let (settings, pause_for_metered) = {
             let state = self.app.get_config();
             let config = state.read();
             (
                 DownloadSettings::from(&*config),
-                crate::network_state::download_allowed(config.download_only_wifi).is_err(),
+                crate::network_state::should_pause_restored_download(only_wifi),
             )
         };
-        for entry in self.queue.entries() {
+        for entry in entries {
             if entry.snapshot.state == DownloadTaskState::Failed
                 || tasks.contains_key(&entry.snapshot.chapter_info.chapter_id)
             {
@@ -201,6 +209,13 @@ impl DownloadManager {
     }
 
     pub fn create_download_task(&self, comic: Comic, chapter_id: i64) -> anyhow::Result<()> {
+        let only_wifi = self.app.get_config().read().download_only_wifi;
+        crate::network_state::with_download_permission(only_wifi, || {
+            self.create_download_task_permitted(comic, chapter_id)
+        })
+    }
+
+    fn create_download_task_permitted(&self, comic: Comic, chapter_id: i64) -> anyhow::Result<()> {
         use DownloadTaskState::{Downloading, Paused, Pending};
         // 整合进行中不要创建新任务：整合会按快照合并并删除来源章节文件，
         // 与下载写入交叉会导致漏章。请用户等整理完成后再下载。
@@ -264,31 +279,28 @@ impl DownloadManager {
 
     /// 当开启「仅 Wi-Fi 下载」且处于计费网络时，自动暂停所有排队中/下载中的任务。
     pub fn pause_active_tasks_for_metered_network(&self) -> usize {
-        let tasks = self.download_tasks.read();
-        let mut paused = 0usize;
-        for task in tasks.values() {
-            let current = *task.state_sender.borrow();
-            if matches!(
-                current,
-                DownloadTaskState::Pending | DownloadTaskState::Downloading
-            ) {
-                task.change_state(
-                    DownloadTaskState::Paused,
-                    &[DownloadTaskState::Pending, DownloadTaskState::Downloading],
-                );
-                paused += 1;
-            }
+        let tasks: Vec<_> = self.download_tasks.read().values().cloned().collect();
+        let snapshots: Vec<_> = tasks
+            .iter()
+            .filter_map(DownloadTask::pause_for_metered_network)
+            .collect();
+        let paused = snapshots.len();
+        for snapshot in self.queue.update_many(snapshots) {
+            DownloadTask::emit_update_event(&self.app, snapshot);
         }
         paused
     }
 
     pub fn resume_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {
-        let tasks = self.download_tasks.read();
-        let Some(task) = tasks.get(&chapter_id) else {
-            return Err(anyhow!("未找到章节ID为`{chapter_id}`的下载任务"));
-        };
-        task.change_state(DownloadTaskState::Pending, &[DownloadTaskState::Paused]);
-        Ok(())
+        let only_wifi = self.app.get_config().read().download_only_wifi;
+        crate::network_state::with_download_permission(only_wifi, || {
+            let tasks = self.download_tasks.read();
+            let Some(task) = tasks.get(&chapter_id) else {
+                return Err(anyhow!("未找到章节ID为`{chapter_id}`的下载任务"));
+            };
+            task.change_state(DownloadTaskState::Pending, &[DownloadTaskState::Paused]);
+            Ok(())
+        })
     }
 
     pub fn cancel_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {

@@ -23,6 +23,26 @@ test('switching account clears favorite state and rejects late old-account updat
   assert.equal(store.userProfile.uid, 'second')
 })
 
+test('favorite events keep server-owned totals and always invalidate visible lists', () => {
+  const store = useStore(createPinia())
+  store.applySession({ sessionEpoch: 1, profile: { uid: 'first', album_favorites: 10 } })
+  store.getFavoriteResult = { list: [{ id: 111 }, { id: 222 }], total: 2, count: 20, folderList: [] }
+  store.handleFavoriteChangedEvent({ comicId: 333, isFavorite: true, sessionEpoch: 1 })
+  assert.equal(store.userProfile.album_favorites, 10)
+  assert.equal(store.favoriteListStale, true)
+
+  store.favoriteListStale = false
+  store.handleFavoriteChangedEvent({ comicId: 333, isFavorite: false, sessionEpoch: 1 })
+  assert.equal(store.getFavoriteResult.total, 2)
+  assert.equal(store.favoriteListStale, true)
+
+  store.favoriteListStale = false
+  store.handleFavoriteChangedEvent({ comicId: 111, isFavorite: false, sessionEpoch: 1 })
+  assert.equal(store.getFavoriteResult.total, 1)
+  assert.equal(store.getFavoriteResult.list.length, 1)
+  assert.equal(store.favoriteListStale, true)
+})
+
 test('a list request started before a favorite mutation cannot roll its result back', () => {
   const store = useStore(createPinia())
   store.applySession({ sessionEpoch: 1, profile: { uid: 'first' } })

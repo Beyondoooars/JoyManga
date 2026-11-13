@@ -11,6 +11,7 @@ import {
   type ApiDomainPreset,
   type DownloadTaskEvent,
   type Config,
+  type FavoriteChangedEvent,
   type GetFavoriteResult,
   type GetUserProfileRespData,
   type GetWeeklyResult,
@@ -132,40 +133,26 @@ export const useStore = defineStore('store', () => {
 
   const stateUnlisteners: Array<() => void> = []
   let stateReady: Promise<void> | undefined
+  function handleFavoriteChangedEvent(payload: FavoriteChangedEvent) {
+    applyFavoriteMutation(payload.comicId, payload.isFavorite, payload.sessionEpoch)
+    if (payload.sessionEpoch !== sessionEpoch.value || !getFavoriteResult.value) return
+    // 账户收藏总数只由服务端资料刷新更新，不能用本地缓存猜测净变化。
+    favoriteListStale.value = true
+    if (payload.isFavorite) return
+    const result = getFavoriteResult.value
+    const previous = result.list.length
+    result.list = result.list.filter((comic) => comic.id !== payload.comicId)
+    const removed = previous - result.list.length
+    if (removed > 0) result.total = Math.max(0, result.total - removed)
+  }
+
   function initStateListeners(): Promise<void> {
     if (stateReady) return stateReady
     stateReady = (async () => {
       stateUnlisteners.push(await events.configChangedEvent.listen(({ payload }) => applyConfig(payload.config)))
       stateUnlisteners.push(await events.sessionChangedEvent.listen(({ payload }) => applySession(payload)))
       stateUnlisteners.push(await events.comicArchiveEvent.listen(({ payload }) => handleArchiveEvent(payload)))
-      stateUnlisteners.push(await events.favoriteChangedEvent.listen(({ payload }) => {
-        const previousFavorite = favoriteStatuses.value.get(payload.comicId)
-        applyFavoriteMutation(payload.comicId, payload.isFavorite, payload.sessionEpoch)
-        if (payload.sessionEpoch === sessionEpoch.value) {
-          if (userProfile.value && previousFavorite !== payload.isFavorite) {
-            const currentCount = userProfile.value.album_favorites ?? 0
-            userProfile.value.album_favorites = payload.isFavorite
-              ? currentCount + 1
-              : Math.max(0, currentCount - 1)
-          }
-          if (getFavoriteResult.value) {
-            if (!payload.isFavorite) {
-              const previous = getFavoriteResult.value.list.length
-              getFavoriteResult.value.list = getFavoriteResult.value.list.filter((comic) => comic.id !== payload.comicId)
-              const removed = previous - getFavoriteResult.value.list.length
-              getFavoriteResult.value.total = Math.max(
-                0,
-                getFavoriteResult.value.total - (removed > 0 ? removed : 1),
-              )
-              if (removed === 0 || getFavoriteResult.value.list.length === 0) {
-                favoriteListStale.value = true
-              }
-            } else {
-              favoriteListStale.value = true
-            }
-          }
-        }
-      }))
+      stateUnlisteners.push(await events.favoriteChangedEvent.listen(({ payload }) => handleFavoriteChangedEvent(payload)))
       applySession(await commands.getSession())
       apiDomainPresets.value = await commands.getApiDomainPresets()
     })().catch((error) => {
@@ -465,7 +452,7 @@ export const useStore = defineStore('store', () => {
 
   /** 本地书库打开漫画详情后静默探测云端收藏状态，离线失败时忽略，不影响本地离线阅读。 */
   async function probeComicFavorite(comicId: number) {
-    if (comicId <= 0 || !userProfile.value || favoriteStatuses.value.has(comicId)) return
+    if (comicId <= 0 || !userProfile.value || favoriteStatuses.value.get(comicId) !== undefined) return
     const epoch = sessionEpoch.value
     const observedRevision = favoriteRevision.value
     try {
@@ -685,7 +672,7 @@ function trimProgressHistory() {
     authoritativeConfig, apiDomainPresets, applyConfig, persistConfig, configIsDirty,
     openAccount, closeAccount, openSettings, closeSettings, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch, favoriteListStale,
-    applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, initStateListeners,
+    applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, handleFavoriteChangedEvent, initStateListeners,
     archivingComics, isArchiving, archiveFailures, archiveFailure,
     initDownloadListener, reloadTasks, taskLoadError, loadingTasks,
     readingState,
