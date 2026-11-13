@@ -12,18 +12,20 @@ use crate::extensions::AppHandleExt;
 #[specta::specta]
 #[allow(clippy::needless_pass_by_value)]
 pub fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResult<()> {
-    crate::network_state::set_metered(metered);
-    tracing::debug!(metered, "网络计费状态已更新");
-    if metered && app.get_config().read().download_only_wifi {
-        let paused = app
-            .get_download_manager()
-            .pause_active_tasks_for_metered_network();
-        if paused > 0 {
-            tracing::info!(
-                paused,
-                "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务"
-            );
+    let download_manager = app.get_download_manager();
+    let only_wifi = app.get_config().read().download_only_wifi;
+    let mut paused = 0;
+    crate::network_state::set_metered_and(metered, || {
+        if only_wifi {
+            paused = download_manager.pause_active_tasks_for_metered_network();
         }
+    });
+    tracing::debug!(metered, "网络计费状态已更新");
+    if paused > 0 {
+        tracing::info!(
+            paused,
+            "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务"
+        );
     }
     Ok(())
 }

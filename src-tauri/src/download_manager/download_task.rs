@@ -572,6 +572,19 @@ impl DownloadTask {
         }
     }
 
+    pub(crate) fn pause_for_metered_network(&self) -> Option<DownloadTaskSnapshot> {
+        let _guard = self.event_lock.lock();
+        let current = *self.state_sender.borrow();
+        if !matches!(
+            current,
+            DownloadTaskState::Pending | DownloadTaskState::Downloading
+        ) {
+            return None;
+        }
+        self.state_sender.send_replace(DownloadTaskState::Paused);
+        Some(self.snapshot())
+    }
+
     /// 记录当前步骤并立即推送一次状态，保证界面能看到「获取信息 / 下载中 / 校验 / 打包」。
     pub(crate) fn set_stage(&self, stage: TaskStage) {
         if *self.stage.read() == stage {
@@ -714,21 +727,25 @@ impl DownloadTask {
         }
     }
 
+    pub(crate) fn emit_update_event(app: &AppHandle, snapshot: DownloadTaskSnapshot) {
+        let _ = DownloadTaskEvent::Update {
+            chapter_id: snapshot.chapter_info.chapter_id,
+            revision: snapshot.revision,
+            state: snapshot.state,
+            stage: snapshot.stage,
+            downloaded_img_count: snapshot.downloaded_img_count,
+            total_img_count: snapshot.total_img_count,
+            failure: snapshot.failure,
+            attempts: snapshot.attempts,
+            image_failures: snapshot.image_failures,
+            error_message: snapshot.error_message,
+        }
+        .emit(app);
+    }
+
     pub(crate) fn publish_update(&self) {
         if let Some(snapshot) = self.download_manager.queue.update(self.snapshot()) {
-            let _ = DownloadTaskEvent::Update {
-                chapter_id: snapshot.chapter_info.chapter_id,
-                revision: snapshot.revision,
-                state: snapshot.state,
-                stage: snapshot.stage,
-                downloaded_img_count: snapshot.downloaded_img_count,
-                total_img_count: snapshot.total_img_count,
-                failure: snapshot.failure,
-                attempts: snapshot.attempts,
-                image_failures: snapshot.image_failures,
-                error_message: snapshot.error_message,
-            }
-            .emit(&self.app);
+            Self::emit_update_event(&self.app, snapshot);
         }
     }
 

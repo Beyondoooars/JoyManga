@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import FavoriteButton from '../components/FavoriteButton.vue'
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
-import { ChapterInfo, commands, DownloadTaskState, type CbzMode } from '../bindings.ts'
+import { ChapterInfo, commands, DownloadTaskState } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { PhArrowClockwise, PhArrowLeft, PhBookOpen, PhDownloadSimple, PhFolderOpen } from '@phosphor-icons/vue'
 import IconButton from '../components/IconButton.vue'
@@ -207,10 +207,6 @@ async function onContextMenu(e: MouseEvent) {
 
 const pendingChapterIds = ref<number[]>([])
 
-function defaultCbzMode(): CbzMode {
-  return store.config?.defaultCbzMode ?? 'merge'
-}
-
 function downloadChapters() {
   const comic = store.pickedComic
   if (comic === undefined || downloadingSelected.value) {
@@ -225,10 +221,10 @@ function downloadChapters() {
     return
   }
   pendingChapterIds.value = chapterIdsToDownload
-  void runDownloadChapters(defaultCbzMode())
+  void runDownloadChapters()
 }
 
-async function runDownloadChapters(cbzMode: CbzMode) {
+async function runDownloadChapters() {
   const comic = store.pickedComic
   if (comic === undefined || downloadingSelected.value) {
     return
@@ -241,7 +237,7 @@ async function runDownloadChapters(cbzMode: CbzMode) {
   try {
     for (const chapterId of chapterIdsToDownload) {
       try {
-        const result = await commands.createDownloadTask(comic, chapterId, cbzMode)
+        const result = await commands.createDownloadTask(comic, chapterId, 'merge')
         if (result.status === 'error') {
           failedCount += 1
           console.error(result.error)

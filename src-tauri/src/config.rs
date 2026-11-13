@@ -395,6 +395,8 @@ pub struct Config {
 impl Config {
     pub fn apply_storage_policy(&mut self) {
         self.export_dir.clone_from(&self.download_dir);
+        // 下载始终默认合并为整本 CBZ；忽略旧版本保留的逐话默认值。
+        self.default_cbz_mode = crate::types::CbzMode::Merge;
     }
     pub fn new(storage: &ConfigStorage) -> anyhow::Result<Self> {
         let base_dir = storage.base_dir();
@@ -744,6 +746,7 @@ mod tests {
         serialize_config_for_storage, ApiDomainMode, Config, ConfigStorage, ImageDomainMode,
         API_DOMAIN_2, CONFIG_FILE_NAME, IMAGE_DOMAIN_3,
     };
+    use crate::types::CbzMode;
     use serde_json::json;
     use std::path::{Path, PathBuf};
 
@@ -752,6 +755,15 @@ mod tests {
             std::env::temp_dir().join(format!("joymanga-config-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn legacy_per_chapter_default_is_normalized_to_merge() {
+        let mut value = serde_json::to_value(Config::default(Path::new("app"))).unwrap();
+        value["defaultCbzMode"] = json!("perChapter");
+        let mut config = deserialize_config_value(value).unwrap();
+        config.apply_storage_policy();
+        assert_eq!(config.default_cbz_mode, CbzMode::Merge);
     }
 
     #[test]
