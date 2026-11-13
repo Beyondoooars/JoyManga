@@ -79,7 +79,11 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
       message.error(formatCommandError(result.error))
       return false
     }
-    if (result.data.list.length === 0 && page > 1 && result.data.total > 0) {
+    if (observedRevision !== store.favoriteRevision) {
+      store.favoriteListStale = true
+      return await getFavourite(folderId, page, sort)
+    }
+    if (result.data.list.length === 0 && page > 1) {
       const maxPage = result.data.count > 0 ? Math.max(1, Math.ceil(result.data.total / result.data.count)) : 1
       return await getFavourite(folderId, Math.min(page - 1, maxPage), sort)
     }
@@ -107,10 +111,10 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
 }
 
 watch(
-  () => store.getFavoriteResult?.list.length,
-  (length) => {
-    if (length === 0 && pageSelected.value > 1 && !loading.value && store.userProfile?.uid !== undefined) {
-      void getFavourite(folderIdSelected.value, pageSelected.value - 1, sortSelected.value)
+  () => store.favoriteListStale,
+  (stale) => {
+    if (stale && store.getFavoriteResult !== undefined && !loading.value && store.userProfile?.uid !== undefined) {
+      void getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
     }
   },
 )

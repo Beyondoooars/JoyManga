@@ -238,6 +238,7 @@ async function initializeApp() {
 
 let stopNetworkWatch: (() => void) | undefined
 let stopVpnWatch: (() => void) | undefined
+let networkMeteredQueue = Promise.resolve()
 let stopCancelListener: (() => void) | undefined
 let stopOpenFileListener: (() => void) | undefined
 
@@ -245,7 +246,10 @@ onMounted(() => {
   document.addEventListener('contextmenu', preventContextMenu)
   // 把 Android 的网络计费状态同步给后端，「仅 Wi-Fi 下载」依赖它做判断
   stopNetworkWatch = watchNetworkMetered((metered) => {
-    void commands.setNetworkMetered(metered).catch(() => { /* 旧后端无此命令时忽略 */ })
+    // IPC 命令可能并发执行；按原生事件顺序串行提交，避免旧的计费状态最后覆盖新状态。
+    networkMeteredQueue = networkMeteredQueue
+      .then(() => commands.setNetworkMetered(metered))
+      .then(() => undefined, () => { /* 旧后端无此命令时忽略，且不能阻断后续上报 */ })
   })
   // VPN 开启时后端跳过手动代理，否则「开 VPN 反而连不上」
   stopVpnWatch = watchNetworkVpn((active, networkKey) => {

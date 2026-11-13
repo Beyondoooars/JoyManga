@@ -20,6 +20,9 @@ static NETWORK_KEY: RwLock<Option<String>> = RwLock::new(None);
 /// 快照写入锁：VPN 标志与网络标识必须成对更新，避免两次并发推送交错出
 /// 从未存在过的 (VPN, key) 组合。
 static NETWORK_SNAPSHOT_LOCK: Mutex<()> = Mutex::new(());
+/// 计费状态更新、自动暂停和任务创建/恢复共用的临界区。
+/// 写锁内完成状态切换与暂停扫描；读锁内完成许可检查与状态变更。
+static DOWNLOAD_NETWORK_LOCK: RwLock<()> = RwLock::new(());
 /// 网络路径代际。VPN、手动代理或默认网络变化时递增；请求在启动时记录代际，
 /// 写回线路健康状态前核对，避免旧路径的结果污染新路径。
 static NETWORK_EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -31,9 +34,34 @@ static NETWORK_EPOCH_LOCK: RwLock<()> = RwLock::new(());
 #[cfg(test)]
 pub(crate) static STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
 pub fn set_metered(metered: bool) {
+    set_metered_and(metered, || {});
+}
+
+pub fn set_metered_and(metered: bool, on_metered: impl FnOnce()) {
+    let _guard = DOWNLOAD_NETWORK_LOCK.write();
     METERED.store(metered, Ordering::Relaxed);
     KNOWN.store(true, Ordering::Relaxed);
+    if metered {
+        on_metered();
+    }
+}
+
+/// 冷启动恢复也保持读锁，使首份平台状态不会被暂停扫描覆盖。
+pub fn with_download_state(action: impl FnOnce()) {
+    let _guard = DOWNLOAD_NETWORK_LOCK.read();
+    action()
+}
+
+/// 创建或恢复任务时，许可检查与状态切换必须和计费网络暂停互斥。
+pub fn with_download_permission<T>(
+    only_wifi: bool,
+    action: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _guard = DOWNLOAD_NETWORK_LOCK.read();
+    download_allowed(only_wifi).map_err(anyhow::Error::msg)?;
+    action()
 }
 
 pub fn is_metered() -> bool {
@@ -115,6 +143,11 @@ pub fn epoch_is_current(epoch: u64) -> bool {
     network_epoch() == epoch
 }
 
+/// 冷启动尚未收到平台状态时也先保持暂停，避免“仅 Wi-Fi”用户先发出下载请求。
+pub fn should_pause_restored_download(only_wifi: bool) -> bool {
+    only_wifi && (!is_known() || is_metered())
+}
+
 /// 结合用户设置判断此刻是否允许下载。
 /// - 未开启"仅 Wi-Fi"：永远允许；
 /// - 开启但网络状态未知：允许（宁可放行，也不要让用户以为下载功能坏了）；
@@ -138,6 +171,45 @@ mod tests {
         assert!(download_allowed(false).is_ok());
         let error = download_allowed(true).unwrap_err();
         assert!(error.contains("仅 Wi-Fi"));
+    }
+
+    #[test]
+    fn metered_change_waits_for_task_permission_and_resume() {
+        let _guard = STATE_TEST_LOCK.lock();
+        set_metered(false);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let resumed = std::thread::spawn(move || {
+            with_download_permission(true, || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered_rx.recv().unwrap();
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let pause = std::thread::spawn(move || {
+            set_metered_and(true, || {
+                paused_tx.send(()).unwrap();
+            });
+        });
+        assert!(paused_rx.recv_timeout(Duration::from_millis(30)).is_err());
+        release_tx.send(()).unwrap();
+        resumed.join().unwrap().unwrap();
+        pause.join().unwrap();
+        assert!(download_allowed(true).is_err());
+        set_metered(false);
+    }
+
+    #[test]
+    fn unknown_network_pauses_only_wifi_restores() {
+        let _guard = STATE_TEST_LOCK.lock();
+        KNOWN.store(false, Ordering::Relaxed);
+        METERED.store(false, Ordering::Relaxed);
+        assert!(should_pause_restored_download(true));
+        assert!(!should_pause_restored_download(false));
+        set_metered(false);
+        assert!(!should_pause_restored_download(true));
     }
 
     #[test]

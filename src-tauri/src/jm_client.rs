@@ -21,7 +21,7 @@ use crate::extensions::AppHandleExt;
 use crate::responses::{
     DailyCheckInRespData, DailyCheckInResultRespData, GetChapterRespData, GetComicRespData,
     GetFavoriteRespData, GetUserProfileRespData, GetWeeklyInfoRespData, GetWeeklyRespData, JmResp,
-    LoginRespData, SearchResp, SearchRespData, ToggleFavoriteRespData, ToggleType,
+    LoginRespData, SearchResp, SearchRespData, ToggleFavoriteRespData,
 };
 use crate::types::{DailyCheckInOutcome, DailyCheckInState, FavoriteSort, SearchSort};
 use crate::utils;
@@ -65,8 +65,14 @@ const MAX_ERROR_BODY_CHARS: usize = 512;
 #[derive(Default)]
 struct SessionState {
     epoch: u64,
+    /// 每次成功登录都递增；同账号刷新保持 session epoch 时仍能让排队 401 去重。
+    login_revision: u64,
     token: String,
     profile: Option<GetUserProfileRespData>,
+}
+
+fn refresh_already_completed(state: &SessionState, epoch: u64, login_revision: u64) -> bool {
+    state.epoch != epoch || state.login_revision != login_revision
 }
 
 #[derive(Debug)]
@@ -1078,6 +1084,7 @@ impl JmClient {
             if !same_user || state.epoch == 0 {
                 state.epoch += 1;
             }
+            state.login_revision += 1;
             state.token = token;
             state.profile = Some(profile.clone());
             Ok((saved, state.epoch))
@@ -1145,8 +1152,9 @@ impl JmClient {
     }
 
     async fn refresh_session(&self, epoch: u64) -> anyhow::Result<()> {
+        let login_revision = self.session.read().login_revision;
         let _guard = self.auth_lock.lock().await;
-        if self.session.read().epoch != epoch {
+        if refresh_already_completed(&self.session.read(), epoch, login_revision) {
             return Ok(());
         }
         anyhow::ensure!(
@@ -1188,31 +1196,35 @@ impl JmClient {
                         session_epoch,
                     }
                     .emit(&self.app);
-                    Err(error.context("收藏操作未确认成功，已重新核对状态"))
+                    if comic.is_favorite == desired {
+                        Ok(comic.is_favorite)
+                    } else {
+                        Err(error.context("收藏操作未确认成功，已重新核对状态"))
+                    }
                 }
                 Err(_) => Err(error.context("收藏结果未知，请刷新状态后重试；未重复提交操作")),
             }
         };
 
-        let first = match self
-            .toggle_favorite_comic_with_auth_retry(aid, session_epoch)
-            .await
-        {
-            Ok(response) => matches!(response.toggle_type, ToggleType::Add),
-            Err(error) => return reconcile_after_error(error).await,
-        };
+        let before = self.get_comic(aid).await.context("核对云端收藏状态失败")?;
         self.ensure_session_epoch(session_epoch)?;
-
-        let actual = if first == desired {
-            first
+        let actual = if before.is_favorite == desired {
+            desired
         } else {
-            // 本地缓存状态与云端初始状态不一致导致首次 toggle 方向相反，立即再切换一次以收敛到目标状态
             match self
                 .toggle_favorite_comic_with_auth_retry(aid, session_epoch)
                 .await
             {
-                Ok(response) => matches!(response.toggle_type, ToggleType::Add),
-                Err(error) => return reconcile_after_error(error).await,
+                Ok(response) => response.into_is_favorite()?,
+                Err(error) => {
+                    let actual = reconcile_after_error(error).await?;
+                    let event = FavoriteChangedEvent {
+                        comic_id: aid,
+                        is_favorite: actual,
+                        session_epoch,
+                    };
+                    return Ok(event);
+                }
             }
         };
         self.ensure_session_epoch(session_epoch)?;
@@ -2088,6 +2100,20 @@ mod review_regression_tests {
         );
         assert_eq!(compare_versions("1.9", "2.0.1"), std::cmp::Ordering::Less);
         assert_eq!(compare_versions("2.0", "2.0.0"), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn same_account_login_deduplicates_waiting_refresh() {
+        let mut state = SessionState {
+            epoch: 3,
+            login_revision: 1,
+            ..SessionState::default()
+        };
+        assert!(!refresh_already_completed(&state, 3, 1));
+        state.login_revision = 2;
+        assert!(refresh_already_completed(&state, 3, 1));
+        assert!(refresh_already_completed(&state, 2, 1));
+        assert!(!refresh_already_completed(&state, 3, 2));
     }
 
     #[test]

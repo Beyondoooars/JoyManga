@@ -31,6 +31,27 @@ test('opening transfers invalidates an in-flight comic detail request', async ()
   }
 })
 
+test('failed favorite probe does not permanently suppress a retry', async () => {
+  const store = useStore(createPinia())
+  store.applySession({ sessionEpoch: 1, profile: { uid: 'first' } })
+  store.favoriteStatuses.set(comic.id, undefined)
+  const originalGetComic = commands.getComic
+  let calls = 0
+  commands.getComic = async () => {
+    calls++
+    return { status: 'ok', data: { ...comic, is_favorite: true } }
+  }
+  try {
+    await store.probeComicFavorite(comic.id)
+    assert.equal(calls, 1)
+    assert.equal(store.favoriteStatuses.get(comic.id), true)
+    await store.probeComicFavorite(comic.id)
+    assert.equal(calls, 1)
+  } finally {
+    commands.getComic = originalGetComic
+  }
+})
+
 test('keyword search invalidates an in-flight comic detail request', async () => {
   const store = useStore(createPinia())
   const pending = deferred()
