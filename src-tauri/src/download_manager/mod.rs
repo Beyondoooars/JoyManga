@@ -209,8 +209,9 @@ impl DownloadManager {
     }
 
     pub fn create_download_task(&self, comic: Comic, chapter_id: i64) -> anyhow::Result<()> {
-        let only_wifi = self.app.get_config().read().download_only_wifi;
-        crate::network_state::with_download_permission(only_wifi, || {
+        crate::network_state::with_download_permission(|| {
+            crate::network_state::download_allowed(self.app.get_config().read().download_only_wifi)
+                .map_err(anyhow::Error::msg)?;
             self.create_download_task_permitted(comic, chapter_id)
         })
     }
@@ -280,20 +281,16 @@ impl DownloadManager {
     /// 当开启「仅 Wi-Fi 下载」且处于计费网络时，自动暂停所有排队中/下载中的任务。
     pub fn pause_active_tasks_for_metered_network(&self) -> usize {
         let tasks: Vec<_> = self.download_tasks.read().values().cloned().collect();
-        let snapshots: Vec<_> = tasks
+        tasks
             .iter()
             .filter_map(DownloadTask::pause_for_metered_network)
-            .collect();
-        let paused = snapshots.len();
-        for snapshot in self.queue.update_many(snapshots) {
-            DownloadTask::emit_update_event(&self.app, snapshot);
-        }
-        paused
+            .count()
     }
 
     pub fn resume_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {
-        let only_wifi = self.app.get_config().read().download_only_wifi;
-        crate::network_state::with_download_permission(only_wifi, || {
+        crate::network_state::with_download_permission(|| {
+            crate::network_state::download_allowed(self.app.get_config().read().download_only_wifi)
+                .map_err(anyhow::Error::msg)?;
             let tasks = self.download_tasks.read();
             let Some(task) = tasks.get(&chapter_id) else {
                 return Err(anyhow!("未找到章节ID为`{chapter_id}`的下载任务"));

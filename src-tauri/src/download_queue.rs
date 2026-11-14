@@ -285,6 +285,7 @@ impl DownloadQueue {
         }
     }
 
+    #[cfg(test)]
     pub fn update_many(&self, snapshots: Vec<DownloadTaskSnapshot>) -> Vec<DownloadTaskSnapshot> {
         if snapshots.is_empty() {
             return Vec::new();

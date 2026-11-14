@@ -32,6 +32,9 @@ fn trim_entries(entries: &mut IndexMap<i64, CbzMode>) {
     while entries.len() > MAX_INTENTS {
         entries.shift_remove_index(0);
     }
+    for mode in entries.values_mut() {
+        *mode = CbzMode::Merge;
+    }
 }
 
 fn parse_intent_value(value: serde_json::Value) -> anyhow::Result<IndexMap<i64, CbzMode>> {
@@ -91,7 +94,10 @@ impl ArchiveIntentStore {
                     serde_json::from_slice::<IntentFile>(&bytes).map_err(anyhow::Error::from)
                 });
             match parsed {
-                Ok(file) if file.version == 1 => entries = file.entries,
+                Ok(mut file) if file.version == 1 => {
+                    trim_entries(&mut file.entries);
+                    entries = file.entries;
+                }
                 Ok(_) => {
                     tracing::warn!("归档意图文件版本不受支持，已忽略");
                 }
@@ -209,13 +215,32 @@ mod tests {
             store.set(101, CbzMode::PerChapter);
         }
         let reloaded = ArchiveIntentStore::load(path.clone()).unwrap();
-        assert_eq!(reloaded.get(101), Some(CbzMode::PerChapter));
-        assert_eq!(reloaded.get(102), Some(CbzMode::PerChapter));
+        assert_eq!(reloaded.get(101), Some(CbzMode::Merge));
+        assert_eq!(reloaded.get(102), Some(CbzMode::Merge));
         reloaded.remove(101);
         assert_eq!(reloaded.get(101), None);
         let reloaded = ArchiveIntentStore::load(path).unwrap();
         assert_eq!(reloaded.get(101), None);
-        assert_eq!(reloaded.get(102), Some(CbzMode::PerChapter));
+        assert_eq!(reloaded.get(102), Some(CbzMode::Merge));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_per_chapter_intent_loads_as_merge() {
+        let root = std::env::temp_dir().join(format!("jm-intents-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("archive-intents.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "entries": {"102": CbzMode::PerChapter},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ArchiveIntentStore::load(path).unwrap();
+        assert_eq!(store.get(102), Some(CbzMode::Merge));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -227,6 +252,13 @@ mod tests {
         })))
         .unwrap();
         assert!(empty.unwrap().is_empty());
+        let legacy = ArchiveIntentStore::parse_backup_section(Some(&serde_json::json!({
+            "version": 1,
+            "entries": {"102": "perChapter"},
+        })))
+        .unwrap()
+        .unwrap();
+        assert_eq!(legacy.get(&102), Some(&CbzMode::Merge));
         assert!(ArchiveIntentStore::parse_backup_section(None)
             .unwrap()
             .is_none());

@@ -51,7 +51,7 @@ pub fn get_config(app: AppHandle) -> Config {
 #[allow(clippy::needless_pass_by_value)]
 pub fn save_config(app: AppHandle, config: Config, base_config: Config) -> CommandResult<Config> {
     let state = app.get_config();
-    let (previous, next) = {
+    let (previous, next) = crate::network_state::with_download_policy(|| {
         let mut current = state.write();
         let previous = current.clone();
         let candidate =
@@ -62,8 +62,22 @@ pub fn save_config(app: AppHandle, config: Config, base_config: Config) -> Comma
         if previous.get_api_domain() != next.get_api_domain() {
             app.get_jm_client().invalidate_session();
         }
-        (previous, next)
-    };
+        if !previous.download_only_wifi
+            && next.download_only_wifi
+            && crate::network_state::is_metered()
+        {
+            let paused = app
+                .get_download_manager()
+                .pause_active_tasks_for_metered_network();
+            if paused > 0 {
+                tracing::info!(
+                    paused,
+                    "开启仅 Wi-Fi 下载且当前为计费网络，自动暂停在途下载任务"
+                );
+            }
+        }
+        Ok((previous, next))
+    })?;
     apply_config_effects(&app, &previous, &next);
     crate::config_updates::publish(&app, &next);
     Ok(next)
@@ -101,18 +115,6 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
         || previous.img_concurrency != next.img_concurrency
     {
         app.get_download_manager().reload_concurrency();
-    }
-    if !previous.download_only_wifi && next.download_only_wifi && crate::network_state::is_metered()
-    {
-        let paused = app
-            .get_download_manager()
-            .pause_active_tasks_for_metered_network();
-        if paused > 0 {
-            tracing::info!(
-                paused,
-                "开启仅 Wi-Fi 下载且当前为计费网络，自动暂停在途下载任务"
-            );
-        }
     }
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, ref, watch } from 'vue'
 import { commands, type FavoriteSort } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
@@ -74,9 +74,11 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
       return false
     }
     if (result.status === 'error') {
-      console.error(result.error)
-      errorMessage.value = result.error.err_message || result.error.err_title
-      message.error(formatCommandError(result.error))
+      if (active) {
+        console.error(result.error)
+        errorMessage.value = result.error.err_message || result.error.err_title
+        message.error(formatCommandError(result.error))
+      }
       return false
     }
     if (observedRevision !== store.favoriteRevision) {
@@ -97,7 +99,7 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
     errorMessage.value = ''
     return true
   } catch (error) {
-    if (generation === favoriteRequestGeneration && store.userProfile?.uid === uid) {
+    if (active && generation === favoriteRequestGeneration && store.userProfile?.uid === uid) {
       console.error(error)
       errorMessage.value = getErrorMessage(error)
       message.error(`获取收藏夹失败：${errorMessage.value}`)
@@ -110,20 +112,31 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
   }
 }
 
-watch(
-  () => store.favoriteListStale,
-  (stale) => {
-    if (stale && store.getFavoriteResult !== undefined && !loading.value && store.userProfile?.uid !== undefined) {
-      void getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
-    }
-  },
-)
-
+let active = false
 onActivated(() => {
+  active = true
   if (store.userProfile?.uid !== undefined && store.favoriteListStale && !loading.value) {
     void getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
   }
 })
+onDeactivated(() => {
+  active = false
+})
+
+watch(
+  () => store.favoriteListStale,
+  (stale) => {
+    if (
+      active &&
+      stale &&
+      store.getFavoriteResult !== undefined &&
+      !loading.value &&
+      store.userProfile?.uid !== undefined
+    ) {
+      void getFavourite(folderIdSelected.value, pageSelected.value, sortSelected.value)
+    }
+  },
+)
 
 const syncing = ref(false)
 async function syncFavoriteFolder() {
@@ -240,7 +253,11 @@ function pickFolder(folderId: number) {
           <strong>加载收藏失败</strong>
           <p>{{ errorMessage }}</p>
           <div class="jm-empty-actions">
-            <button type="button" class="jm-btn" :disabled="loading" @click="getFavourite(folderIdSelected, pageSelected, sortSelected)">
+            <button
+              type="button"
+              class="jm-btn"
+              :disabled="loading"
+              @click="getFavourite(folderIdSelected, pageSelected, sortSelected)">
               重试
             </button>
             <button
@@ -253,12 +270,16 @@ function pickFolder(folderId: number) {
           </div>
         </div>
 
-        <div v-else-if="store.getFavoriteResult && store.getFavoriteResult.list.length === 0 && pageSelected <= 1" class="jm-empty">
+        <div
+          v-else-if="store.getFavoriteResult && store.getFavoriteResult.list.length === 0 && pageSelected <= 1"
+          class="jm-empty">
           <div class="jm-empty-icon is-muted"><PhHeart :size="28" weight="duotone" /></div>
           <strong>这里还没有收藏</strong>
           <p>在漫画详情页点收藏，或到 JM 添加收藏后回来同步。</p>
           <div class="jm-empty-actions">
-            <button type="button" class="jm-btn is-ghost" :disabled="loading || syncing" @click="syncFavoriteFolder">同步收藏夹</button>
+            <button type="button" class="jm-btn is-ghost" :disabled="loading || syncing" @click="syncFavoriteFolder">
+              同步收藏夹
+            </button>
           </div>
         </div>
 

@@ -76,6 +76,34 @@ fn refresh_already_completed(state: &SessionState, epoch: u64, login_revision: u
 }
 
 #[derive(Debug)]
+struct RequestLoginRevision {
+    revision: u64,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for RequestLoginRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(f)
+    }
+}
+impl std::error::Error for RequestLoginRevision {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.source()
+    }
+}
+
+fn with_request_login_revision<T>(result: anyhow::Result<T>, revision: u64) -> anyhow::Result<T> {
+    result.map_err(|source| anyhow::Error::new(RequestLoginRevision { revision, source }))
+}
+
+fn request_login_revision(error: &anyhow::Error) -> Option<u64> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RequestLoginRevision>())
+        .map(|revision| revision.revision)
+}
+
+#[derive(Debug)]
 struct ApiFailure {
     status: StatusCode,
     authentication: bool,
@@ -441,7 +469,7 @@ impl JmClient {
     pub async fn refresh_app_version(&self) {
         let result = self
             .with_candidates(|api_domain, ts| async move {
-                let http_resp = self
+                let (http_resp, _) = self
                     .jm_request_on(
                         reqwest::Method::GET,
                         ApiPath::Setting,
@@ -638,14 +666,17 @@ impl JmClient {
         ts: u64,
         retry: bool,
         api_domain: &str,
-    ) -> anyhow::Result<reqwest::Response> {
+    ) -> anyhow::Result<(reqwest::Response, u64)> {
         let tokenparam = format!("{ts},{}", self.app_version());
         let token = if path == ApiPath::GetScrambleId {
             utils::md5_hex(&format!("{ts}{APP_TOKEN_SECRET_2}"))
         } else {
             utils::md5_hex(&format!("{ts}{APP_TOKEN_SECRET}"))
         };
-        let avs = self.session.read().token.clone();
+        let (login_revision, avs) = {
+            let session = self.session.read();
+            (session.login_revision, session.token.clone())
+        };
         let path_str = path.as_str();
         let is_credential_login = path_str == "/login" && form.is_some();
         let url = format!("https://{api_domain}{path_str}");
@@ -674,11 +705,12 @@ impl JmClient {
             Err(e) => {
                 let timed_out = crate::errors::reqwest_error_in_middleware(&e)
                     .is_some_and(|error| error.is_timeout());
-                return Err(if timed_out {
+                let error = if timed_out {
                     anyhow::Error::from(e).context("网络请求超时，请检查网络或线路后重试")
                 } else {
                     anyhow::Error::from(e)
-                });
+                };
+                return with_request_login_revision(Err(error), login_revision);
             }
         };
         let status = http_resp.status();
@@ -692,7 +724,7 @@ impl JmClient {
         {
             return Err(api_failure(status, None, "网关异常"));
         }
-        Ok(http_resp)
+        Ok((http_resp, login_revision))
     }
 
     /// 所有请求共用的换线路闭环：传输层不可达、网关异常或被拦截的响应会换下一条
@@ -772,7 +804,7 @@ impl JmClient {
         self.with_candidates(|api_domain, ts| {
             let query = query.clone();
             async move {
-                let http_resp = self
+                let (http_resp, login_revision) = self
                     .jm_request_on(
                         reqwest::Method::GET,
                         path,
@@ -783,7 +815,7 @@ impl JmClient {
                         &api_domain,
                     )
                     .await?;
-                parse_encrypted_resp(http_resp, ts, action).await
+                parse_encrypted_resp_with_revision(http_resp, ts, action, login_revision).await
             }
         })
         .await
@@ -802,7 +834,7 @@ impl JmClient {
             let query = query.clone();
             let payload = payload.clone();
             async move {
-                let http_resp = self
+                let (http_resp, login_revision) = self
                     .jm_request_on(
                         reqwest::Method::POST,
                         path,
@@ -813,7 +845,7 @@ impl JmClient {
                         &api_domain,
                     )
                     .await?;
-                parse_encrypted_resp(http_resp, ts, action).await
+                parse_encrypted_resp_with_revision(http_resp, ts, action, login_revision).await
             }
         })
         .await
@@ -1151,8 +1183,8 @@ impl JmClient {
         Ok(profile)
     }
 
-    async fn refresh_session(&self, epoch: u64) -> anyhow::Result<()> {
-        let login_revision = self.session.read().login_revision;
+    async fn refresh_session(&self, epoch: u64, login_revision: u64) -> anyhow::Result<()> {
+        self.ensure_session_epoch_for(epoch, "会话刷新")?;
         let _guard = self.auth_lock.lock().await;
         if refresh_already_completed(&self.session.read(), epoch, login_revision) {
             return Ok(());
@@ -1206,27 +1238,39 @@ impl JmClient {
             }
         };
 
-        let before = self.get_comic(aid).await.context("核对云端收藏状态失败")?;
+        let before = match self.get_comic(aid).await {
+            Err(error) if is_authentication_error(&error) => {
+                let revision =
+                    request_login_revision(&error).context("认证失败缺少请求登录代际")?;
+                self.refresh_session(session_epoch, revision).await?;
+                self.ensure_session_epoch(session_epoch)?;
+                self.get_comic(aid).await
+            }
+            other => other,
+        }
+        .context("核对云端收藏状态失败")?;
         self.ensure_session_epoch(session_epoch)?;
-        let actual = if before.is_favorite == desired {
-            desired
-        } else {
-            match self
+        let toggle_to_desired = || async {
+            let result = match self
                 .toggle_favorite_comic_with_auth_retry(aid, session_epoch)
                 .await
             {
-                Ok(response) => response.into_is_favorite()?,
-                Err(error) => {
-                    let actual = reconcile_after_error(error).await?;
-                    let event = FavoriteChangedEvent {
-                        comic_id: aid,
-                        is_favorite: actual,
-                        session_epoch,
-                    };
-                    return Ok(event);
-                }
+                Ok(response) => response.into_is_favorite(),
+                Err(error) => return reconcile_after_error(error).await,
+            };
+            match result {
+                Ok(actual) => Ok(actual),
+                Err(error) => reconcile_after_error(error).await,
             }
         };
+        let mut actual = if before.is_favorite == desired {
+            desired
+        } else {
+            toggle_to_desired().await?
+        };
+        if before.is_favorite != desired && actual != desired {
+            actual = toggle_to_desired().await?;
+        }
         self.ensure_session_epoch(session_epoch)?;
         let event = FavoriteChangedEvent {
             comic_id: aid,
@@ -1248,7 +1292,9 @@ impl JmClient {
     ) -> anyhow::Result<ToggleFavoriteRespData> {
         match self.toggle_favorite_comic(aid).await {
             Err(error) if is_authentication_error(&error) => {
-                self.refresh_session(session_epoch).await?;
+                let revision =
+                    request_login_revision(&error).context("认证失败缺少请求登录代际")?;
+                self.refresh_session(session_epoch, revision).await?;
                 self.ensure_session_epoch(session_epoch)?;
                 self.toggle_favorite_comic(aid).await
             }
@@ -1367,7 +1413,7 @@ impl JmClient {
             .with_candidates(|api_domain, ts| {
                 let query = query.clone();
                 async move {
-                    let http_resp = self
+                    let (http_resp, _) = self
                         .jm_request_on(
                             reqwest::Method::GET,
                             ApiPath::Search,
@@ -1416,7 +1462,7 @@ impl JmClient {
             let mut query = query_base.clone();
             query["v"] = json!(ts);
             async move {
-                let http_resp = self
+                let (http_resp, _) = self
                     .jm_request_on(
                         reqwest::Method::GET,
                         ApiPath::GetScrambleId,
@@ -1465,7 +1511,9 @@ impl JmClient {
         match fetch().await {
             Ok(data) => Ok(data),
             Err(error) if is_authentication_error(&error) => {
-                self.refresh_session(epoch).await?;
+                let revision =
+                    request_login_revision(&error).context("认证失败缺少请求登录代际")?;
+                self.refresh_session(epoch, revision).await?;
                 fetch().await
             }
             Err(error) => Err(error),
@@ -1882,9 +1930,21 @@ pub(crate) async fn parse_encrypted_resp<T: serde::de::DeserializeOwned>(
     ts: u64,
     action_name: &str,
 ) -> anyhow::Result<T> {
-    let data = parse_encrypted_raw_data(http_resp, ts, action_name).await?;
-    let result = serde_json::from_str::<T>(&data).context("解密后的响应字段格式无效")?;
-    Ok(result)
+    parse_encrypted_resp_with_revision(http_resp, ts, action_name, 0).await
+}
+
+async fn parse_encrypted_resp_with_revision<T: serde::de::DeserializeOwned>(
+    http_resp: reqwest::Response,
+    ts: u64,
+    action_name: &str,
+    login_revision: u64,
+) -> anyhow::Result<T> {
+    let result: anyhow::Result<T> = async {
+        let data = parse_encrypted_raw_data(http_resp, ts, action_name).await?;
+        serde_json::from_str::<T>(&data).context("解密后的响应字段格式无效")
+    }
+    .await;
+    with_request_login_revision(result, login_revision)
 }
 
 #[cfg(test)]
@@ -2114,6 +2174,15 @@ mod review_regression_tests {
         assert!(refresh_already_completed(&state, 3, 1));
         assert!(refresh_already_completed(&state, 2, 1));
         assert!(!refresh_already_completed(&state, 3, 2));
+        // 迟到的 401 使用请求发出时的代际，不能重新采样已刷新的 revision。
+        assert!(refresh_already_completed(&state, 3, 1));
+        let error = with_request_login_revision::<()>(Err(anyhow!("未登录")), 1).unwrap_err();
+        assert_eq!(request_login_revision(&error), Some(1));
+        let error = error.context("收藏操作失败");
+        assert_eq!(error.to_string(), "收藏操作失败");
+        assert_eq!(request_login_revision(&error), Some(1));
+        let newer_error = with_request_login_revision::<()>(Err(anyhow!("未登录")), 2).unwrap_err();
+        assert_eq!(request_login_revision(&newer_error), Some(2));
     }
 
     #[test]

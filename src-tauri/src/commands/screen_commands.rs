@@ -13,10 +13,9 @@ use crate::extensions::AppHandleExt;
 #[allow(clippy::needless_pass_by_value)]
 pub fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResult<()> {
     let download_manager = app.get_download_manager();
-    let only_wifi = app.get_config().read().download_only_wifi;
     let mut paused = 0;
     crate::network_state::set_metered_and(metered, || {
-        if only_wifi {
+        if app.get_config().read().download_only_wifi {
             paused = download_manager.pause_active_tasks_for_metered_network();
         }
     });
