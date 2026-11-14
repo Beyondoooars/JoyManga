@@ -7,16 +7,7 @@ import DailyCheckInCard from '../components/DailyCheckInCard.vue'
 import { useStore } from '../store.ts'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
 import { compactNumber, expProgress } from '../utils/dailyCheckIn.ts'
-import {
-  PhCaretRight,
-  PhCoin,
-  PhGearSix,
-  PhHeart,
-  PhSignIn,
-  PhSignOut,
-  PhTrendUp,
-  PhUser,
-} from '@phosphor-icons/vue'
+import { PhCaretRight, PhCoin, PhGearSix, PhHeart, PhSignIn, PhSignOut, PhTrendUp, PhUser } from '@phosphor-icons/vue'
 
 const store = useStore()
 const message = useMessage()
@@ -28,12 +19,7 @@ const exp = computed(() => expProgress(store.userProfile))
 
 // 资料只在登录时写入 store，金币/经验会随时间变化：每次回到本页静默刷新一次。
 // 失败不提示——签到卡自己会显示拉取失败，这里再弹一次只是噪音。
-let activatedOnce = false
 onActivated(() => {
-  if (!activatedOnce) {
-    activatedOnce = true
-    return
-  }
   if (store.userProfile === undefined) return
   void commands
     .getUserProfile()
@@ -102,7 +88,8 @@ async function onLogin() {
   try {
     const result = await commands.login(cleanUsername, cleanPassword)
     // 用户已离开本页（登录被取消）时不要静默落到后台完成并改写配置
-    if (disposed || cancelledByLeave || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch)) return
+    if (disposed || cancelledByLeave || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch))
+      return
     if (result.status === 'error') {
       console.error(result.error)
       message.error(formatCommandError(result.error))
@@ -203,11 +190,7 @@ async function clearUsernameAndPasswordInConfig() {
             </div>
             <span class="hero-uid">UID {{ userProfile?.uid }} · 云端已同步</span>
           </div>
-          <button
-            type="button"
-            class="hero-settings"
-            aria-label="打开设置"
-            @click="store.openSettings()">
+          <button type="button" class="hero-settings" aria-label="打开设置" @click="store.openSettings()">
             <PhGearSix :size="19" weight="duotone" />
           </button>
         </div>
@@ -238,7 +221,13 @@ async function clearUsernameAndPasswordInConfig() {
           </div>
         </div>
 
-        <div class="exp-track" role="progressbar" :aria-valuenow="exp.percent" aria-valuemin="0" aria-valuemax="100" aria-label="等级经验">
+        <div
+          class="exp-track"
+          role="progressbar"
+          :aria-valuenow="exp.percent"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-label="等级经验">
           <span class="exp-fill" :style="{ width: `${exp.percent}%` }"></span>
         </div>
       </section>
@@ -282,7 +271,9 @@ async function clearUsernameAndPasswordInConfig() {
           立即登录
         </n-button>
         <n-button v-if="loggingIn" size="small" quaternary @click="cancelLogin">取消登录</n-button>
-        <n-button v-if="userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">返回我的</n-button>
+        <n-button v-if="userProfile !== undefined" size="small" quaternary @click="showLoginForm = false">
+          返回我的
+        </n-button>
         <p class="privacy-note">账号信息只保存在本机；退出登录会一并清除记住的账密。</p>
       </section>
 
@@ -328,7 +319,9 @@ async function clearUsernameAndPasswordInConfig() {
 .hero-avatar {
   flex: 0 0 auto;
   border: 2px solid var(--jm-surface);
-  box-shadow: 0 0 0 2px var(--jm-brand-ring), var(--jm-shadow-1);
+  box-shadow:
+    0 0 0 2px var(--jm-brand-ring),
+    var(--jm-shadow-1);
 }
 
 .hero-identity {
