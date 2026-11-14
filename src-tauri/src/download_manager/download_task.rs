@@ -582,7 +582,10 @@ impl DownloadTask {
             return None;
         }
         self.state_sender.send_replace(DownloadTaskState::Paused);
-        Some(self.snapshot())
+        self.download_manager
+            .queue
+            .update(self.snapshot())
+            .inspect(|snapshot| Self::emit_update_event(&self.app, snapshot.clone()))
     }
 
     /// 记录当前步骤并立即推送一次状态，保证界面能看到「获取信息 / 下载中 / 校验 / 打包」。

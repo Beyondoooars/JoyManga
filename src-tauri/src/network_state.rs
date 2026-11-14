@@ -40,12 +40,19 @@ pub fn set_metered(metered: bool) {
 }
 
 pub fn set_metered_and(metered: bool, on_metered: impl FnOnce()) {
+    with_download_policy(|| {
+        METERED.store(metered, Ordering::Relaxed);
+        KNOWN.store(true, Ordering::Relaxed);
+        if metered {
+            on_metered();
+        }
+    });
+}
+
+/// 配置提交、网络状态更新与自动暂停共用写锁，避免两侧分别读取旧值。
+pub fn with_download_policy<T>(action: impl FnOnce() -> T) -> T {
     let _guard = DOWNLOAD_NETWORK_LOCK.write();
-    METERED.store(metered, Ordering::Relaxed);
-    KNOWN.store(true, Ordering::Relaxed);
-    if metered {
-        on_metered();
-    }
+    action()
 }
 
 /// 冷启动恢复也保持读锁，使首份平台状态不会被暂停扫描覆盖。
@@ -56,11 +63,9 @@ pub fn with_download_state(action: impl FnOnce()) {
 
 /// 创建或恢复任务时，许可检查与状态切换必须和计费网络暂停互斥。
 pub fn with_download_permission<T>(
-    only_wifi: bool,
     action: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let _guard = DOWNLOAD_NETWORK_LOCK.read();
-    download_allowed(only_wifi).map_err(anyhow::Error::msg)?;
     action()
 }
 
@@ -143,9 +148,9 @@ pub fn epoch_is_current(epoch: u64) -> bool {
     network_epoch() == epoch
 }
 
-/// 冷启动尚未收到平台状态时也先保持暂停，避免“仅 Wi-Fi”用户先发出下载请求。
+/// 未知网络与下载许可保持一致：首份平台状态到达后再按计费状态自动暂停。
 pub fn should_pause_restored_download(only_wifi: bool) -> bool {
-    only_wifi && (!is_known() || is_metered())
+    only_wifi && is_known() && is_metered()
 }
 
 /// 结合用户设置判断此刻是否允许下载。
@@ -180,7 +185,8 @@ mod tests {
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let resumed = std::thread::spawn(move || {
-            with_download_permission(true, || {
+            with_download_permission(|| {
+                download_allowed(true).map_err(anyhow::Error::msg)?;
                 entered_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
                 Ok(())
@@ -202,12 +208,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_network_pauses_only_wifi_restores() {
+    fn unknown_network_defers_only_wifi_restore_decision() {
         let _guard = STATE_TEST_LOCK.lock();
         KNOWN.store(false, Ordering::Relaxed);
         METERED.store(false, Ordering::Relaxed);
-        assert!(should_pause_restored_download(true));
+        assert!(!should_pause_restored_download(true));
         assert!(!should_pause_restored_download(false));
+        set_metered(true);
+        assert!(should_pause_restored_download(true));
         set_metered(false);
         assert!(!should_pause_restored_download(true));
     }
