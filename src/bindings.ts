@@ -60,6 +60,7 @@ export const commands = {
   createDownloadTask: (comic: Comic, chapterId: number, cbzMode: CbzMode | null) =>
     typedError<null, CommandError>(__TAURI_INVOKE('create_download_task', { comic, chapterId, cbzMode })),
   getDownloadTasks: () => __TAURI_INVOKE<DownloadTaskSnapshot[]>('get_download_tasks'),
+  getStartupNotices: () => __TAURI_INVOKE<string[]>('get_startup_notices'),
   /**
    *  对已下载的漫画立即执行归档整理（合并为整本 CBZ / 逐话命名整理）。
    *  供书库的手动「整理为整本」入口使用；下载完成后的自动整理由任务管线触发。
@@ -135,6 +136,7 @@ export const commands = {
 
 /** Events */
 export const events = {
+  backgroundFailureEvent: makeEvent<BackgroundFailureEvent, BackgroundFailureEvent>('background-failure-event'),
   comicArchiveEvent: makeEvent<ComicArchiveEvent, ComicArchiveEvent>('comic-archive-event'),
   configChangedEvent: makeEvent<ConfigChangedEvent, ConfigChangedEvent>('config-changed-event'),
   downloadAllFavoritesEvent: makeEvent<DownloadAllFavoritesEvent, DownloadAllFavoritesEvent>(
@@ -159,6 +161,14 @@ export type ApiDomainPreset = {
 
 /**  归档整合的子阶段。 */
 export type ArchiveStage = 'collecting' | 'sorting' | 'packing' | 'finalizing' | 'cleaning'
+
+/**  没有命令调用方可承接的后台持久化失败。不要用通用 ERROR 日志代替该事件。 */
+export type BackgroundFailureEvent = {
+  domain: string
+  title: string
+  message: string
+  dedupeKey: string
+}
 
 export type Category = {
   id: string | null

@@ -1,9 +1,9 @@
 <script setup lang="tsx">
 import { type Comic, type LibraryDiagnosis, commands } from '../../bindings.ts'
-import { computed, onActivated, onMounted, ref, watch, watchEffect } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onScopeDispose, ref, watch, watchEffect } from 'vue'
 import DownloadedComicCard from './components/DownloadedComicCard.vue'
 import { useStore } from '../../store.ts'
-import { NCheckbox } from 'naive-ui'
+import { NCheckbox, useDialog, useMessage } from 'naive-ui'
 import {
   PhArchive,
   PhArrowClockwise,
@@ -15,12 +15,12 @@ import {
   PhX,
 } from '@phosphor-icons/vue'
 import ProgressesPane from '../ProgressesPane/ProgressesPane.vue'
-import { useDialog, useMessage, type DialogReactive } from 'naive-ui'
 import { getErrorMessage } from '../../utils/errors.ts'
 import { hasAllFilesAccess, requestAllFilesAccessAndWait, withAndroidSelection } from '../../utils/androidStorage.ts'
 import { isAndroid } from '../../composables/useIsMobile.ts'
 import { filterLibrary } from '../../utils/librarySearch.ts'
 import { libraryApi } from '../../libraryApi.ts'
+import { openDialogWithBack } from '../../composables/useDialogBack.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -123,9 +123,17 @@ async function executeImport(paths: string[]) {
   importing.value = true
   try {
     const report = await libraryApi.importComics(paths)
-    await store.refreshDownloadedComics()
-    message.success(`导入 ${report.imported} 本，跳过 ${report.skipped} 项`)
-    if (report.errors.length) dialog.warning({ title: '部分文件未能导入', content: report.errors.join('\n'), positiveText: '知道了' })
+    store.invalidateDownloadedLibrary()
+    requestLibraryRefresh({ force: true })
+    if (report.imported > 0) message.success(`导入 ${report.imported} 本，跳过 ${report.skipped} 项`)
+    else if (report.errors.length === 0) message.info(report.skipped > 0 ? '所选漫画已在书库中' : '没有可导入的漫画')
+    if (report.errors.length) {
+      await openDialogWithBack(dialog, {
+        title: report.imported > 0 ? '部分文件未能导入' : '文件未能导入',
+        content: report.errors.join('\n'),
+        positiveText: '知道了',
+      })
+    }
   } catch (error) {
     message.error(`导入失败：${getErrorMessage(error)}`)
   } finally {
@@ -137,6 +145,10 @@ async function executeImport(paths: string[]) {
 // 只显示「暂无漫画」时用户无从判断是没下载好、位置不对还是权限丢了。
 const diagnosis = ref<LibraryDiagnosis | null>(null)
 const dismissedDiagnosis = ref('')
+
+function libraryVisible() {
+  return libraryActive && store.currentTabName === 'downloaded' && store.downloadedSubTab === 'library'
+}
 
 const partialWarning = computed(() => {
   const value = diagnosis.value
@@ -153,76 +165,120 @@ async function updateDiagnosis() {
   }
 }
 
-async function refreshLibrary() {
+let libraryActive = false
+let refreshInFlight = false
+let refreshQueued = false
+let forceQueued = false
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
+
+function dismissPartialWarning() {
+  dismissedDiagnosis.value = diagnosis.value?.message ?? ''
+}
+
+async function performLibraryRefresh(manual = false) {
+  refreshInFlight = true
   loading.value = true
+  let succeeded = false
   try {
-    await store.refreshDownloadedComics()
-    await updateDiagnosis()
+    const refreshed = await store.refreshDownloadedComics()
+    if (refreshed) await updateDiagnosis()
+    succeeded = refreshed
   } catch (error) {
-    message.error(`刷新书库失败：${getErrorMessage(error)}`)
+    if (manual) message.error(`刷新书库失败：${getErrorMessage(error)}`)
+    else console.error('自动刷新书库失败', error)
   } finally {
+    refreshInFlight = false
     loading.value = false
+    const queued = refreshQueued || (succeeded && store.downloadedComicsStale)
+    const force = forceQueued
+    refreshQueued = false
+    forceQueued = false
+    if (queued) requestLibraryRefresh({ force })
   }
 }
 
-/** 诊断提示里的「授权后重试」：申请「所有文件访问」并重新扫描。 */
+function refreshLibrary() {
+  requestLibraryRefresh({ force: true })
+}
+
+/** 页面所有扫描入口共用同一个可见性、防抖与在途补扫边界。 */
+function requestLibraryRefresh({ force = false }: { force?: boolean } = {}) {
+  if (!libraryVisible()) return
+  forceQueued ||= force
+  if (!force && store.downloadedComicsLoaded && !store.downloadedComicsStale) return
+  if (refreshInFlight) {
+    refreshQueued = true
+    return
+  }
+  if (refreshTimer !== undefined) return
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined
+    if (!libraryVisible()) return
+    const manual = forceQueued
+    forceQueued = false
+    void performLibraryRefresh(manual)
+  }, manualDelay(force))
+}
+
+function manualDelay(force: boolean) {
+  return force ? 0 : 120
+}
+
+onScopeDispose(() => {
+  if (refreshTimer !== undefined) clearTimeout(refreshTimer)
+})
+
+onMounted(() => {
+  libraryActive = true
+  requestLibraryRefresh()
+})
+onActivated(() => {
+  libraryActive = true
+  requestLibraryRefresh()
+})
+onDeactivated(() => {
+  libraryActive = false
+  if (refreshTimer !== undefined) {
+    clearTimeout(refreshTimer)
+    refreshTimer = undefined
+  }
+  // 在途结果由 epoch 判定失效；重新进入可见页时再登记补扫。
+  refreshQueued = false
+  forceQueued = false
+})
+
+watch(
+  () => [
+    store.currentTabName,
+    store.downloadedSubTab,
+    store.downloadedComicsStale,
+    store.downloadedLibraryEpoch,
+  ] as const,
+  () => requestLibraryRefresh(),
+  { immediate: true },
+)
+
 async function grantStorageAndRetry() {
   const granted = await requestAllFilesAccessAndWait()
-  if (!granted) {
-    message.warning('未获得「所有文件访问」权限，书库仍可能无法读取')
-  }
-  await refreshLibrary()
+  if (!granted) message.warning('未获得「所有文件访问」权限，书库仍可能无法读取')
+  refreshLibrary()
 }
 
 function openStorageSettings() {
   store.openSettings()
 }
 
-function dismissPartialWarning() {
-  dismissedDiagnosis.value = diagnosis.value?.message ?? ''
-}
-
 watch(
   () => store.authoritativeConfig?.downloadDir,
   (path, previous) => {
-    if (!previous || path === previous) return
-    checkedIds.value.clear()
-    store.downloadedComics = []
-    void refreshLibrary()
-  },
-)
-
-// 书库页在 KeepAlive 下常驻，onMounted 只会执行一次；若用户在其他页下载完再切回来，
-// 列表会一直停在上次扫描的结果。每次进入书库页都重新扫描磁盘，保证与文件一致。
-function refreshIfStale() {
-  if (!store.downloadedComicsStale) return
-  void refreshLibrary()
-}
-
-onMounted(() => {
-  if (!store.downloadedComicsLoaded || store.downloadedComicsStale) void refreshLibrary()
-})
-onActivated(() => {
-  refreshIfStale()
-  if (store.downloadedSubTab === 'library' && !store.downloadedComicsLoaded) void refreshLibrary()
-})
-
-watch(
-  () => store.currentTabName,
-  async () => {
-    if (store.currentTabName !== 'downloaded') return
-    loading.value = true
-    try {
-      await store.refreshDownloadedComics()
-    } catch (error) {
-      console.error(error)
-      message.error(`读取本地库存失败：${getErrorMessage(error)}`)
-    } finally {
-      loading.value = false
+    if (path !== previous) {
+      checkedIds.value.clear()
+      store.invalidateDownloadedLibrary({ clear: true })
     }
   },
-  { immediate: true },
 )
+
+// 书库页在 KeepAlive 下常驻；所有可见性变化均由上述调度入口统一处理。
 
 function deleteDownloadedComics() {
   if (checkedIds.value.size === 0) return
@@ -243,8 +299,7 @@ function confirmDeleteComics(selected: Comic[]) {
   }
 
   const deleteFiles = ref(false)
-  let instance: DialogReactive | undefined
-  instance = dialog.warning({
+  void openDialogWithBack(dialog, {
     title: `删除 ${comics.length} 本漫画`,
     content: () => (
       <div>
@@ -258,36 +313,28 @@ function confirmDeleteComics(selected: Comic[]) {
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
-      // 删除后要重新扫描整个书库，手机上可能要几秒；给按钮加载态，避免重复点击。
-      if (instance) instance.loading = true
-      try {
-        let failedCount = 0
-        const failures: string[] = []
-        for (const comic of comics) {
-          try {
-            await libraryApi.removeComic(comic.id, deleteFiles.value)
-            if (store.activeReaderTarget?.comicId === comic.id) store.closeReader()
-            store.forgetComicReadingState(comic.id)
-          } catch (error) {
-            // 失败原因写入控制台日志，便于真机排查具体卡在哪一步
-            console.error('删除漫画失败', comic.id, error)
-            failures.push(`${comic.name}：${getErrorMessage(error)}`)
-            failedCount += 1
-          }
-        }
-        checkedIds.value.clear()
+      // 返回键在异步删除执行期间只消费事件，不会伪装成取消。
+      let failedCount = 0
+      const failures: string[] = []
+      for (const comic of comics) {
         try {
-          await store.refreshDownloadedComics()
+          await libraryApi.removeComic(comic.id, deleteFiles.value)
+          if (store.activeReaderTarget?.comicId === comic.id) store.closeReader()
+          store.forgetComicReadingState(comic.id)
         } catch (error) {
-          message.error(`删除后刷新书库失败：${getErrorMessage(error)}`)
+          // 失败原因写入控制台日志，便于真机排查具体卡在哪一步
+          console.error('删除漫画失败', comic.id, error)
+          failures.push(`${comic.name}：${getErrorMessage(error)}`)
+          failedCount += 1
         }
-        if (failedCount > 0) {
-          message.warning(`${failedCount} 本未能删除：${failures.slice(0, 2).join('；')}${failures.length > 2 ? '…' : ''}`)
-        } else {
-          message.success(deleteFiles.value ? `已删除 ${comics.length} 本及本地文件` : `已删除 ${comics.length} 本记录`)
-        }
-      } finally {
-        if (instance) instance.loading = false
+      }
+      checkedIds.value.clear()
+      store.invalidateDownloadedLibrary()
+      requestLibraryRefresh({ force: true })
+      if (failedCount > 0) {
+        message.warning(`${failedCount} 本未能删除：${failures.slice(0, 2).join('；')}${failures.length > 2 ? '…' : ''}`)
+      } else {
+        message.success(deleteFiles.value ? `已删除 ${comics.length} 本及本地文件` : `已删除 ${comics.length} 本记录`)
       }
     },
   })

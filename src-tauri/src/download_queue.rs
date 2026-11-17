@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
 use indexmap::IndexMap;
@@ -6,12 +6,40 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+#[derive(Default)]
+pub(crate) struct StartupNotices {
+    messages: Mutex<Vec<String>>,
+}
+
+impl StartupNotices {
+    pub fn extend(&self, messages: impl IntoIterator<Item = String>) {
+        self.messages.lock().extend(messages);
+    }
+
+    pub fn messages(&self) -> Vec<String> {
+        self.messages.lock().clone()
+    }
+}
+
+pub fn background_failure(
+    app: Option<&tauri::AppHandle>,
+    domain: &'static str,
+    title: &'static str,
+    error: &anyhow::Error,
+) {
+    state_recovery::background_failure(app, domain, title, error);
+}
+
 use crate::{
     atomic_fs,
     config::Config,
     download_manager::DownloadTaskState,
+    state_recovery,
     types::{ChapterInfo, Comic, FailureCount, TaskFailure, TaskStage},
 };
+
+pub const QUEUE_FORMAT_VERSION: u32 = 1;
+const MAX_FINISHED_HISTORY: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +113,7 @@ struct QueueState {
 
 pub struct DownloadQueue {
     path: PathBuf,
+    app: Option<tauri::AppHandle>,
     state: Mutex<QueueState>,
     #[cfg(test)]
     save_count: std::sync::atomic::AtomicUsize,
@@ -97,6 +126,59 @@ fn should_restore(state: DownloadTaskState) -> bool {
     )
 }
 
+fn compact_finished(mut entry: StoredDownload) -> StoredDownload {
+    if entry.snapshot.state == DownloadTaskState::Completed
+        && entry.snapshot.stage == TaskStage::Done
+    {
+        entry.snapshot.chapter_info.chapter_download_dir = None;
+        // 完成历史只需要漫画身份、显示名称、所在位置和当前章节。
+        // 保留目录供完成列表“打开所在位置”使用，其他网络元数据不必反复写盘。
+        let comic = std::mem::take(&mut *entry.snapshot.comic);
+        entry.snapshot.comic = Box::new(crate::types::Comic {
+            id: comic.id,
+            name: comic.name,
+            chapter_infos: vec![(*entry.snapshot.chapter_info).clone()],
+            is_downloaded: Some(true),
+            comic_download_dir: comic.comic_download_dir,
+            ..crate::types::Comic::default()
+        });
+    }
+    entry
+}
+
+fn should_persist(snapshot: &DownloadTaskSnapshot) -> bool {
+    should_restore(snapshot.state)
+        || (snapshot.state == DownloadTaskState::Completed && snapshot.stage == TaskStage::Done)
+}
+
+/// 只有已经开始的任务能凭 Done 认回已提交 CBZ；取消/失败不被改写成完成。
+fn normalize_restored_entry(mut entry: StoredDownload) -> StoredDownload {
+    if entry.snapshot.stage == TaskStage::Done
+        && matches!(
+            entry.snapshot.state,
+            DownloadTaskState::Pending | DownloadTaskState::Downloading | DownloadTaskState::Paused
+        )
+    {
+        entry.snapshot.state = DownloadTaskState::Completed;
+        entry.snapshot.error_message = None;
+        entry.snapshot.failure = None;
+    }
+    entry
+}
+
+pub(crate) fn queue_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("download-queue.json")
+}
+
+pub(crate) fn restore_queue_file(
+    config_path: &Path,
+    value: Option<&serde_json::Value>,
+) -> anyhow::Result<PathBuf> {
+    let path = state_recovery::existing_path(&queue_path(config_path), "download-queue");
+    state_recovery::restore_file(&path, "download-queue", value)?;
+    Ok(path)
+}
+
 impl DownloadQueue {
     pub fn parse_backup_entries(
         value: Option<&serde_json::Value>,
@@ -107,20 +189,26 @@ impl DownloadQueue {
         };
         let file: QueueFile =
             serde_json::from_value(value.clone()).context("解析备份下载队列失败")?;
-        ensure!(file.version == 1, "备份下载队列版本不受支持");
+        ensure!(
+            file.version == QUEUE_FORMAT_VERSION,
+            "备份下载队列版本不受支持"
+        );
         let mut ids = std::collections::HashSet::new();
         let mut entries = Vec::new();
         for entry in file.tasks {
-            if !should_restore(entry.snapshot.state) {
+            let entry = normalize_restored_entry(entry);
+            if !should_persist(&entry.snapshot) {
                 continue;
             }
             ensure!(
                 ids.insert(entry.snapshot.chapter_info.chapter_id),
                 "备份包含重复的章节任务"
             );
-            entry
-                .resumed_state(settings)
-                .context("备份队列与备份配置不匹配")?;
+            if entry.snapshot.stage != TaskStage::Done {
+                entry
+                    .resumed_state(settings)
+                    .context("备份队列与备份配置不匹配")?;
+            }
             entries.push(entry);
         }
         Ok(entries)
@@ -145,94 +233,171 @@ impl DownloadQueue {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        atomic_fs::recover_file_backup(&path)?;
+        Self::load_for_app(path, None).map(|(queue, _)| queue)
+    }
+
+    pub fn load_for_app(
+        path: PathBuf,
+        app: Option<tauri::AppHandle>,
+    ) -> anyhow::Result<(Self, Vec<String>)> {
+        let mut notices = Vec::new();
+        let mut path = state_recovery::active_path(&path, "download-queue");
+        if let Some(notice) = state_recovery::recover_file_backup(&path)? {
+            notices.push(notice);
+        }
         let mut state = QueueState::default();
         if path.exists() {
-            let bytes = std::fs::read(&path).context("读取下载队列失败")?;
-            let parsed = serde_json::from_slice::<QueueFile>(&bytes);
-            match parsed {
-                Ok(file) => {
-                    ensure!(
-                        file.version == 1,
-                        "下载队列版本不受支持，请使用兼容版本打开"
-                    );
-                    for mut entry in file.tasks {
-                        if !should_restore(entry.snapshot.state) {
-                            continue;
+            match std::fs::read(&path) {
+                Ok(bytes) => match serde_json::from_slice::<QueueFile>(&bytes) {
+                    Ok(file) if file.version == QUEUE_FORMAT_VERSION => {
+                        for entry in file.tasks {
+                            let mut entry = normalize_restored_entry(entry);
+                            if !should_persist(&entry.snapshot) {
+                                continue;
+                            }
+                            let id = entry.snapshot.chapter_info.chapter_id;
+                            if state.entries.contains_key(&id) {
+                                let (active, notice) = state_recovery::preserve_or_use_fallback(
+                                    &path,
+                                    "download-queue",
+                                    "下载队列含重复章节，本次未载入",
+                                );
+                                path = active;
+                                notices.push(notice);
+                                state = QueueState::default();
+                                break;
+                            }
+                            state.revision += 1;
+                            entry.snapshot.revision = state.revision;
+                            state.entries.insert(id, entry);
                         }
-                        state.revision += 1;
-                        entry.snapshot.revision = state.revision;
-                        state
-                            .entries
-                            .insert(entry.snapshot.chapter_info.chapter_id, entry);
                     }
-                }
+                    Ok(file) => {
+                        let (active, notice) = state_recovery::preserve_or_use_fallback(
+                            &path,
+                            "download-queue",
+                            &format!("下载队列版本 {} 不受支持，本次未载入", file.version),
+                        );
+                        path = active;
+                        notices.push(notice);
+                    }
+                    Err(error) => {
+                        let (active, notice) = state_recovery::preserve_or_use_fallback(
+                            &path,
+                            "download-queue",
+                            &format!("下载队列损坏，本次未载入：{error}"),
+                        );
+                        path = active;
+                        notices.push(notice);
+                    }
+                },
                 Err(error) => {
-                    let backup = path.with_file_name(format!(
-                        "download-queue.corrupt-{}.json",
-                        uuid::Uuid::new_v4()
-                    ));
-                    // 只读目录/文件被占用时重命名可能失败：降级为空队列继续启动，
-                    // 不能因为一个损坏的队列文件让整个应用打不开。
-                    match std::fs::rename(&path, &backup) {
-                        Ok(()) => tracing::error!(
-                            error = %error,
-                            backup = %backup.display(),
-                            "下载队列损坏，已保留备份；可重新添加任务续用临时图片"
-                        ),
-                        Err(rename_error) => tracing::error!(
-                            error = %error,
-                            rename_error = %rename_error,
-                            "下载队列损坏且无法备份，本次以空队列继续"
-                        ),
-                    }
+                    // 无法读取时不假定目录可写；独立运行文件避免覆盖可能仍存在的原件。
+                    path = path.with_file_name(".download-queue.runtime.json");
+                    let message = format!("下载队列读取失败，本次使用独立运行文件：{error}");
+                    tracing::error!(error = %error, "读取下载队列失败");
+                    notices.push(message);
                 }
             }
         }
-        Ok(Self {
-            path,
-            state: Mutex::new(state),
-            #[cfg(test)]
-            save_count: std::sync::atomic::AtomicUsize::new(0),
-        })
+        Ok((
+            Self {
+                path,
+                app,
+                state: Mutex::new(state),
+                #[cfg(test)]
+                save_count: std::sync::atomic::AtomicUsize::new(0),
+            },
+            notices,
+        ))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn entries(&self) -> Vec<StoredDownload> {
         self.state.lock().entries.values().cloned().collect()
     }
 
-    /// 备份只包含重启后仍会恢复的任务，避免把已完成/已取消的历史写进备份。
+    /// 备份包含完成历史，使恢复后仍可按归档意图补跑。
     pub fn backup_snapshot(&self) -> serde_json::Value {
         let tasks: Vec<_> = self
             .state
             .lock()
             .entries
             .values()
-            .filter(|entry| should_restore(entry.snapshot.state))
+            .filter(|entry| should_persist(&entry.snapshot))
             .cloned()
+            .map(compact_finished)
             .collect();
-        serde_json::json!({ "version": 1, "tasks": tasks })
+        serde_json::json!({ "version": QUEUE_FORMAT_VERSION, "tasks": tasks })
     }
 
-    /// 首次入队必须先成功落盘，再允许下载开始。
-    pub fn insert(&self, mut entry: StoredDownload) -> anyhow::Result<DownloadTaskSnapshot> {
-        let mut state = self.state.lock();
-        state.revision += 1;
-        entry.snapshot.revision = state.revision;
-        let id = entry.snapshot.chapter_info.chapter_id;
-        let snapshot = entry.snapshot.clone();
-        let previous = state.entries.insert(id, entry);
-        if let Err(error) = self.save(&state) {
-            if let Some(previous) = previous {
-                state.entries.insert(id, previous);
-            } else {
-                state.entries.shift_remove(&id);
-            }
-            return Err(error);
+    /// 同一批次只落盘一次。失败时整批恢复，不留下半批任务。
+    pub fn insert_many(
+        &self,
+        entries: Vec<StoredDownload>,
+        replace_existing: bool,
+    ) -> anyhow::Result<Vec<DownloadTaskSnapshot>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
         }
-        state.dirty = false;
-        Ok(snapshot)
+        let mut state = self.state.lock();
+        let mut candidate = QueueState {
+            revision: state.revision,
+            entries: state.entries.clone(),
+            dirty: state.dirty,
+        };
+        let mut snapshots = Vec::with_capacity(entries.len());
+        for mut entry in entries {
+            let id = entry.snapshot.chapter_info.chapter_id;
+            if !replace_existing && candidate.entries.contains_key(&id) {
+                anyhow::bail!("章节ID为`{id}`的下载任务已存在");
+            }
+            candidate.revision += 1;
+            entry.snapshot.revision = candidate.revision;
+            candidate.dirty = true;
+            snapshots.push(entry.snapshot.clone());
+            candidate.entries.insert(id, entry);
+        }
+        self.trim_finished(&mut candidate);
+        self.save(&candidate)?;
+        *state = candidate;
+        Ok(snapshots)
+    }
+
+    /// 撤销同一批刚创建、尚未启动的任务；写盘失败时保留内存并报告错误。
+    pub fn remove_many(&self, entries: &[StoredDownload]) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.state.lock();
+        let mut candidate = QueueState {
+            revision: state.revision,
+            entries: state.entries.clone(),
+            dirty: state.dirty,
+        };
+        for entry in entries {
+            let id = entry.snapshot.chapter_info.chapter_id;
+            if candidate
+                .entries
+                .get(&id)
+                .is_some_and(|current| current.snapshot.task_id == entry.snapshot.task_id)
+            {
+                candidate.entries.shift_remove(&id);
+            }
+        }
+        self.save(&candidate)?;
+        *state = candidate;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn insert(&self, entry: StoredDownload) -> anyhow::Result<DownloadTaskSnapshot> {
+        Ok(self.insert_many(vec![entry], true)?.remove(0))
     }
 
     fn update_locked(
@@ -243,6 +408,14 @@ impl DownloadQueue {
         let entry = state.entries.get(&snapshot.chapter_info.chapter_id)?;
         // 重试会创建新的 task_id，丢弃旧任务迟到的事件。
         if entry.snapshot.task_id != snapshot.task_id {
+            return None;
+        }
+        // 迟到的暂停、打包或重试事件不能把已完成/已取消的任务拉回运行态。
+        if matches!(
+            entry.snapshot.state,
+            DownloadTaskState::Completed | DownloadTaskState::Cancelled
+        ) && entry.snapshot.state != snapshot.state
+        {
             return None;
         }
         let persist = entry.snapshot.state != snapshot.state
@@ -257,17 +430,27 @@ impl DownloadQueue {
             .entries
             .get_mut(&snapshot.chapter_info.chapter_id)?
             .snapshot = snapshot.clone();
-        state.dirty |= persist;
+        state.dirty |= persist || !should_persist(&snapshot);
         Some(snapshot)
     }
 
-    fn save_dirty(&self, state: &mut QueueState) {
-        if state.dirty {
-            match self.save(state) {
-                Ok(()) => state.dirty = false,
-                Err(error) => {
-                    tracing::error!(error = %error, "保存下载队列失败，重启后的任务状态可能过期");
-                }
+    fn save_dirty(&self, mut state: parking_lot::MutexGuard<'_, QueueState>) {
+        if !state.dirty {
+            return;
+        }
+        let result = self.save(&state);
+        let app = self.app.clone();
+        match result {
+            Ok(()) => state.dirty = false,
+            Err(error) => {
+                // 先提交可恢复的内存终态，再在锁外发布通知；监听器可安全查询队列。
+                drop(state);
+                background_failure(
+                    app.as_ref(),
+                    "download-queue",
+                    "下载状态未保存，重启后可能恢复为较早状态",
+                    &error,
+                );
             }
         }
     }
@@ -280,12 +463,14 @@ impl DownloadQueue {
             .filter(|(_, entry)| !should_restore(entry.snapshot.state))
             .map(|(id, _)| *id)
             .collect();
-        for id in finished.iter().take(finished.len().saturating_sub(500)) {
-            state.entries.shift_remove(id);
+        for id in finished
+            .iter()
+            .take(finished.len().saturating_sub(MAX_FINISHED_HISTORY))
+        {
+            state.dirty |= state.entries.shift_remove(id).is_some();
         }
     }
 
-    #[cfg(test)]
     pub fn update_many(&self, snapshots: Vec<DownloadTaskSnapshot>) -> Vec<DownloadTaskSnapshot> {
         if snapshots.is_empty() {
             return Vec::new();
@@ -295,16 +480,16 @@ impl DownloadQueue {
             .into_iter()
             .filter_map(|snapshot| self.update_locked(&mut state, snapshot))
             .collect();
-        self.save_dirty(&mut state);
         self.trim_finished(&mut state);
+        self.save_dirty(state);
         updated
     }
 
     pub fn update(&self, snapshot: DownloadTaskSnapshot) -> Option<DownloadTaskSnapshot> {
         let mut state = self.state.lock();
         let updated = self.update_locked(&mut state, snapshot);
-        self.save_dirty(&mut state);
         self.trim_finished(&mut state);
+        self.save_dirty(state);
         updated
     }
 
@@ -313,15 +498,18 @@ impl DownloadQueue {
         self.save_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let file = QueueFile {
-            version: 1,
+            version: QUEUE_FORMAT_VERSION,
             tasks: state
                 .entries
                 .values()
-                .filter(|entry| should_restore(entry.snapshot.state))
+                .filter(|entry| should_persist(&entry.snapshot))
                 .cloned()
+                .map(compact_finished)
                 .collect(),
         };
-        atomic_fs::write(&self.path, serde_json::to_vec_pretty(&file)?).context("保存下载队列失败")
+        atomic_fs::write(&self.path, serde_json::to_vec_pretty(&file)?)
+            .context("保存下载队列失败")?;
+        Ok(())
     }
 }
 
@@ -383,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_keeps_unfinished_and_failed_but_drops_completed_and_cancelled() {
+    fn restart_keeps_unfinished_failed_and_completed_but_drops_cancelled() {
         let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
         let path = root.join("download-queue.json");
         let queue = DownloadQueue::load(path.clone()).unwrap();
@@ -394,31 +582,38 @@ mod tests {
             (4, DownloadTaskState::Completed),
             (5, DownloadTaskState::Cancelled),
         ] {
-            queue.insert(entry(id, state)).unwrap();
+            let mut entry = entry(id, state);
+            if state == DownloadTaskState::Completed {
+                entry.snapshot.stage = TaskStage::Done;
+            }
+            queue.insert(entry).unwrap();
         }
         let restored = DownloadQueue::load(path).unwrap().entries();
-        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.len(), 4);
         assert_eq!(restored[1].snapshot.state, DownloadTaskState::Paused);
         assert_eq!(restored[2].snapshot.state, DownloadTaskState::Failed);
+        assert_eq!(restored[3].snapshot.state, DownloadTaskState::Completed);
+        assert_eq!(restored[3].snapshot.stage, TaskStage::Done);
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn backup_snapshot_only_contains_restorable_tasks() {
+    fn backup_snapshot_contains_restorable_tasks_and_done_history() {
         let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
         let queue = DownloadQueue::load(root.join("queue.json")).unwrap();
         queue.insert(entry(1, DownloadTaskState::Pending)).unwrap();
-        queue
-            .insert(entry(2, DownloadTaskState::Completed))
-            .unwrap();
+        let mut completed = entry(2, DownloadTaskState::Completed);
+        completed.snapshot.stage = TaskStage::Done;
+        queue.insert(completed).unwrap();
         queue
             .insert(entry(3, DownloadTaskState::Cancelled))
             .unwrap();
 
         let backup: QueueFile = serde_json::from_value(queue.backup_snapshot()).unwrap();
         assert_eq!(backup.version, 1);
-        assert_eq!(backup.tasks.len(), 1);
+        assert_eq!(backup.tasks.len(), 2);
         assert_eq!(backup.tasks[0].snapshot.chapter_info.chapter_id, 1);
+        assert_eq!(backup.tasks[1].snapshot.chapter_info.chapter_id, 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -452,6 +647,7 @@ mod tests {
         std::fs::write(&blocked_path, b"not a directory").unwrap();
         let blocked = DownloadQueue {
             path: blocked_path.join("queue.json"),
+            app: None,
             state: Mutex::default(),
             #[cfg(test)]
             save_count: std::sync::atomic::AtomicUsize::new(0),
@@ -565,6 +761,45 @@ mod tests {
         );
         assert_eq!(restored.image_failures.len(), 1);
         assert_eq!(restored.image_failures[0].count, 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn finished_history_limit_is_saved_and_runtime_fallback_stays_active() {
+        let root = std::env::temp_dir().join(format!("jm-queue-{}", uuid::Uuid::new_v4()));
+        let path = root.join("download-queue.json");
+        let queue = DownloadQueue::load(path.clone()).unwrap();
+        let mut first = queue.insert(entry(1, DownloadTaskState::Pending)).unwrap();
+        for id in 2..=(MAX_FINISHED_HISTORY as i64 + 2) {
+            let mut entry = entry(id, DownloadTaskState::Completed);
+            entry.snapshot.stage = TaskStage::Done;
+            queue.insert(entry).unwrap();
+        }
+        first.state = DownloadTaskState::Paused;
+        queue.update(first).unwrap();
+        assert_eq!(queue.entries().len(), MAX_FINISHED_HISTORY + 1);
+        assert!(!queue
+            .entries()
+            .iter()
+            .any(|entry| entry.snapshot.chapter_info.chapter_id == 2));
+
+        // 原件不可读时，备用文件承载故障期间的活动状态。
+        std::fs::rename(&path, path.with_file_name(".download-queue.runtime.json")).unwrap();
+        let restored = DownloadQueue::load(path.clone()).unwrap();
+        assert!(restored.path().file_name().unwrap() == ".download-queue.runtime.json");
+        assert_eq!(restored.entries().len(), MAX_FINISHED_HISTORY + 1);
+
+        // 原件恢复可读后必须重新使用原件；未确认可清理前保留备用副本。
+        let primary_file = QueueFile {
+            version: QUEUE_FORMAT_VERSION,
+            tasks: vec![entry(1, DownloadTaskState::Paused)],
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&primary_file).unwrap()).unwrap();
+        let primary = DownloadQueue::load(path.clone()).unwrap();
+        assert_eq!(primary.path(), path);
+        assert!(path.with_file_name(".download-queue.runtime.json").exists());
+        assert_eq!(primary.entries().len(), 1);
+        assert_eq!(primary.entries()[0].snapshot.chapter_info.chapter_id, 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 

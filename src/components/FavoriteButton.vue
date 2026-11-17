@@ -3,6 +3,8 @@ import { computed } from 'vue'
 import { PhHeart } from '@phosphor-icons/vue'
 import { useMessage } from 'naive-ui'
 import { useStore } from '../store.ts'
+import { getErrorMessage } from '../utils/errors.ts'
+
 
 const props = withDefaults(
   defineProps<{
@@ -49,7 +51,7 @@ async function act() {
     const result = await store.setFavorite(props.comicId, known.value !== true)
     if (result !== undefined) message.success(result ? '已收藏' : '已取消收藏')
   } catch (error) {
-    message.error(String(error))
+    message.error(getErrorMessage(error))
   }
 }
 </script>

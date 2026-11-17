@@ -25,6 +25,13 @@ const loading = ref(false)
 const errorMessage = ref('')
 const folderMenuOpen = ref(false)
 let favoriteRequestGeneration = 0
+let lastFavoriteAttempt: {
+  uid: string | undefined
+  epoch: number
+  folderId: number
+  page: number
+  sort: FavoriteSort
+} | undefined
 
 const folders = computed(() =>
   (store.getFavoriteResult?.folderList || [])
@@ -48,6 +55,7 @@ watch(
   async ([uid]) => {
     favoriteRequestGeneration += 1
     store.getFavoriteResult = undefined
+    lastFavoriteAttempt = undefined
     folderIdSelected.value = 0
     sortSelected.value = 'FavoriteTime'
     pageSelected.value = 1
@@ -59,6 +67,7 @@ watch(
   { immediate: true },
 )
 
+let active = false
 async function getFavourite(folderId: number, page: number, sort: FavoriteSort): Promise<boolean> {
   const uid = store.userProfile?.uid
   if (uid === undefined) return false
@@ -66,6 +75,7 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
   const generation = ++favoriteRequestGeneration
   const epoch = store.sessionEpoch
   const observedRevision = store.favoriteRevision
+  lastFavoriteAttempt = { uid, epoch, folderId, page, sort }
   loading.value = true
   errorMessage.value = ''
   try {
@@ -112,7 +122,12 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
   }
 }
 
-let active = false
+async function retryFavorite() {
+  const attempt = lastFavoriteAttempt
+  if (!attempt || attempt.uid !== store.userProfile?.uid || attempt.epoch !== store.sessionEpoch) return
+  await getFavourite(attempt.folderId, attempt.page, attempt.sort)
+}
+
 onActivated(() => {
   active = true
   if (store.userProfile?.uid !== undefined && store.favoriteListStale && !loading.value) {
@@ -257,7 +272,7 @@ function pickFolder(folderId: number) {
               type="button"
               class="jm-btn"
               :disabled="loading"
-              @click="getFavourite(folderIdSelected, pageSelected, sortSelected)">
+              @click="retryFavorite">
               重试
             </button>
             <button

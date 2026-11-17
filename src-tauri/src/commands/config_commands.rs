@@ -299,20 +299,18 @@ fn replace_config_and_queue(
             let previous = current.clone();
             let previous_entries = manager.queue.entries();
             let storage = app.state::<ConfigStorage>();
-            let queue_path = storage.config_path().with_file_name("download-queue.json");
+            let queue_path = manager.queue.path();
             let previous_queue = if queue_path.exists() {
                 Some(serde_json::from_slice::<serde_json::Value>(
-                    &std::fs::read(&queue_path)?,
+                    &std::fs::read(queue_path)?,
                 )?)
             } else {
                 None
             };
             let intents_path = crate::archive_intents::intents_path(storage.config_path());
             let intents_managed = intents.is_some();
-            let previous_intents = if intents_managed && intents_path.exists() {
-                Some(serde_json::from_slice::<serde_json::Value>(
-                    &std::fs::read(&intents_path)?,
-                )?)
+            let previous_intents = if intents_managed {
+                crate::archive_intents::read_file_snapshot(&intents_path)?
             } else {
                 None
             };
@@ -511,7 +509,9 @@ pub fn restore_app_data(app: AppHandle, backup_path: String) -> CommandResult<Re
         .as_ref()
         .map(|entries| u32::try_from(entries.len()).unwrap_or(u32::MAX));
     replace_config_and_queue(&app, config, entries, intents)?;
-    app.get_download_manager().restore_pending();
+    app.get_download_manager()
+        .restore_pending_after_commit()
+        .map_err(|err| CommandError::from("恢复下载队列失败", err))?;
 
     if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
         cache.invalidate();

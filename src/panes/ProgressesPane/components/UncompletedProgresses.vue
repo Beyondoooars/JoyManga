@@ -3,9 +3,10 @@ import { ProgressData } from '../../../types.ts'
 import { ref, watchEffect, computed, onBeforeUnmount } from 'vue'
 import { commands, DownloadTaskState } from '../../../bindings.ts'
 import { ProgressProps, useDialog, useMessage } from 'naive-ui'
-import { getErrorMessage } from '../../../utils/errors.ts'
+import { getErrorMessage, formatCommandError } from '../../../utils/errors.ts'
 import { describeFailure } from '../../../utils/downloadProgress.ts'
 import { useStore } from '../../../store.ts'
+import { openDialogWithBack } from '../../../composables/useDialogBack.ts'
 import {
   PhPause,
   PhChecks,
@@ -130,7 +131,7 @@ async function handleProgressDoubleClick(state: DownloadTaskState, chapterId: nu
       : state === 'Paused'
         ? await commands.resumeDownloadTask(chapterId)
         : await commands.createDownloadTask(progress.comic, chapterId, null)
-    if (result.status === 'error') message.error(getErrorMessage(result.error))
+    if (result.status === 'error') message.error(formatCommandError(result.error))
   } catch (error) {
     message.error(getErrorMessage(error))
   } finally {
@@ -143,7 +144,7 @@ async function removeFailedTask(chapterId: number) {
   pendingActions.value.add(chapterId)
   try {
     const result = await commands.cancelDownloadTask(chapterId)
-    if (result.status === 'error') message.error(getErrorMessage(result.error))
+    if (result.status === 'error') message.error(formatCommandError(result.error))
   } catch (error) {
     message.error(getErrorMessage(error))
   } finally {
@@ -328,18 +329,12 @@ async function cancelAll() {
   if (batchOperating.value) return
   const ids = uncompletedProgresses.value.map(([chapterId]) => chapterId)
   if (ids.length === 0) return
-  // “全部取消”不可恢复，先二次确认
-  const confirmed = await new Promise<boolean>((resolve) => {
-    dialog.warning({
-      title: '取消全部任务？',
-      content: `将取消 ${ids.length} 个未完成任务，已下载的临时图片会保留用于续传。`,
-      positiveText: '全部取消',
-      negativeText: '返回',
-      onPositiveClick: () => resolve(true),
-      onNegativeClick: () => resolve(false),
-      onClose: () => resolve(false),
-      onMaskClick: () => resolve(false),
-    })
+  // “全部取消”不可恢复，先二次确认；返回/Escape 与其他关闭路径都结束等待。
+  const confirmed = await openDialogWithBack(dialog, {
+    title: '取消全部任务？',
+    content: `将取消 ${ids.length} 个未完成任务，已下载的临时图片会保留用于续传。`,
+    positiveText: '全部取消',
+    negativeText: '返回',
   })
   if (!confirmed) return
   batchOperating.value = true

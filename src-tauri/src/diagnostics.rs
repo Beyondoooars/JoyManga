@@ -201,6 +201,14 @@ pub fn build_report(
         })
         .unwrap_or_default();
     let mut notes = Vec::new();
+    if let Some(startup) = app.try_state::<crate::download_queue::StartupNotices>() {
+        notes.extend(startup.messages());
+    }
+    let manager = app.get_download_manager();
+    notes.push(format!("队列状态文件：{}", manager.queue.path().display()));
+    if let Some(store) = app.try_state::<ArchiveIntentStore>() {
+        notes.push(format!("归档意图文件：{}", store.path().display()));
+    }
     let logs = collect_logs(app, &mut notes);
     let crashes = collect_crashes(app, &mut notes);
     let frontend_logs = collect_frontend_logs(frontend_logs, &mut notes);

@@ -60,6 +60,14 @@ pub fn get_download_tasks(app: AppHandle) -> Vec<crate::download_queue::Download
     app.get_download_manager().snapshots()
 }
 
+#[tauri::command(async)]
+#[specta::specta]
+#[allow(clippy::needless_pass_by_value)]
+pub fn get_startup_notices(app: AppHandle) -> Vec<String> {
+    app.state::<crate::download_queue::StartupNotices>()
+        .messages()
+}
+
 /// 对已下载的漫画立即执行归档整理（合并为整本 CBZ / 逐话命名整理）。
 /// 供书库的手动「整理为整本」入口使用；下载完成后的自动整理由任务管线触发。
 #[tauri::command(async)]
@@ -70,26 +78,20 @@ pub fn promote_comic_archive(
     comic_id: i64,
     cbz_mode: CbzMode,
 ) -> CommandResult<()> {
-    if app
-        .get_download_manager()
-        .has_active_tasks_for_comic(comic_id)
-    {
-        return Err(CommandError::from(
-            "整本整理失败",
-            anyhow!("该漫画仍有未完成的下载任务，请稍后再试"),
-        ));
-    }
-    if app
+    if !app
         .state::<crate::archive_finalize::ArchiveFinalizeState>()
-        .is_running(comic_id)
+        .begin_with_downloads(&app.get_download_manager(), comic_id)
     {
         return Err(CommandError::from(
             "整本整理失败",
-            anyhow!("该漫画正在整理中，请稍候"),
+            anyhow!("该漫画仍有下载或整理任务正在进行，请稍后再试"),
         ));
     }
-    app.state::<ArchiveIntentStore>().set(comic_id, cbz_mode);
-    crate::archive_finalize::spawn_finalize_if_idle(&app, comic_id);
+    if let Err(error) = app.state::<ArchiveIntentStore>().set(comic_id, cbz_mode) {
+        crate::archive_finalize::abandon_registered_finalize(&app, comic_id);
+        return Err(CommandError::from("整本整理失败", error));
+    }
+    crate::archive_finalize::spawn_registered_finalize(app, comic_id);
     Ok(())
 }
 
@@ -107,12 +109,8 @@ pub fn create_download_task(
 
     ensure_download_allowed(&app, "无法开始下载")?;
 
-    if let Some(cbz_mode) = cbz_mode {
-        app.state::<ArchiveIntentStore>().set(comic.id, cbz_mode);
-    }
-
     download_manager
-        .create_download_task(comic, chapter_id)
+        .create_download_task_with_intent(comic, chapter_id, cbz_mode)
         .map_err(|err| {
             let err_title = format!("`{comic_title}`的章节ID为`{chapter_id}`的下载任务创建失败");
             CommandError::from(&err_title, err)
@@ -185,7 +183,7 @@ pub async fn download_comic(
         .await
         .map_err(|err| CommandError::from(&format!("获取ID为`{aid}`的漫画信息失败"), err))?;
 
-    let comic_title = &comic.name;
+    let comic_title = comic.name.clone();
 
     let chapter_ids: Vec<i64> = comic
         .chapter_infos
@@ -193,23 +191,36 @@ pub async fn download_comic(
         .filter(|chapter_info| chapter_info.is_downloaded != Some(true))
         .map(|chapter_info| chapter_info.chapter_id)
         .collect();
+    let downloaded_count = comic
+        .chapter_infos
+        .iter()
+        .filter(|chapter| chapter.is_downloaded == Some(true))
+        .count();
 
-    if chapter_ids.is_empty() {
-        let err = anyhow!("漫画`{comic_title}`的所有章节都已存在于下载目录，无需重复下载");
-        return Err(CommandError::from("一键下载漫画失败", err));
+    let result = download_manager
+        .create_download_tasks_with_intent(comic, &chapter_ids, cbz_mode, false)
+        .map_err(|error| CommandError::from("一键下载漫画失败", error))?;
+    if !result.failed.is_empty() {
+        return Err(CommandError::from(
+            "一键下载漫画失败",
+            anyhow!(format_batch_result("漫画", &result)),
+        ));
+    }
+    if result.created == 0 {
+        return Err(CommandError::from(
+            "一键下载漫画失败",
+            anyhow!(
+                "漫画`{comic_title}`没有需要新建的下载任务，已下载或已有任务 {} 章",
+                result.skipped + downloaded_count
+            ),
+        ));
     }
 
-    if let Some(cbz_mode) = cbz_mode {
-        app.state::<ArchiveIntentStore>().set(comic.id, cbz_mode);
-    }
-
-    for chapter_id in chapter_ids {
-        download_manager
-            .create_download_task(comic.clone(), chapter_id)
-            .map_err(|err| CommandError::from("一键下载漫画失败", err))?;
-    }
-
-    tracing::debug!("一键下载漫画成功，已为所有需要下载的章节创建下载任务");
+    tracing::debug!(
+        created = result.created,
+        skipped = result.skipped,
+        "一键下载漫画已创建任务"
+    );
     Ok(())
 }
 
@@ -220,6 +231,7 @@ async fn dispatch_uncompleted_chapters<OnStart, OnProgress, OnEnd>(
     comic: &Comic,
     batch_errors: &mut Vec<String>,
     task_context: &str,
+    cbz_mode: CbzMode,
     mut on_start: OnStart,
     mut on_progress: OnProgress,
     mut on_end: OnEnd,
@@ -238,31 +250,53 @@ async fn dispatch_uncompleted_chapters<OnStart, OnProgress, OnEnd>(
         return;
     }
 
-    on_start(chapter_infos.len());
-
     let download_manager = app.get_download_manager();
-    for (idx, chapter_info) in chapter_infos.into_iter().enumerate() {
-        let current = idx + 1;
-        if let Err(err) =
-            download_manager.create_download_task(comic.clone(), chapter_info.chapter_id)
-        {
-            tracing::error!(
-                comic_id = comic.id,
-                chapter_id = chapter_info.chapter_id,
-                error = %err,
-                "{task_context}失败"
-            );
-            batch_errors.push(format!(
-                "`{}`的章节`{}`创建任务失败",
-                comic.name, chapter_info.chapter_title
-            ));
+    let chapter_ids: Vec<i64> = chapter_infos
+        .iter()
+        .map(|chapter| chapter.chapter_id)
+        .collect();
+    let result = match download_manager.create_download_tasks_with_intent(
+        comic.clone(),
+        &chapter_ids,
+        Some(cbz_mode),
+        true,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::error!(comic_id = comic.id, error = %error, "{task_context}失败");
+            batch_errors.push(format!("`{}`：{error:#}", comic.name));
+            return;
         }
-
+    };
+    on_start(chapter_infos.len());
+    if !result.failed.is_empty() {
+        batch_errors.push(format_batch_result(&comic.name, &result));
+    }
+    for current in 1..=chapter_infos.len() {
         on_progress(current);
         sleep(Duration::from_millis(100)).await;
     }
 
     on_end();
+}
+
+fn format_batch_result(
+    comic_title: &str,
+    result: &crate::download_manager::CreateDownloadTasksResult,
+) -> String {
+    let examples = result
+        .failed
+        .iter()
+        .take(3)
+        .map(|(id, error)| format!("章节 `{id}`：{error}"))
+        .collect::<Vec<_>>()
+        .join("；");
+    format!(
+        "`{comic_title}`：已创建 {} 章，跳过 {} 章，失败 {} 章。{examples}",
+        result.created,
+        result.skipped,
+        result.failed.len()
+    )
 }
 
 fn format_batch_errors(action_name: &str, batch_errors: Vec<String>) -> CommandResult<()> {
@@ -378,8 +412,6 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
         };
 
         ensure_account().map_err(|err| CommandError::from("下载收藏夹中止", err))?;
-        app.state::<ArchiveIntentStore>()
-            .set(comic.id, default_cbz_mode);
         let current = (i + 1) as i64;
         let _ = DownloadAllFavoritesEvent::GetComicsProgress { current, total }.emit(&app);
 
@@ -388,6 +420,7 @@ pub async fn download_all_favorites(app: AppHandle, folder_id: Option<i64>) -> C
             &comic,
             &mut batch_errors,
             "批量创建收藏章节下载任务",
+            default_cbz_mode,
             |total_chapters| {
                 let _ = DownloadAllFavoritesEvent::StartCreateDownloadTasks {
                     comic_id: comic.id,

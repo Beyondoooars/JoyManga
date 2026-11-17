@@ -233,25 +233,28 @@ fn recover_state_replace(config_path: &Path, state_path: &Path) -> anyhow::Resul
             config_path,
             crate::config::serialize_config_for_storage(&repaired)?,
         )?;
-        let queue_path = config_path.with_file_name("download-queue.json");
-        if let Some(queue) = journal.previous_queue {
-            atomic_fs::write(&queue_path, serde_json::to_vec_pretty(&queue)?)?;
-        } else if queue_path.exists() {
-            std::fs::remove_file(&queue_path)?;
-        }
+        crate::download_queue::restore_queue_file(config_path, journal.previous_queue.as_ref())
+            .context("恢复下载队列失败，事务日志已保留")?;
         if journal.intents_managed {
             let intents_path = crate::archive_intents::intents_path(config_path);
-            if let Err(error) = crate::archive_intents::restore_intents_file(
+            match crate::archive_intents::restore_intents_file(
                 &intents_path,
                 journal.previous_intents.as_ref(),
             ) {
-                // 意图恢复失败不能让整个事务日志留下来：否则每次启动都会重复
-                // 回滚配置与队列，用户后续的修改会被反复覆盖。
-                tracing::warn!(
-                    error = %error,
-                    path = %intents_path.display(),
-                    "恢复归档意图失败，跳过该步骤以完成事务恢复"
-                );
+                Ok(()) => {}
+                Err(error) => {
+                    // 旧版本记录的备份格式不再受支持时，原件仍保持不动；隔离日志并保留其内容，
+                    // 避免每次启动都重复回滚用户后来修改的配置。磁盘写回错误则保留活动日志重试。
+                    let invalid_snapshot = journal
+                        .previous_intents
+                        .as_ref()
+                        .is_some_and(|value| value.get("version") != Some(&serde_json::json!(1)));
+                    if invalid_snapshot {
+                        quarantine(state_path);
+                        return Err(error).context("归档意图备份版本不受支持，事务日志已隔离保留");
+                    }
+                    return Err(error).context("恢复归档意图失败，事务日志已保留");
+                }
             }
         }
     }
@@ -417,7 +420,7 @@ mod tests {
         let journal = StateJournal {
             previous_config: crate::config::Config::default(&root),
             previous_queue: None,
-            // 版本不受支持：恢复必然失败，但不应留下事务日志导致每次启动重复回滚。
+            // 不受支持的旧备份不能再写回；保留隔离日志，而不是每次启动重做配置回滚。
             previous_intents: Some(serde_json::json!({ "version": 99, "entries": {} })),
             intents_managed: true,
             committed: false,
@@ -427,7 +430,18 @@ mod tests {
         recover(&config_path);
 
         assert!(config_path.exists());
-        assert!(!state_path.exists(), "恢复失败不能留下事务日志");
+        assert!(
+            !state_path.exists(),
+            "无法重放的旧备份已隔离，不再重复回滚配置"
+        );
+        assert!(std::fs::read_dir(&root).unwrap().any(|entry| {
+            entry.is_ok_and(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".state-replace.json.corrupt-")
+            })
+        }));
         let stored: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&intents_path).unwrap()).unwrap();
         assert_eq!(stored, original, "恢复失败时应保持原意图文件不变");

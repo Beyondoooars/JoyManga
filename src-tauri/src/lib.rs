@@ -1,6 +1,7 @@
 use anyhow::Context;
 use events::{
-    DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent, ExportCbzEvent, LogEvent,
+    BackgroundFailureEvent, DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent,
+    ExportCbzEvent, LogEvent,
 };
 use parking_lot::RwLock;
 use tauri::{Manager, WebviewWindowBuilder, Wry};
@@ -39,6 +40,7 @@ mod network_state;
 mod page_size;
 mod responses;
 mod search_variants;
+mod state_recovery;
 mod state_transactions;
 mod tls;
 mod types;
@@ -83,6 +85,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             daily_check_in,
             create_download_task,
             get_download_tasks,
+            get_startup_notices,
             promote_comic_archive,
             pause_download_task,
             resume_download_task,
@@ -117,6 +120,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             DownloadAllFavoritesEvent,
             ExportCbzEvent,
             LogEvent,
+            BackgroundFailureEvent,
             crate::events::ConfigChangedEvent,
             crate::events::SessionChangedEvent,
             crate::events::FavoriteChangedEvent,
@@ -125,6 +129,7 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
 }
 
 /// TypeScript 绑定的导出配置；契约测试也用它，保证两边生成的是同一份文件。
+#[cfg(any(test, feature = "bindings"))]
 fn typescript_exporter() -> specta_typescript::Typescript {
     specta_typescript::Typescript::default().header("// @ts-nocheck")
 }
@@ -206,9 +211,14 @@ pub fn run() {
             app.manage(config_storage);
             app.manage(config);
             app.manage(crate::utils::DownloadedLibraryCache::new());
-            app.manage(crate::archive_intents::ArchiveIntentStore::load(
+            let startup_notices = crate::download_queue::StartupNotices::default();
+            let (intent_store, notices) = crate::archive_intents::ArchiveIntentStore::load_for_app(
                 intent_store_path,
-            )?);
+                Some(app.handle().clone()),
+            )?;
+            startup_notices.extend(notices);
+            app.manage(intent_store);
+            app.manage(startup_notices);
             app.manage(crate::archive_finalize::ArchiveFinalizeState::default());
 
             let jm_client = JmClient::new(app.handle().clone());
@@ -224,7 +234,7 @@ pub fn run() {
             logger::init(app.handle())?;
             let download_manager = DownloadManager::new(app.handle().clone())?;
             app.manage(download_manager);
-            app.state::<DownloadManager>().restore_pending();
+            app.state::<DownloadManager>().restore_pending()?;
 
             let window_config = app.config().app.windows.first().context("缺少主窗口配置")?;
             let app_handle = app.handle().clone();

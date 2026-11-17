@@ -84,7 +84,10 @@ pub fn clear_logs(app: AppHandle) -> CommandResult<()> {
         }
     }
     if failures > 0 {
-        tracing::warn!(failures, "部分日志文件删除失败");
+        return Err(CommandError::from(
+            "清理日志失败",
+            anyhow!("{failures} 个日志文件未能删除，其余日志已清理"),
+        ));
     }
     tracing::info!("已清空应用日志");
     Ok(())

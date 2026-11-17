@@ -214,6 +214,10 @@ window.__uiFixtureInvoke = async (command, args) => {
   }
   if (command === 'plugin:app|version') return '0.2.1'
   if (command === 'get_config') return structuredClone(config)
+  if (command === 'get_startup_notices') return []
+  // 目录切换只在内存中返回规范路径，不创建或读写真实目录。
+  if (command === 'list_directory_entries') return []
+  if (command === 'validate_download_dir') return { canonicalPath: args.path }
   // 初始化会读取会话与域名预设，缺任一项整页都会停在「应用初始化失败」。
   if (command === 'get_session') return { sessionEpoch: 1, profile: signedIn ? fixtureProfile : null }
   if (command === 'get_user_profile') return fixtureProfile

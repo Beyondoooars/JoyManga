@@ -44,8 +44,15 @@ pub struct DownloadManager {
     /// 这里防止多章节并发时缓冲图片随章节数放大。
     pub(crate) buffer_sem: Arc<DownloadLimiter>,
     pub(crate) byte_per_sec: Arc<AtomicU64>,
-    download_tasks: Arc<RwLock<HashMap<i64, DownloadTask>>>,
+    pub(crate) download_tasks: Arc<RwLock<HashMap<i64, DownloadTask>>>,
     pub(crate) queue: Arc<DownloadQueue>,
+}
+
+#[derive(Default)]
+pub(crate) struct CreateDownloadTasksResult {
+    pub created: usize,
+    pub skipped: usize,
+    pub failed: Vec<(i64, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -72,11 +79,12 @@ impl DownloadManager {
             (config.chapter_concurrency, config.img_concurrency)
         };
 
-        let queue_path = app
-            .state::<ConfigStorage>()
-            .config_path()
-            .with_file_name("download-queue.json");
-        let queue = Arc::new(DownloadQueue::load(queue_path)?);
+        let queue_path =
+            crate::download_queue::queue_path(app.state::<ConfigStorage>().config_path());
+        let (queue, notices) = DownloadQueue::load_for_app(queue_path, Some(app.clone()))?;
+        app.state::<crate::download_queue::StartupNotices>()
+            .extend(notices);
+        let queue = Arc::new(queue);
         let manager = DownloadManager {
             app,
             chapter_sem: DownloadLimiter::new(chapter_concurrency),
@@ -131,15 +139,48 @@ impl DownloadManager {
         action()
     }
 
-    pub fn restore_pending(&self) {
+    pub fn restore_pending(&self) -> anyhow::Result<()> {
+        self.restore_pending_with_recovery(false)
+    }
+
+    /// 配置替换已提交时，重建失败只保留错误快照，不能让已经成功落盘的备份被误报为整体失败。
+    pub fn restore_pending_after_commit(&self) -> anyhow::Result<()> {
+        self.restore_pending_with_recovery(true)
+    }
+
+    pub(crate) fn restore_pending_for_comic(&self, comic_id: i64) -> anyhow::Result<()> {
+        let entries: Vec<_> = self
+            .queue
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                entry.snapshot.comic.id == comic_id && entry.snapshot.stage != TaskStage::Done
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let only_wifi = self.app.get_config().read().download_only_wifi;
+        crate::network_state::with_download_state(|| {
+            self.restore_pending_locked(entries, only_wifi, false)
+        })
+    }
+
+    fn restore_pending_with_recovery(&self, allow_recovery: bool) -> anyhow::Result<()> {
         let entries = self.queue.entries();
         let only_wifi = self.app.get_config().read().download_only_wifi;
         crate::network_state::with_download_state(|| {
-            self.restore_pending_locked(entries, only_wifi)
-        });
+            self.restore_pending_locked(entries, only_wifi, allow_recovery)
+        })
     }
 
-    fn restore_pending_locked(&self, entries: Vec<StoredDownload>, only_wifi: bool) {
+    fn restore_pending_locked(
+        &self,
+        entries: Vec<StoredDownload>,
+        only_wifi: bool,
+        allow_recovery: bool,
+    ) -> anyhow::Result<()> {
+        use std::collections::HashSet;
         let mut tasks = self.download_tasks.write();
         let (settings, pause_for_metered) = {
             let state = self.app.get_config();
@@ -149,29 +190,62 @@ impl DownloadManager {
                 crate::network_state::should_pause_restored_download(only_wifi),
             )
         };
+        let mut pending = Vec::new();
+        let mut failed = Vec::new();
+        let mut completed_comics = HashSet::new();
+        let mut deferred_comics = HashSet::new();
         for entry in entries {
-            if entry.snapshot.state == DownloadTaskState::Failed
-                || tasks.contains_key(&entry.snapshot.chapter_info.chapter_id)
+            if entry.snapshot.stage == TaskStage::Done {
+                if self
+                    .app
+                    .state::<crate::archive_intents::ArchiveIntentStore>()
+                    .get(entry.snapshot.comic.id)
+                    .is_some()
+                {
+                    completed_comics.insert(entry.snapshot.comic.id);
+                }
+                continue;
+            }
+            if matches!(
+                entry.snapshot.state,
+                DownloadTaskState::Failed
+                    | DownloadTaskState::Completed
+                    | DownloadTaskState::Cancelled
+            ) || tasks.contains_key(&entry.snapshot.chapter_info.chapter_id)
             {
                 continue;
             }
-            let restore = (|| -> anyhow::Result<()> {
+            if self
+                .app
+                .try_state::<crate::archive_finalize::ArchiveFinalizeState>()
+                .is_some_and(|state| {
+                    state
+                        .ensure_download_allowed(entry.snapshot.comic.id)
+                        .is_err()
+                })
+            {
+                deferred_comics.insert(entry.snapshot.comic.id);
+                continue;
+            }
+            let restore = (|| -> anyhow::Result<DownloadTask> {
+                let task_id =
+                    uuid::Uuid::parse_str(&entry.snapshot.task_id).context("下载任务标识无效")?;
                 let mut resumed_state = entry.resumed_state(&settings)?;
                 if pause_for_metered && resumed_state == DownloadTaskState::Pending {
                     resumed_state = DownloadTaskState::Paused;
                 }
-                let task = DownloadTask::new(
+                let mut task = DownloadTask::new(
                     self.app.clone(),
                     *entry.snapshot.comic.clone(),
                     entry.snapshot.chapter_info.chapter_id,
                 )?;
+                // 重建时沿用持久化身份，保存失败也不会留下无法写回队列的新任务。
+                task.task_id = task_id;
                 task.state_sender.send_replace(resumed_state);
                 task.downloaded_img_count
                     .store(entry.snapshot.downloaded_img_count, Ordering::Relaxed);
                 task.total_img_count
                     .store(entry.snapshot.total_img_count, Ordering::Relaxed);
-                // 新 task_id 代表一次新的执行：保留历史尝试次数，但不继承上一次的失败详情，
-                // 否则暂停后恢复的任务会一直显示为失败。
                 task.attempts
                     .store(entry.snapshot.attempts.max(1), Ordering::Relaxed);
                 *task.stage.write() = if resumed_state == DownloadTaskState::Pending {
@@ -179,72 +253,217 @@ impl DownloadManager {
                 } else {
                     entry.snapshot.stage
                 };
-                self.queue.insert(StoredDownload {
-                    snapshot: task.snapshot(),
-                    settings: task.settings.clone(),
-                })?;
-                tasks.insert(task.chapter_info.chapter_id, task.clone());
-                tauri::async_runtime::spawn(task.process());
-                Ok(())
+                Ok(task)
             })();
-            if let Err(error) = restore {
-                let mut snapshot = entry.snapshot;
-                let message =
-                    crate::types::truncate_failure_message(&format!("恢复任务失败：{error:#}"));
-                snapshot.state = DownloadTaskState::Failed;
-                snapshot.stage = TaskStage::Queued;
-                snapshot.error_message = Some(message.clone());
-                snapshot.failure = Some(TaskFailure {
-                    kind: FailureKind::Business,
-                    message,
-                    retryable: false,
-                    stage: TaskStage::Queued,
-                    attempts: snapshot.attempts.max(1),
-                    line: None,
-                    at: crate::types::now_millis(),
-                });
-                self.queue.update(snapshot);
+            match restore {
+                Ok(task) => pending.push(task),
+                Err(error) => {
+                    let mut snapshot = entry.snapshot;
+                    let message =
+                        crate::types::truncate_failure_message(&format!("恢复任务失败：{error:#}"));
+                    snapshot.state = DownloadTaskState::Failed;
+                    snapshot.stage = TaskStage::Queued;
+                    snapshot.error_message = Some(message.clone());
+                    snapshot.failure = Some(TaskFailure {
+                        kind: FailureKind::Business,
+                        message,
+                        retryable: false,
+                        stage: TaskStage::Queued,
+                        attempts: snapshot.attempts.max(1),
+                        line: None,
+                        at: crate::types::now_millis(),
+                    });
+                    failed.push(snapshot);
+                }
             }
         }
+        let entries = pending
+            .iter()
+            .map(|task| StoredDownload {
+                snapshot: task.snapshot(),
+                settings: task.settings.clone(),
+            })
+            .collect();
+        if let Err(error) = self.queue.insert_many(entries, true) {
+            let title = if allow_recovery {
+                "备份已恢复，但下载状态未能完整保存，重启后可能不一致"
+            } else {
+                "下载状态未能完整保存，将继续尝试恢复，重启后可能不一致"
+            };
+            crate::download_queue::background_failure(
+                Some(&self.app),
+                "download-queue",
+                title,
+                &error,
+            );
+            self.app
+                .state::<crate::download_queue::StartupNotices>()
+                .extend([format!("{title}：{error:#}")]);
+        }
+        self.queue.update_many(failed);
+        if !deferred_comics.is_empty() {
+            self.app
+                .state::<crate::download_queue::StartupNotices>()
+                .extend([format!(
+                    "{}本漫画正在整理CBZ，相关下载已延后，整理结束后自动恢复",
+                    deferred_comics.len()
+                )]);
+        }
+        for task in &pending {
+            tasks.insert(task.chapter_info.chapter_id, task.clone());
+        }
+        for comic_id in completed_comics {
+            let state = self
+                .app
+                .state::<crate::archive_finalize::ArchiveFinalizeState>();
+            if state.begin_with_downloads_locked(&tasks, comic_id) {
+                crate::archive_finalize::spawn_registered_finalize(self.app.clone(), comic_id);
+            }
+        }
+        drop(tasks);
+        for task in pending {
+            tauri::async_runtime::spawn(task.process());
+        }
+        Ok(())
     }
 
-    pub fn create_download_task(&self, comic: Comic, chapter_id: i64) -> anyhow::Result<()> {
+    pub fn create_download_task_with_intent(
+        &self,
+        comic: Comic,
+        chapter_id: i64,
+        cbz_mode: Option<crate::types::CbzMode>,
+    ) -> anyhow::Result<()> {
         crate::network_state::with_download_permission(|| {
             crate::network_state::download_allowed(self.app.get_config().read().download_only_wifi)
                 .map_err(anyhow::Error::msg)?;
-            self.create_download_task_permitted(comic, chapter_id)
+            self.create_download_task_permitted(comic, chapter_id, cbz_mode)
         })
     }
 
-    fn create_download_task_permitted(&self, comic: Comic, chapter_id: i64) -> anyhow::Result<()> {
+    fn create_download_task_permitted(
+        &self,
+        comic: Comic,
+        chapter_id: i64,
+        cbz_mode: Option<crate::types::CbzMode>,
+    ) -> anyhow::Result<()> {
+        let result = self.create_download_tasks_locked(comic, &[chapter_id], cbz_mode, false)?;
+        if let Some((_, error)) = result.failed.first() {
+            Err(anyhow!(error.clone()))
+        } else if result.created == 0 {
+            Err(anyhow!("该章节已有下载任务，可在传输页继续或取消后重试"))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn create_download_tasks_with_intent(
+        &self,
+        comic: Comic,
+        chapter_ids: &[i64],
+        cbz_mode: Option<crate::types::CbzMode>,
+        preserve_existing_intent: bool,
+    ) -> anyhow::Result<CreateDownloadTasksResult> {
+        crate::network_state::with_download_permission(|| {
+            crate::network_state::download_allowed(self.app.get_config().read().download_only_wifi)
+                .map_err(anyhow::Error::msg)?;
+            self.create_download_tasks_locked(
+                comic,
+                chapter_ids,
+                cbz_mode,
+                preserve_existing_intent,
+            )
+        })
+    }
+
+    fn create_download_tasks_locked(
+        &self,
+        comic: Comic,
+        chapter_ids: &[i64],
+        cbz_mode: Option<crate::types::CbzMode>,
+        preserve_existing_intent: bool,
+    ) -> anyhow::Result<CreateDownloadTasksResult> {
         use DownloadTaskState::{Downloading, Paused, Pending};
-        // 整合进行中不要创建新任务：整合会按快照合并并删除来源章节文件，
-        // 与下载写入交叉会导致漏章。请用户等整理完成后再下载。
+        let mut result = CreateDownloadTasksResult::default();
+        let mut tasks = self.download_tasks.write();
         if let Some(state) = self
             .app
             .try_state::<crate::archive_finalize::ArchiveFinalizeState>()
         {
-            if state.is_running(comic.id) {
-                return Err(anyhow!("该漫画正在整理 CBZ，请稍后再下载"));
+            state.ensure_download_allowed(comic.id)?;
+        }
+        let mut pending = Vec::new();
+        for &chapter_id in chapter_ids {
+            if tasks.get(&chapter_id).is_some_and(|task| {
+                matches!(*task.state_sender.borrow(), Pending | Downloading | Paused)
+            }) {
+                result.skipped += 1;
+                continue;
+            }
+            match DownloadTask::new(self.app.clone(), comic.clone(), chapter_id) {
+                Ok(task) => pending.push(task),
+                Err(error) => result
+                    .failed
+                    .push((chapter_id, format!("DownloadTask创建失败：{error:#}"))),
             }
         }
-        let mut tasks = self.download_tasks.write();
-        if let Some(task) = tasks.get(&chapter_id) {
-            let state = *task.state_sender.borrow();
-            if matches!(state, Pending | Downloading | Paused) {
-                return Err(anyhow!("章节ID为`{chapter_id}`的下载任务已存在"));
+        if pending.is_empty() {
+            return Ok(result);
+        }
+        let entries: Vec<_> = pending
+            .iter()
+            .map(|task| StoredDownload {
+                snapshot: task.snapshot(),
+                settings: task.settings.clone(),
+            })
+            .collect();
+        if let Err(error) = self.queue.insert_many(entries.clone(), true) {
+            result.failed.extend(
+                pending
+                    .iter()
+                    .map(|task| (task.chapter_info.chapter_id, format!("{error:#}"))),
+            );
+            return Ok(result);
+        }
+        let mut added_intent = false;
+        if let Some(cbz_mode) = cbz_mode {
+            let intents = self
+                .app
+                .state::<crate::archive_intents::ArchiveIntentStore>();
+            let intent_result = if preserve_existing_intent {
+                intents.set_if_absent(comic.id, cbz_mode)
+            } else {
+                intents.set(comic.id, cbz_mode).map(|()| true)
+            };
+            match intent_result {
+                Ok(added) => added_intent = added,
+                Err(error) => {
+                    self.queue.remove_many(&entries).with_context(|| {
+                        format!("保存归档设置失败：{error:#}；撤销本批下载任务也失败")
+                    })?;
+                    result.failed.extend(pending.iter().map(|task| {
+                        (
+                            task.chapter_info.chapter_id,
+                            format!("保存归档设置失败：{error:#}"),
+                        )
+                    }));
+                    return Ok(result);
+                }
             }
         }
-        let task = DownloadTask::new(self.app.clone(), comic, chapter_id)
-            .context("DownloadTask创建失败")?;
-        self.queue.insert(StoredDownload {
-            snapshot: task.snapshot(),
-            settings: task.settings.clone(),
-        })?;
-        tasks.insert(chapter_id, task.clone());
+        for task in &pending {
+            result.created += 1;
+            tasks.insert(task.chapter_info.chapter_id, task.clone());
+        }
         drop(tasks);
-        tauri::async_runtime::spawn(task.process());
-        Ok(())
+        for task in pending {
+            tauri::async_runtime::spawn(task.process());
+        }
+        if added_intent && result.created == 0 {
+            self.app
+                .state::<crate::archive_intents::ArchiveIntentStore>()
+                .remove(comic.id);
+        }
+        Ok(result)
     }
 
     pub fn reload_concurrency(&self) {
@@ -281,20 +500,32 @@ impl DownloadManager {
     /// 当开启「仅 Wi-Fi 下载」且处于计费网络时，自动暂停所有排队中/下载中的任务。
     pub fn pause_active_tasks_for_metered_network(&self) -> usize {
         let tasks: Vec<_> = self.download_tasks.read().values().cloned().collect();
-        tasks
+        let snapshots: Vec<_> = tasks
             .iter()
             .filter_map(DownloadTask::pause_for_metered_network)
-            .count()
+            .collect();
+        let count = snapshots.len();
+        let updated = self.queue.update_many(snapshots);
+        for snapshot in updated {
+            DownloadTask::emit_update_event(&self.app, snapshot);
+        }
+        count
     }
 
     pub fn resume_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {
         crate::network_state::with_download_permission(|| {
             crate::network_state::download_allowed(self.app.get_config().read().download_only_wifi)
                 .map_err(anyhow::Error::msg)?;
-            let tasks = self.download_tasks.read();
+            let tasks = self.download_tasks.write();
             let Some(task) = tasks.get(&chapter_id) else {
                 return Err(anyhow!("未找到章节ID为`{chapter_id}`的下载任务"));
             };
+            if let Some(state) = self
+                .app
+                .try_state::<crate::archive_finalize::ArchiveFinalizeState>()
+            {
+                state.ensure_download_allowed(task.comic.id)?;
+            }
             task.change_state(DownloadTaskState::Pending, &[DownloadTaskState::Paused]);
             Ok(())
         })

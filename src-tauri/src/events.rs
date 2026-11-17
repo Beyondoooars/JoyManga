@@ -93,6 +93,16 @@ pub struct LogEvent {
     pub line_number: i64,
 }
 
+/// 没有命令调用方可承接的后台持久化失败。不要用通用 ERROR 日志代替该事件。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundFailureEvent {
+    pub domain: String,
+    pub title: String,
+    pub message: String,
+    pub dedupe_key: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct ConfigChangedEvent {
     pub config: crate::config::Config,

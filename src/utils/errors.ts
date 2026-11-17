@@ -6,11 +6,14 @@ export function getErrorMessage(error: unknown): string {
     return error
   }
 
-  try {
-    return JSON.stringify(error)
-  } catch {
-    return String(error)
+  if (typeof error === 'object' && error !== null) {
+    const value = error as Partial<CommandErrorLike> & { message?: unknown }
+    if (typeof value.err_title === 'string' || typeof value.err_message === 'string') {
+      return formatCommandError(value)
+    }
+    if (typeof value.message === 'string') return value.message
   }
+  return '发生未知错误，请查看日志后重试'
 }
 
 export type CommandErrorKind = 'Network' | 'Timeout' | 'Auth' | 'NotFound' | 'Cancelled' | 'Storage' | 'Unknown'
