@@ -56,7 +56,7 @@ pub fn with_download_policy<T>(action: impl FnOnce() -> T) -> T {
 }
 
 /// 冷启动恢复也保持读锁，使首份平台状态不会被暂停扫描覆盖。
-pub fn with_download_state(action: impl FnOnce()) {
+pub fn with_download_state<T>(action: impl FnOnce() -> T) -> T {
     let _guard = DOWNLOAD_NETWORK_LOCK.read();
     action()
 }

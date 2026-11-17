@@ -457,17 +457,29 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
     let is_flat_mode = comic_download_dir.is_file();
     let comic_name_filtered = utils::filename_filter(&comic.name);
     let comic_prefix = format!("{comic_name_filtered} - ");
-
-    // 整本合并归档（无 chapter.json 但带 元数据.json）：先按文件名前缀粗筛，命中的话按内嵌章节列表整体标记。
-    let merged_archives: Vec<(std::path::PathBuf, Vec<ChapterInfo>)> = cbz_files
+    let merged_suffix = format!("[JM{}]", comic.id);
+    let merged_candidates = cbz_files
         .iter()
         .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    !comic_name_filtered.is_empty() && name.starts_with(&comic_name_filtered)
-                })
+            // 平铺模式只需检查本漫画的命名；改名后的整本包有 `[JMid]` 后缀。
+            // 非平铺目录虽属于单本漫画，也保留可能由旧版本生成的整本名。
+            !is_flat_mode
+                || path.as_path() == comic_download_dir
+                || path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.contains(&merged_suffix)
+                            || (!comic_name_filtered.is_empty()
+                                && name.starts_with(&comic_name_filtered))
+                    })
         })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // 整本合并以包内漫画与章节身份为准：标题截断或云端改名后仍能认回。
+    let merged_archives: Vec<(std::path::PathBuf, Vec<ChapterInfo>)> = merged_candidates
+        .iter()
         .filter_map(|path| match read_merged_archive_identity(path) {
             Ok(Some((comic_id, chapters))) if comic_id == comic.id => {
                 Some((path.clone(), chapters))
@@ -666,10 +678,9 @@ pub(crate) fn read_merged_archive_identity(
     if archive.by_name("chapter.json").is_ok() {
         return Ok(None);
     }
-    // 没有 `[NN] ` 话目录布局的归档不是本应用的整本合并产物（例如旧式单话章节包）。
-    if !archive_has_chapter_layout(&mut archive) {
-        return Ok(None);
-    }
+    // 元数据是应用整本包的稳定身份；多话包有 `[NN]` 目录，单话包则平铺页面。
+    // 旧式多话单章包没有目录布局，仍按普通章节文件处理。
+    let has_chapter_layout = archive_has_chapter_layout(&mut archive);
     let Ok(mut entry) = archive.by_name("元数据.json") else {
         return Ok(None);
     };
@@ -677,6 +688,9 @@ pub(crate) fn read_merged_archive_identity(
     let bytes =
         crate::image_data::read_limited(&mut entry, size, crate::image_data::MAX_METADATA_BYTES)?;
     let comic: Comic = serde_json::from_slice(&bytes)?;
+    if !has_chapter_layout && comic.chapter_infos.len() != 1 {
+        return Ok(None);
+    }
     Ok(Some((comic.id, comic.chapter_infos)))
 }
 
@@ -837,6 +851,15 @@ mod merged_archive_tests {
     }
 
     fn write_merged_book(path: &Path, comic_id: i64, chapters: &[ChapterInfo]) {
+        write_merged_book_with_layout(path, comic_id, chapters, true);
+    }
+
+    fn write_merged_book_with_layout(
+        path: &Path,
+        comic_id: i64,
+        chapters: &[ChapterInfo],
+        chapter_layout: bool,
+    ) {
         let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
         let mut comic = Comic {
             id: comic_id,
@@ -852,7 +875,11 @@ mod merged_archive_tests {
         zip.write_all(serde_json::to_string(&comic).unwrap().as_bytes())
             .unwrap();
         for ch in chapters {
-            let dir = format!("[{:02}] {}", ch.order, ch.chapter_title);
+            let dir = if chapter_layout {
+                format!("[{:02}] {}/", ch.order, ch.chapter_title)
+            } else {
+                String::new()
+            };
             for page in [1, 2] {
                 zip.start_file(
                     format!("{dir}/000{page}.jpg"),
@@ -864,6 +891,21 @@ mod merged_archive_tests {
             }
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn single_chapter_flat_package_is_merged_but_legacy_multi_chapter_one_is_not() {
+        let root = std::env::temp_dir().join(format!("jm-merged-flat-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("单章.cbz");
+        write_merged_book_with_layout(&path, 321, &[chapter(101, 1)], false);
+        assert_eq!(
+            read_merged_archive_identity(&path).unwrap(),
+            Some((321, vec![chapter(101, 1)]))
+        );
+        write_merged_book_with_layout(&path, 321, &[chapter(101, 1), chapter(102, 2)], false);
+        assert_eq!(read_merged_archive_identity(&path).unwrap(), None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

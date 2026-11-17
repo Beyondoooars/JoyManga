@@ -34,6 +34,7 @@ impl ArchiveFinalizeState {
     /// 开始一次整合；若同一本漫画正在整合，则记录“结束后重跑”并返回 false。
     ///
     /// 记录重跑与 `end` 读取重跑标记共用同一把锁，完成事件与收尾交错时也不会丢失。
+    #[cfg(test)]
     fn try_begin(&self, comic_id: i64) -> bool {
         let mut runs = self.runs.lock();
         if runs.running.insert(comic_id) {
@@ -53,6 +54,52 @@ impl ArchiveFinalizeState {
 
     fn is_rerun_pending(&self, comic_id: i64) -> bool {
         self.runs.lock().rerun.contains(&comic_id)
+    }
+
+    /// 调用方必须持有任务映射写锁；这里只检查协调状态，不等待磁盘 I/O。
+    pub fn ensure_download_allowed(&self, comic_id: i64) -> anyhow::Result<()> {
+        let runs = self.runs.lock();
+        anyhow::ensure!(
+            !runs.running.contains(&comic_id) && !runs.rerun.contains(&comic_id),
+            "该漫画正在整理 CBZ，请稍后再下载"
+        );
+        Ok(())
+    }
+
+    /// 在任务映射写锁内重新检查活跃任务并登记 running。
+    pub fn begin_with_downloads(
+        &self,
+        manager: &crate::download_manager::DownloadManager,
+        comic_id: i64,
+    ) -> bool {
+        let tasks = manager.download_tasks.write();
+        self.begin_with_downloads_locked(&tasks, comic_id)
+    }
+
+    /// 调用方提供持有任务映射写锁期间的快照，不重复获取锁。
+    pub fn begin_with_downloads_locked(
+        &self,
+        tasks: &std::collections::HashMap<i64, crate::download_manager::DownloadTask>,
+        comic_id: i64,
+    ) -> bool {
+        let mut runs = self.runs.lock();
+        if tasks.values().any(|task| {
+            task.comic.id == comic_id
+                && matches!(
+                    *task.state_sender.borrow(),
+                    crate::download_manager::DownloadTaskState::Pending
+                        | crate::download_manager::DownloadTaskState::Downloading
+                )
+        }) {
+            return false;
+        }
+        if !runs.running.insert(comic_id) {
+            // 任务完成、启动补跑或手动请求在运行期间到达：必须保留补跑意图。
+            // 新下载入口已由 ensure_download_allowed 拒绝，不会借此绕过互斥。
+            runs.rerun.insert(comic_id);
+            return false;
+        }
+        true
     }
 
     /// 该漫画当前是否正在整合（供新建下载任务前检查，避免与清理来源文件交叉）。
@@ -75,11 +122,22 @@ struct FinalizeGuard {
 
 impl Drop for FinalizeGuard {
     fn drop(&mut self) {
-        let rerun = self.app.state::<ArchiveFinalizeState>().end(self.comic_id);
-        if rerun {
-            // 运行期间完成的章节被 try_begin 挡下并记了重跑；这里必须等 running
-            // 标记释放后再调度，否则新的 try_begin 仍会失败。
-            spawn_finalize_if_idle(&self.app, self.comic_id);
+        let manager = self.app.get_download_manager();
+        let has_rerun = {
+            let tasks = manager.download_tasks.read();
+            let rerun = self.app.state::<ArchiveFinalizeState>().end(self.comic_id);
+            if rerun {
+                // 在共同临界区内登记补跑，启动前不能再插入下载任务。
+                self.app
+                    .state::<ArchiveFinalizeState>()
+                    .begin_with_downloads_locked(&tasks, self.comic_id);
+            }
+            rerun
+        };
+        if has_rerun {
+            spawn_registered_finalize(self.app.clone(), self.comic_id);
+        } else if let Err(error) = manager.restore_pending_for_comic(self.comic_id) {
+            tracing::error!(comic_id = self.comic_id, error = %error, "归档结束后恢复下载失败");
         }
     }
 }
@@ -88,24 +146,30 @@ impl Drop for FinalizeGuard {
 ///
 /// 整合方式取自归档意图存储（创建下载任务时写入），缺省使用配置中的默认方式。
 pub fn spawn_finalize_if_idle(app: &AppHandle, comic_id: i64) {
-    if app
-        .get_download_manager()
-        .has_active_tasks_for_comic(comic_id)
-    {
-        return;
-    }
-    if !app.state::<ArchiveFinalizeState>().try_begin(comic_id) {
-        // 已在整合：try_begin 已记录重跑，FinalizeGuard 收尾时会自动补跑，
-        // 不会漏掉运行期间完成的章节。
+    let state = app.state::<ArchiveFinalizeState>();
+    if !state.begin_with_downloads(&app.get_download_manager(), comic_id) {
         return;
     }
     let app = app.clone();
+    spawn_registered_finalize(app, comic_id);
+}
+
+/// 调用方已通过任务映射与归档协调的共同临界区登记 running。
+pub fn spawn_registered_finalize(app: AppHandle, comic_id: i64) {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = FinalizeGuard {
             app: app.clone(),
             comic_id,
         };
         finalize_comic_archive(&app, comic_id);
+    });
+}
+
+/// 登记 running 后、真正启动前失败：释放登记，同时不丢掉并发补跑请求。
+pub fn abandon_registered_finalize(app: &AppHandle, comic_id: i64) {
+    drop(FinalizeGuard {
+        app: app.clone(),
+        comic_id,
     });
 }
 
@@ -397,19 +461,10 @@ fn resolve_merged_target(root: &Path, comic: &Comic) -> anyhow::Result<PathBuf> 
 }
 
 fn archive_belongs_to_comic(path: &Path, comic_id: i64) -> bool {
-    (|| -> anyhow::Result<bool> {
-        let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-        let mut entry = archive.by_name("元数据.json")?;
-        let size = entry.size();
-        let bytes = crate::image_data::read_limited(
-            &mut entry,
-            size,
-            crate::image_data::MAX_METADATA_BYTES,
-        )?;
-        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        Ok(value["id"].as_i64() == Some(comic_id))
-    })()
-    .unwrap_or(false)
+    crate::comic_scanner::read_merged_archive_identity(path)
+        .ok()
+        .flatten()
+        .is_some_and(|(id, _)| id == comic_id)
 }
 
 /// 合并成功后清理来源章节文件：只删除身份匹配的独立章节 CBZ（本应用下载产物），

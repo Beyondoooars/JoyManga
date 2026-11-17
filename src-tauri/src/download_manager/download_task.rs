@@ -333,16 +333,9 @@ impl DownloadTask {
             total_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             "chapter_download_completed"
         );
-        self.clear_recorded_failure();
-        self.set_stage(TaskStage::Done);
+        self.finish_packaging();
 
-        // 完成只允许从“下载中”迁移：用户恰好在收尾阶段点了暂停时，
-        // 不能被这里覆盖成 Completed（否则前端状态与按钮语义错乱）。
-        self.change_state(
-            DownloadTaskState::Completed,
-            &[DownloadTaskState::Downloading],
-        );
-        self.emit_download_task_update_event();
+        // 完成收尾可收敛收尾瞬间的 Paused，但不能覆盖取消或失败。
     }
 
     fn create_temp_download_dir(&self) -> Option<PathBuf> {
@@ -582,14 +575,26 @@ impl DownloadTask {
             return None;
         }
         self.state_sender.send_replace(DownloadTaskState::Paused);
-        self.download_manager
-            .queue
-            .update(self.snapshot())
-            .inspect(|snapshot| Self::emit_update_event(&self.app, snapshot.clone()))
+        Some(self.snapshot())
     }
 
     /// 记录当前步骤并立即推送一次状态，保证界面能看到「获取信息 / 下载中 / 校验 / 打包」。
+    fn finish_packaging(&self) {
+        let _guard = self.event_lock.lock();
+        if matches!(
+            *self.state_sender.borrow(),
+            DownloadTaskState::Cancelled | DownloadTaskState::Failed | DownloadTaskState::Completed
+        ) {
+            return;
+        }
+        self.clear_recorded_failure();
+        *self.stage.write() = TaskStage::Done;
+        self.state_sender.send_replace(DownloadTaskState::Completed);
+        self.publish_update();
+    }
+
     pub(crate) fn set_stage(&self, stage: TaskStage) {
+        let _guard = self.event_lock.lock();
         if *self.stage.read() == stage {
             return;
         }
@@ -644,7 +649,10 @@ impl DownloadTask {
 
     fn fail_with_failure(&self, mut failure: TaskFailure) {
         let _guard = self.event_lock.lock();
-        if *self.state_sender.borrow() == DownloadTaskState::Cancelled {
+        if matches!(
+            *self.state_sender.borrow(),
+            DownloadTaskState::Cancelled | DownloadTaskState::Failed | DownloadTaskState::Completed
+        ) {
             return;
         }
         failure.stage = *self.stage.read();

@@ -4,8 +4,10 @@ use anyhow::{ensure, Context};
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 
 use crate::atomic_fs;
+use crate::state_recovery;
 use crate::types::CbzMode;
 
 const MAX_INTENTS: usize = 200;
@@ -60,11 +62,21 @@ fn remove_intents_file(path: &Path) -> anyhow::Result<()> {
     }
 }
 
+pub(crate) fn read_file_snapshot(path: &Path) -> anyhow::Result<Option<serde_json::Value>> {
+    let path = state_recovery::existing_path(path, "archive-intents");
+    if path.exists() {
+        Ok(Some(serde_json::from_slice(&std::fs::read(path)?)?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// 事务恢复使用：把备份中的意图快照写回磁盘；`None` 表示恢复为“没有意图文件”。
 pub(crate) fn restore_intents_file(
     path: &Path,
     value: Option<&serde_json::Value>,
 ) -> anyhow::Result<()> {
+    let path = &state_recovery::existing_path(path, "archive-intents");
     match value {
         Some(value) => {
             let entries = parse_intent_value(value.clone())?;
@@ -77,52 +89,77 @@ pub(crate) fn restore_intents_file(
 /// 记录每本漫画期望的 CBZ 归档方式（下载完成后的自动整合行为）。
 ///
 /// 与下载队列相互独立：队列负责任务级恢复，这里只负责「这本漫画下载完后怎么整理」。
-/// 整合成功后移除对应记录；写入失败只记录日志，不影响下载本身。
+/// 整合成功后移除对应记录；移除保存失败时保留内存状态并通知后台错误。
 pub struct ArchiveIntentStore {
     path: PathBuf,
+    app: Option<AppHandle>,
     state: Mutex<IndexMap<i64, CbzMode>>,
 }
 
 impl ArchiveIntentStore {
+    #[cfg(test)]
     pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        atomic_fs::recover_file_backup(&path)?;
+        Self::load_for_app(path, None).map(|(store, _)| store)
+    }
+
+    pub fn load_for_app(
+        path: PathBuf,
+        app: Option<AppHandle>,
+    ) -> anyhow::Result<(Self, Vec<String>)> {
+        let mut path = state_recovery::active_path(&path, "archive-intents");
+        let mut notices = Vec::new();
+        if let Some(notice) = state_recovery::recover_file_backup(&path)? {
+            notices.push(notice);
+        }
         let mut entries = IndexMap::new();
         if path.exists() {
-            let parsed = std::fs::read(&path)
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| {
-                    serde_json::from_slice::<IntentFile>(&bytes).map_err(anyhow::Error::from)
-                });
-            match parsed {
-                Ok(mut file) if file.version == 1 => {
-                    trim_entries(&mut file.entries);
-                    entries = file.entries;
-                }
-                Ok(_) => {
-                    tracing::warn!("归档意图文件版本不受支持，已忽略");
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let problem = match serde_json::from_slice::<IntentFile>(&bytes) {
+                        Ok(mut file) if file.version == 1 => {
+                            trim_entries(&mut file.entries);
+                            entries = file.entries;
+                            None
+                        }
+                        Ok(file) => Some(format!(
+                            "归档意图版本 {} 不受支持，本次未载入",
+                            file.version
+                        )),
+                        Err(error) => Some(format!("归档意图损坏，本次未载入：{error}")),
+                    };
+                    if let Some(problem) = problem {
+                        let (active, notice) = state_recovery::preserve_or_use_fallback(
+                            &path,
+                            "archive-intents",
+                            &problem,
+                        );
+                        path = active;
+                        notices.push(notice);
+                    }
                 }
                 Err(error) => {
-                    let backup = path.with_file_name(format!(
-                        "archive-intents.corrupt-{}.json",
-                        uuid::Uuid::new_v4()
-                    ));
-                    let _ = std::fs::rename(&path, &backup);
-                    tracing::error!(
-                        error = %error,
-                        backup = %backup.display(),
-                        "归档意图文件损坏，已保留备份"
-                    );
+                    path = path.with_file_name(".archive-intents.runtime.json");
+                    tracing::error!(error = %error, "读取归档意图失败");
+                    notices.push(format!("归档意图读取失败，本次使用独立运行文件：{error}"));
                 }
             }
         }
-        Ok(Self {
-            path,
-            state: Mutex::new(entries),
-        })
+        Ok((
+            Self {
+                path,
+                app,
+                state: Mutex::new(entries),
+            },
+            notices,
+        ))
     }
 
     pub fn get(&self, comic_id: i64) -> Option<CbzMode> {
         self.state.lock().get(&comic_id).copied()
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 
     /// 供备份读取当前意图的稳定快照。
@@ -173,24 +210,60 @@ impl ArchiveIntentStore {
             .collect()
     }
 
+    /// 整合成功后清除意图；保存失败保留重试状态，不阻断已完成的文件整合。
     pub fn remove(&self, comic_id: i64) {
         let mut state = self.state.lock();
+        let previous = state.clone();
         if state.shift_remove(&comic_id).is_some() {
-            if let Err(error) = self.save(&state) {
-                tracing::error!(error = %error, "保存归档意图失败");
-            }
+            let _ = self.save_or_restore(state, previous);
         }
     }
 
-    pub fn set(&self, comic_id: i64, mode: CbzMode) {
+    pub fn set(&self, comic_id: i64, mode: CbzMode) -> anyhow::Result<()> {
         let mut state = self.state.lock();
+        let previous = state.clone();
         state.shift_remove(&comic_id);
         state.insert(comic_id, mode);
         while state.len() > MAX_INTENTS {
             state.shift_remove_index(0);
         }
-        if let Err(error) = self.save(&state) {
-            tracing::error!(error = %error, "保存归档意图失败");
+        self.save_or_restore(state, previous)
+    }
+
+    /// 返回本次是否新增；已有用户设置保持不变。
+    pub fn set_if_absent(&self, comic_id: i64, mode: CbzMode) -> anyhow::Result<bool> {
+        let mut state = self.state.lock();
+        if state.contains_key(&comic_id) {
+            return Ok(false);
+        }
+        let previous = state.clone();
+        state.insert(comic_id, mode);
+        while state.len() > MAX_INTENTS {
+            state.shift_remove_index(0);
+        }
+        self.save_or_restore(state, previous).map(|()| true)
+    }
+
+    fn save_or_restore(
+        &self,
+        mut state: parking_lot::MutexGuard<'_, IndexMap<i64, CbzMode>>,
+        previous: IndexMap<i64, CbzMode>,
+    ) -> anyhow::Result<()> {
+        let result = self.save(&state);
+        let app = self.app.clone();
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *state = previous;
+                drop(state);
+                state_recovery::background_failure(
+                    app.as_ref(),
+                    "archive-intents",
+                    "归档设置未保存，本次选择未生效",
+                    &error,
+                );
+                Err(error)
+            }
         }
     }
 
@@ -210,9 +283,9 @@ mod tests {
         let path = root.join("archive-intents.json");
         {
             let store = ArchiveIntentStore::load(path.clone()).unwrap();
-            store.set(101, CbzMode::Merge);
-            store.set(102, CbzMode::PerChapter);
-            store.set(101, CbzMode::PerChapter);
+            store.set(101, CbzMode::Merge).unwrap();
+            store.set(102, CbzMode::PerChapter).unwrap();
+            store.set(101, CbzMode::PerChapter).unwrap();
         }
         let reloaded = ArchiveIntentStore::load(path.clone()).unwrap();
         assert_eq!(reloaded.get(101), Some(CbzMode::Merge));

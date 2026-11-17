@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, toRaw, watch } from 'vue'
 import type { Component } from 'vue'
 import { commands } from './bindings.ts'
-import { useMessage, useNotification } from 'naive-ui'
+import { useMessage } from 'naive-ui'
 import { PhBooks, PhCompass, PhDownloadSimple, PhHeart, PhUser } from '@phosphor-icons/vue'
 import { useStore } from './store.ts'
 import icon from './assets/icon.png'
@@ -30,7 +30,6 @@ const pageComponents: Record<CurrentTabName, Component> = {
 
 const store = useStore()
 const message = useMessage()
-const notification = useNotification()
 const { checkForUpdates } = useAppUpdate()
 
 /** 底部导航的四个一级页面；其余（详情、设置）是压栈的二级页面 */
@@ -198,6 +197,7 @@ async function initializeApp() {
       }
     }
     await store.initDownloadListener()
+    for (const notice of await commands.getStartupNotices()) message.warning(notice, { duration: 10_000 })
     await nextTick()
     configLoaded = true
     appReady.value = true
@@ -241,6 +241,7 @@ let stopVpnWatch: (() => void) | undefined
 let networkMeteredQueue = Promise.resolve()
 let stopCancelListener: (() => void) | undefined
 let stopOpenFileListener: (() => void) | undefined
+let stopBackgroundFailureListener: (() => void) | undefined
 
 onMounted(() => {
   document.addEventListener('contextmenu', preventContextMenu)
@@ -265,7 +266,7 @@ onMounted(() => {
   // 文件管理器/其他应用「用 JoyManga 打开」CBZ：导入后切换到本地书库
   stopOpenFileListener = onOpenExternalComic({
     onImported: (report) => {
-      void store.refreshDownloadedComics().catch((error) => console.error('导入后刷新书库失败', error))
+      store.invalidateDownloadedLibrary()
       // 导入是逐文件进行的：损坏/非法 CBZ 会进入 errors，成功数可能为 0。不能一律提示成功。
       if (report.imported > 0) {
         message.success(`已导入 ${report.imported} 本`)
@@ -279,7 +280,10 @@ onMounted(() => {
     },
     onError: (text) => message.error(`打开文件失败：${text}`),
   })
-  void store.initLogListener(notification)
+  stopBackgroundFailureListener = store.initBackgroundFailureListener((title, description) => {
+    message.error(`${title}：${description}`, { duration: 8000 })
+  })
+  void store.initLogListener()
   void store.initSpeedListener()
   void initializeApp()
   // 延迟 2.5 秒静默检测更新，避开冷启动峰值
@@ -298,6 +302,8 @@ onUnmounted(() => {
   stopCancelListener = undefined
   stopOpenFileListener?.()
   stopOpenFileListener = undefined
+  stopBackgroundFailureListener?.()
+  stopBackgroundFailureListener = undefined
   if (configSaveTimer !== undefined) {
     clearTimeout(configSaveTimer)
   }

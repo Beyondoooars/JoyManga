@@ -77,6 +77,7 @@ let progressSaveTimer: ReturnType<typeof setTimeout> | undefined
 let pendingProgress: ReadingProgress | undefined
 const bookmarksShowing = ref(false)
 let chapterGeneration = 0
+let lastLoadAttempt: { comicId: number; chapterId: number; page: number } | undefined
 
 const fitMode = ref<FitMode>('width')
 const zoom = ref<Transform>({ ...IDENTITY_TRANSFORM })
@@ -310,7 +311,7 @@ const comicBookmarks = computed(() => store.readingState.bookmarks.filter((item)
 
 function progressSnapshot(): ReadingProgress | undefined {
   const chapter = chapterData.value
-  if (!chapter || loading.value) return
+  if (!chapter || loading.value || error.value || chapter.imagePaths.length === 0) return
   return { comicId: chapter.comicId, chapterId: chapter.chapterId, comicTitle: chapter.comicTitle,
     chapterTitle: chapter.chapterTitle, page: currentPage.value, totalPages: chapter.totalImages, updatedAt: Date.now() }
 }
@@ -383,6 +384,7 @@ function preloadCurrentRange() {
 
 async function loadChapter(comicId: number, chapterId: number, page = 1) {
   flushProgress()
+  lastLoadAttempt = { comicId, chapterId, page }
   const generation = ++chapterGeneration
   loading.value = true
   error.value = null
@@ -423,6 +425,12 @@ async function loadChapter(comicId: number, chapterId: number, page = 1) {
         }
       }
     }
+  }
+}
+
+function retryChapter() {
+  if (lastLoadAttempt) {
+    void loadChapter(lastLoadAttempt.comicId, lastLoadAttempt.chapterId, lastLoadAttempt.page)
   }
 }
 
@@ -869,7 +877,7 @@ onUnmounted(() => {
           <n-button
             size="small"
             type="primary"
-            @click="store.activeReaderTarget && loadChapter(store.activeReaderTarget.comicId, store.activeReaderTarget.chapterId)">
+            @click="retryChapter">
             重试
           </n-button>
         </div>

@@ -26,6 +26,7 @@ import {
 } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
+import { openDialogWithBack } from '../composables/useDialogBack.ts'
 import { isAndroid as isAndroidDevice } from '../composables/useIsMobile.ts'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
 import {
@@ -415,7 +416,7 @@ async function backup() {
 }
 
 function restore() {
-  dialog.warning({
+  openDialogWithBack(dialog, {
     title: '恢复备份',
     content: '将用备份覆盖当前设置、任务队列、阅读进度、书签和归档设置；已下载的漫画文件不受影响。',
     positiveText: '选择备份文件',
@@ -439,7 +440,7 @@ function restore() {
             else if (imported === 'write-failed') readingNotice = '；阅读记录未能保存到本地'
           }
           await store.reloadTasks()
-          await store.refreshDownloadedComics()
+          store.invalidateDownloadedLibrary({ clear: true })
           message.success(readingNotice ? `备份已恢复${readingNotice}` : '备份已恢复')
         }),
       ).catch((error) => {
@@ -458,7 +459,7 @@ async function clearCache() {
 }
 
 function resetSettings() {
-  dialog.warning({
+  openDialogWithBack(dialog, {
     title: '重置设置',
     content: '恢复默认设置并清除账号、任务队列与归档设置；已下载的漫画与阅读记录保留。',
     positiveText: '重置设置',
@@ -470,7 +471,7 @@ function resetSettings() {
         store.applyConfig(result.data, true)
         store.applySession(await commands.getSession())
         store.progresses.clear()
-        await store.refreshDownloadedComics()
+        store.invalidateDownloadedLibrary({ clear: true })
         message.success('设置已重置')
       }),
   })
@@ -488,7 +489,7 @@ async function exportLogs() {
 
 /** 目录选择器确认后的书库位置变更；exportDir 由后端随配置自动同步 */
 function chooseDownloadDir(path: string) {
-  dialog.warning({
+  openDialogWithBack(dialog, {
     title: '更改漫画书库位置',
     content: `新下载将写入 ${path}；已下载内容保留在原处，不会被移动。`,
     positiveText: '确认更改',
@@ -880,7 +881,7 @@ const readingSummary = computed(() => {
           </button>
           <div v-if="advancedData" class="field-stack">
             <div class="field">
-              <label class="field-label">日志收集等级</label>
+              <label class="field-label">文件日志等级</label>
               <n-select v-model:value="logLevel" :options="logLevelOptions" />
             </div>
             <div class="row">

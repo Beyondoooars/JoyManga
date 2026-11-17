@@ -1,22 +1,22 @@
-import { invoke } from '@tauri-apps/api/core'
+import { commands, type CommandError, type ImportReport } from './bindings.ts'
 import { onOpenFile } from './utils/androidStorage.ts'
 
-async function call<T>(command: string, args: Record<string, unknown>): Promise<T> {
-  try { return await invoke<T>(command, args) }
-  catch (error) {
-    const detail = error as { err_title?: string; err_message?: string } | null
-    if (detail?.err_message) {
-      throw new Error(`${detail.err_title ?? '操作失败'}：${detail.err_message}`, { cause: error })
-    }
-    throw error
+type CommandResult<T> = Promise<{ status: 'ok'; data: T } | { status: 'error'; error: CommandError }>
+
+async function call<T>(command: CommandResult<T>): Promise<T> {
+  // typedError 对 CommandError 返回 error 对象，但 IPC 自身异常直接抛 Error。
+  const result = await command
+  if (result.status === 'error') {
+    throw new Error(`${result.error.err_title}：${result.error.err_message}`, { cause: result.error })
   }
+  return result.data
 }
 
-export interface ImportReport { imported: number; skipped: number; errors: string[] }
+export type { ImportReport }
 
 export const libraryApi = {
-  importComics: (paths: string[]) => call<ImportReport>('import_local_comics', { paths }),
-  removeComic: (comicId: number, deleteFiles = false) => call<void>('remove_library_comic', { comicId, deleteFiles }),
+  importComics: (paths: string[]) => call<ImportReport>(commands.importLocalComics(paths)),
+  removeComic: (comicId: number, deleteFiles = false) => call<null>(commands.removeLibraryComic(comicId, deleteFiles)),
 }
 
 /**

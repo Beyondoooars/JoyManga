@@ -192,7 +192,7 @@ fn is_app_private_library_path(path: &str) -> bool {
 }
 
 /// 当前配置 schema 版本。每次需要在已发布版本之上改写旧配置时递增。
-const CONFIG_SCHEMA_VERSION: u32 = 2;
+pub(crate) const CONFIG_SCHEMA_VERSION: u32 = 2;
 
 fn migrate_config_schema(value: &mut serde_json::Value) {
     let Some(object) = value.as_object_mut() else {
@@ -557,7 +557,7 @@ impl Config {
 
         Config {
             revision: 0,
-            schema_version: 1,
+            schema_version: CONFIG_SCHEMA_VERSION,
             api_domain_migration_pending: false,
             auto_login: false,
             android_storage_initialized: false,
