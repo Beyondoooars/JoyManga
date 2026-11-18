@@ -874,15 +874,20 @@ mod merged_archive_tests {
             .unwrap();
         zip.write_all(serde_json::to_string(&comic).unwrap().as_bytes())
             .unwrap();
-        for ch in chapters {
-            let dir = if chapter_layout {
+        let stored_chapters = if chapter_layout {
+            chapters
+        } else {
+            &chapters[..chapters.len().min(1)]
+        };
+        for ch in stored_chapters {
+            let prefix = if chapter_layout {
                 format!("[{:02}] {}/", ch.order, ch.chapter_title)
             } else {
                 String::new()
             };
             for page in [1, 2] {
                 zip.start_file(
-                    format!("{dir}/000{page}.jpg"),
+                    format!("{prefix}000{page}.jpg"),
                     zip::write::SimpleFileOptions::default(),
                 )
                 .unwrap();
