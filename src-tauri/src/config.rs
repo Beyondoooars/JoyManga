@@ -9,7 +9,7 @@ use specta::Type;
 use tauri::{AppHandle, Manager};
 
 const API_DOMAIN_1: &str = "www.cdnzack.cc";
-const API_DOMAIN_2: &str = "www.cdnhth.cc";
+const API_DOMAIN_2: &str = "www.cdnbtd.cc";
 const API_DOMAIN_3: &str = "www.cdnhth.net";
 const API_DOMAIN_4: &str = "www.cdnbea.net";
 const API_DOMAIN_5: &str = "www.cdn-mspjmapiproxy.xyz";

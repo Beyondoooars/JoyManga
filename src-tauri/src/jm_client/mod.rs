@@ -63,38 +63,11 @@ fn refresh_already_completed(state: &SessionState, epoch: u64, login_revision: u
 }
 
 #[derive(Debug)]
-struct RequestLoginRevision {
-    revision: u64,
-    source: anyhow::Error,
-}
-
-impl std::fmt::Display for RequestLoginRevision {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.source.fmt(f)
-    }
-}
-impl std::error::Error for RequestLoginRevision {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.source()
-    }
-}
-
-fn with_request_login_revision<T>(result: anyhow::Result<T>, revision: u64) -> anyhow::Result<T> {
-    result.map_err(|source| anyhow::Error::new(RequestLoginRevision { revision, source }))
-}
-
-fn request_login_revision(error: &anyhow::Error) -> Option<u64> {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<RequestLoginRevision>())
-        .map(|revision| revision.revision)
-}
-
-#[derive(Debug)]
-struct ApiFailure {
-    status: StatusCode,
-    authentication: bool,
-    unavailable: bool,
+pub(crate) struct ApiFailure {
+    pub(crate) status: StatusCode,
+    pub(crate) authentication: bool,
+    pub(crate) unavailable: bool,
+    login_revision: Option<u64>,
     message: String,
 }
 impl std::fmt::Display for ApiFailure {
@@ -103,6 +76,13 @@ impl std::fmt::Display for ApiFailure {
     }
 }
 impl std::error::Error for ApiFailure {}
+
+fn request_login_revision(error: &anyhow::Error) -> Option<u64> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<ApiFailure>())
+        .and_then(|failure| failure.login_revision)
+}
 
 fn extract_api_error_message(value: &serde_json::Value) -> Option<String> {
     ["errorMsg", "error_msg", "msg", "message"]
@@ -113,7 +93,16 @@ fn extract_api_error_message(value: &serde_json::Value) -> Option<String> {
         .map(|s| s.chars().take(MAX_ERROR_BODY_CHARS).collect())
 }
 
-fn api_failure(status: StatusCode, code: Option<i64>, message: &str) -> anyhow::Error {
+pub(crate) fn api_failure(status: StatusCode, code: Option<i64>, message: &str) -> anyhow::Error {
+    api_failure_with_revision(status, code, message, None)
+}
+
+fn api_failure_with_revision(
+    status: StatusCode,
+    code: Option<i64>,
+    message: &str,
+    login_revision: Option<u64>,
+) -> anyhow::Error {
     let authentication = status == StatusCode::UNAUTHORIZED
         || code == Some(401)
         || [
@@ -147,12 +136,12 @@ fn api_failure(status: StatusCode, code: Option<i64>, message: &str) -> anyhow::
         status,
         authentication,
         unavailable: gateway_unavailable || blocked,
+        login_revision,
         message,
     })
 }
 
-/// 网关/拦截/停放页面特征：换一条线路可能恢复，且报文不代表真正的业务响应。
-fn is_blocked_page(message: &str) -> bool {
+fn has_blocked_or_parked_marker(message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "网页防火墙",
         "Access denied",
@@ -161,15 +150,21 @@ fn is_blocked_page(message: &str) -> bool {
         "Cloudflare",
         "cf-error",
         "Just a moment",
+        "window.location.href=\"/lander\"",
+        "window.location.href='/lander'",
+        "location.href=\"/lander\"",
+        "location.href='/lander'",
     ];
-    if MARKERS.iter().any(|marker| message.contains(marker)) {
-        return true;
-    }
+    MARKERS.iter().any(|marker| message.contains(marker))
+}
+
+/// 网关/拦截/停放页面特征：换一条线路可能恢复，且报文不代表真正的业务响应。
+fn is_blocked_page(message: &str) -> bool {
     // 域名过期后常被停放商接管：HTTP 200 + 一个 HTML 跳转页（例如
     // `window.location.href="/lander"`）。业务响应一定是 JSON，出现 HTML 就说明
     // 这条线路已经不再提供服务。此前它被当成普通业务错误直接终止整轮请求，
     // 明明刷新后已有可用线路，却一条都不会被尝试。
-    is_html_page(message)
+    has_blocked_or_parked_marker(message) || is_html_page(message)
 }
 
 /// 报文是否是 HTML 文档而不是 API 的 JSON。
@@ -188,7 +183,7 @@ fn is_authentication_error(error: &anyhow::Error) -> bool {
     })
 }
 
-fn is_route_unreachable(error: &anyhow::Error) -> bool {
+pub(crate) fn is_route_unreachable(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         if let Some(e) = cause.downcast_ref::<ApiFailure>() {
             return e.unavailable;
@@ -375,27 +370,9 @@ impl JmClient {
                     )
                     .await?;
                 let status = http_resp.status();
-                if status != StatusCode::OK {
-                    return Err(api_failure(status, None, "获取设置响应失败"));
-                }
                 let body =
                     read_limited_text_body(http_resp, MAX_API_RESPONSE_BYTES, "设置响应体").await?;
-
-                let mut value: serde_json::Value =
-                    serde_json::from_str(&body).context("解析/setting响应失败")?;
-                // 响应可能是明文 JSON，也可能是 data 字段的加密包络
-                if let Some(data) = value.get("data").and_then(|v| v.as_str()) {
-                    if let Ok(decrypted) = decrypt_data(ts, data) {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&decrypted) {
-                            value = parsed;
-                        }
-                    }
-                }
-                value
-                    .get("jm3_version")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .context("/setting响应缺少jm3_version字段")
+                parse_setting_version(status, &body, ts)
             })
             .await;
 
@@ -549,7 +526,7 @@ impl JmClient {
                 } else {
                     anyhow::Error::from(e)
                 };
-                return with_request_login_revision(Err(error), login_revision);
+                return Err(error);
             }
         };
         let status = http_resp.status();
@@ -1316,16 +1293,7 @@ impl JmClient {
                 let status = http_resp.status();
                 let body =
                     read_limited_text_body(http_resp, MAX_API_RESPONSE_BYTES, "API响应体").await?;
-                if status != reqwest::StatusCode::OK {
-                    return Err(api_failure(status, None, "获取scramble_id失败"));
-                }
-                // 解析失败必须报错而不是猜默认值：块数错误会让反混淆后的图片
-                // “能打开但内容错乱”，静默写入会污染整章。
-                body.split("var scramble_id = ")
-                    .nth(1)
-                    .and_then(|s| s.split(';').next())
-                    .and_then(|s| s.trim().parse::<i64>().ok())
-                    .context("解析scramble_id失败，页面结构可能已变化")
+                parse_scramble_id_response(status, &body)
             }
         })
         .await
@@ -1600,10 +1568,84 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     left.cmp(&right)
 }
 
+fn parse_setting_version(status: StatusCode, body: &str, ts: u64) -> anyhow::Result<String> {
+    let snippet: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    if status != StatusCode::OK {
+        let detail = if snippet.trim().is_empty() {
+            "获取设置响应失败"
+        } else {
+            &snippet
+        };
+        return Err(api_failure(status, None, detail));
+    }
+
+    let mut value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => {
+            return Err(api_failure(status, None, &snippet).context("解析/setting响应失败"));
+        }
+    };
+    // 响应可能是明文 JSON，也可能是 data 字段的加密包络
+    if let Some(data) = value.get("data").and_then(|v| v.as_str()) {
+        if let Ok(decrypted) = decrypt_data(ts, data) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&decrypted) {
+                value = parsed;
+            }
+        }
+    }
+    value
+        .get("jm3_version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .context("/setting响应缺少jm3_version字段")
+}
+
+fn parse_scramble_id_response(status: StatusCode, body: &str) -> anyhow::Result<i64> {
+    let snippet: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    if status != StatusCode::OK {
+        let detail = if snippet.trim().is_empty() {
+            "获取scramble_id失败"
+        } else {
+            &snippet
+        };
+        return Err(api_failure(status, None, detail));
+    }
+    // 解析失败必须报错而不是猜默认值：块数错误会让反混淆后的图片
+    // “能打开但内容错乱”，静默写入会污染整章。
+    if let Some(scramble_id) = body
+        .split("var scramble_id = ")
+        .nth(1)
+        .and_then(|s| s.split(';').next())
+        .and_then(|s| s.trim().parse::<i64>().ok())
+    {
+        return Ok(scramble_id);
+    }
+    if has_blocked_or_parked_marker(body) {
+        return Err(anyhow::Error::new(ApiFailure {
+            status,
+            authentication: false,
+            unavailable: true,
+            login_revision: None,
+            message: snippet,
+        })
+        .context("获取scramble_id命中拦截或停放页"));
+    }
+    Err(anyhow!("解析scramble_id失败，页面结构可能已变化"))
+}
+
 async fn parse_encrypted_raw_data(
     http_resp: reqwest::Response,
     ts: u64,
     action_name: &str,
+) -> anyhow::Result<String> {
+    parse_encrypted_raw_data_with_revision(http_resp, ts, action_name, None).await
+}
+
+async fn parse_encrypted_raw_data_with_revision(
+    http_resp: reqwest::Response,
+    ts: u64,
+    action_name: &str,
+    login_revision: Option<u64>,
 ) -> anyhow::Result<String> {
     let status = http_resp.status();
     let body = read_limited_text_body(http_resp, MAX_API_RESPONSE_BYTES, "API响应体").await?;
@@ -1612,16 +1654,22 @@ async fn parse_encrypted_raw_data(
         Err(_) => {
             // 非 JSON 响应通常是网关/拦截页面：截取开头作为特征判断能否换线路
             let snippet: String = body.chars().take(MAX_ERROR_BODY_CHARS).collect();
-            return Err(api_failure(status, None, &snippet));
+            return Err(api_failure_with_revision(
+                status,
+                None,
+                &snippet,
+                login_revision,
+            ));
         }
     };
     let message = extract_api_error_message(&value);
     let code = value.get("code").and_then(serde_json::Value::as_i64);
     if status != StatusCode::OK || code != Some(200) {
-        return Err(api_failure(
+        return Err(api_failure_with_revision(
             status,
             code,
             message.as_deref().unwrap_or("服务器未返回成功状态"),
+            login_revision,
         ));
     }
     let jm_resp: JmResp = serde_json::from_value(value).context("服务器响应包络格式无效")?;
@@ -1637,7 +1685,7 @@ pub(crate) async fn parse_encrypted_resp<T: serde::de::DeserializeOwned>(
     ts: u64,
     action_name: &str,
 ) -> anyhow::Result<T> {
-    parse_encrypted_resp_with_revision(http_resp, ts, action_name, 0).await
+    parse_encrypted_resp_inner(http_resp, ts, action_name, None).await
 }
 
 async fn parse_encrypted_resp_with_revision<T: serde::de::DeserializeOwned>(
@@ -1646,12 +1694,18 @@ async fn parse_encrypted_resp_with_revision<T: serde::de::DeserializeOwned>(
     action_name: &str,
     login_revision: u64,
 ) -> anyhow::Result<T> {
-    let result: anyhow::Result<T> = async {
-        let data = parse_encrypted_raw_data(http_resp, ts, action_name).await?;
-        serde_json::from_str::<T>(&data).context("解密后的响应字段格式无效")
-    }
-    .await;
-    with_request_login_revision(result, login_revision)
+    parse_encrypted_resp_inner(http_resp, ts, action_name, Some(login_revision)).await
+}
+
+async fn parse_encrypted_resp_inner<T: serde::de::DeserializeOwned>(
+    http_resp: reqwest::Response,
+    ts: u64,
+    action_name: &str,
+    login_revision: Option<u64>,
+) -> anyhow::Result<T> {
+    let data =
+        parse_encrypted_raw_data_with_revision(http_resp, ts, action_name, login_revision).await?;
+    serde_json::from_str::<T>(&data).context("解密后的响应字段格式无效")
 }
 
 #[cfg(test)]
@@ -1840,6 +1894,7 @@ mod review_regression_tests {
 
     #[test]
     fn same_account_login_deduplicates_waiting_refresh() {
+        use crate::extensions::AnyhowErrorToStringChain;
         let mut state = SessionState {
             epoch: 3,
             login_revision: 1,
@@ -1852,12 +1907,165 @@ mod review_regression_tests {
         assert!(!refresh_already_completed(&state, 3, 2));
         // 迟到的 401 使用请求发出时的代际，不能重新采样已刷新的 revision。
         assert!(refresh_already_completed(&state, 3, 1));
-        let error = with_request_login_revision::<()>(Err(anyhow!("未登录")), 1).unwrap_err();
-        assert_eq!(request_login_revision(&error), Some(1));
-        let error = error.context("收藏操作失败");
-        assert_eq!(error.to_string(), "收藏操作失败");
-        assert_eq!(request_login_revision(&error), Some(1));
-        let newer_error = with_request_login_revision::<()>(Err(anyhow!("未登录")), 2).unwrap_err();
-        assert_eq!(request_login_revision(&newer_error), Some(2));
+
+        for unavailable_err in [
+            api_failure_with_revision(StatusCode::METHOD_NOT_ALLOWED, None, "", Some(1)),
+            api_failure_with_revision(
+                StatusCode::OK,
+                None,
+                r#"<!DOCTYPE html><html><head><script>window.onload=function(){window.location.href="/lander"}</script></head></html>"#,
+                Some(1),
+            ),
+            api_failure_with_revision(StatusCode::FORBIDDEN, None, "forbidden", Some(1)),
+            api_failure_with_revision(StatusCode::BAD_GATEWAY, None, "bad gateway", Some(1)),
+        ] {
+            assert!(is_route_unreachable(&unavailable_err));
+            let wrapped = unavailable_err.context("获取每周必看信息失败");
+            assert!(is_route_unreachable(&wrapped));
+        }
+
+        let error =
+            api_failure_with_revision(StatusCode::UNAUTHORIZED, Some(401), "未登录", Some(2));
+        assert!(is_authentication_error(&error));
+        assert_eq!(request_login_revision(&error), Some(2));
+        let wrapped = error.context("收藏操作失败");
+        assert_eq!(wrapped.to_string(), "收藏操作失败");
+        assert!(is_authentication_error(&wrapped));
+        assert_eq!(request_login_revision(&wrapped), Some(2));
+        let chain = wrapped.to_string_chain();
+        let lines: Vec<&str> = chain.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_ne!(lines[0], lines[1]);
+    }
+
+    #[tokio::test]
+    async fn parse_encrypted_resp_with_revision_preserves_route_and_auth_failures() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn send_mock_response(
+            status_line: &str,
+            content_type: &str,
+            body: &str,
+        ) -> reqwest::Response {
+            let raw = format!(
+                "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut req = [0u8; 2048];
+                let _ = socket.read(&mut req).await;
+                socket.write_all(raw.as_bytes()).await.unwrap();
+            });
+            let resp = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .get(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            server.await.unwrap();
+            resp
+        }
+
+        let resp_405 =
+            send_mock_response("HTTP/1.1 405 Method Not Allowed", "text/plain", "").await;
+        let err_405 = parse_encrypted_resp_with_revision::<serde_json::Value>(
+            resp_405,
+            1_700_000_000,
+            "测试",
+            7,
+        )
+        .await
+        .unwrap_err();
+        assert!(is_route_unreachable(&err_405));
+
+        let resp_lander = send_mock_response(
+            "HTTP/1.1 200 OK",
+            "text/html",
+            r#"<!DOCTYPE html><html><head><script>window.onload=function(){window.location.href="/lander"}</script></head></html>"#,
+        )
+        .await;
+        let err_lander = parse_encrypted_resp_with_revision::<serde_json::Value>(
+            resp_lander,
+            1_700_000_000,
+            "测试",
+            7,
+        )
+        .await
+        .unwrap_err();
+        assert!(is_route_unreachable(&err_lander));
+
+        let resp_401 = send_mock_response(
+            "HTTP/1.1 401 Unauthorized",
+            "application/json",
+            r#"{"code":401,"msg":"未登录"}"#,
+        )
+        .await;
+        let err_401 = parse_encrypted_resp_with_revision::<serde_json::Value>(
+            resp_401,
+            1_700_000_000,
+            "测试",
+            7,
+        )
+        .await
+        .unwrap_err();
+        assert!(is_authentication_error(&err_401));
+        assert_eq!(request_login_revision(&err_401), Some(7));
+    }
+
+    #[test]
+    fn setting_and_scramble_parsers_switch_routes_only_for_unavailable_pages() {
+        let setting_lander = parse_setting_version(
+            StatusCode::OK,
+            r#"<!DOCTYPE html><html><head><script>window.onload=function(){window.location.href="/lander"}</script></head></html>"#,
+            1_700_000_000,
+        )
+        .unwrap_err();
+        assert!(is_route_unreachable(&setting_lander));
+
+        let setting_405 =
+            parse_setting_version(StatusCode::METHOD_NOT_ALLOWED, "", 1_700_000_000).unwrap_err();
+        assert!(is_route_unreachable(&setting_405));
+
+        let setting_bad_json =
+            parse_setting_version(StatusCode::OK, "not json payload", 1_700_000_000).unwrap_err();
+        assert!(!is_route_unreachable(&setting_bad_json));
+
+        let setting_ok =
+            parse_setting_version(StatusCode::OK, r#"{"jm3_version":"2.1.14"}"#, 1_700_000_000)
+                .unwrap();
+        assert_eq!(setting_ok, "2.1.14");
+
+        let scramble_ok = parse_scramble_id_response(
+            StatusCode::OK,
+            "<script>var scramble_id = 220980;</script>",
+        )
+        .unwrap();
+        assert_eq!(scramble_ok, 220980);
+
+        let scramble_lander = parse_scramble_id_response(
+            StatusCode::OK,
+            r#"<!DOCTYPE html><html><head><script>window.onload=function(){window.location.href="/lander"}</script></head></html>"#,
+        )
+        .unwrap_err();
+        assert!(is_route_unreachable(&scramble_lander));
+
+        let scramble_cf = parse_scramble_id_response(
+            StatusCode::OK,
+            "<html><title>Just a moment...</title></html>",
+        )
+        .unwrap_err();
+        assert!(is_route_unreachable(&scramble_cf));
+
+        let scramble_changed = parse_scramble_id_response(
+            StatusCode::OK,
+            "<html><body><div>template updated</div></body></html>",
+        )
+        .unwrap_err();
+        assert!(!is_route_unreachable(&scramble_changed));
     }
 }

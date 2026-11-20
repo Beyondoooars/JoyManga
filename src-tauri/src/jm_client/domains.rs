@@ -118,55 +118,101 @@ impl JmClient {
         )
     }
 
+    /// 当前配置对应的候选线路顺序（不发起网络请求，供实际发包与连接检查复用）。
+    pub(crate) fn api_domain_candidates_for(&self, config: &crate::config::Config) -> Vec<String> {
+        let current = config.get_api_domain();
+        let last_success = self.last_success_domain.read().clone();
+        let updated_domains = self.updated_api_domains.read().clone();
+        build_api_domain_candidates(
+            config.api_domain_mode,
+            &current,
+            last_success.as_deref(),
+            &updated_domains,
+            &self.domain_health,
+        )
+    }
+
+    /// 当前配置优先使用的主线路（与实际请求的首条候选一致）。
+    pub(crate) fn primary_api_domain(&self, config: &crate::config::Config) -> String {
+        self.api_domain_candidates_for(config)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| config.get_api_domain())
+    }
+
     /// 当前请求的候选线路（按顺序尝试）：
-    /// 最近成功的线路 → 配置线路 → 动态获取的最新域名 → 内置预设。
+    /// 最近成功的线路 → 动态获取的最新域名 / 有效配置线路 → 其余兜底预设。
     /// 自定义线路不参与自动切换。
     pub(super) fn api_domain_candidates(&self) -> Vec<String> {
         // 域名列表长时间未刷新时顺带触发后台保鲜；不会阻塞当前请求。
         self.spawn_domain_refresh_if_stale();
         let config = self.app.get_config();
         let config = config.read();
-        let current = config.get_api_domain();
-        if config.api_domain_mode == ApiDomainMode::Custom {
-            return vec![current];
+        self.api_domain_candidates_for(&config)
+    }
+}
+
+fn build_api_domain_candidates(
+    mode: ApiDomainMode,
+    current: &str,
+    last_success: Option<&str>,
+    updated_domains: &[String],
+    domain_health: &crate::domain_health::DomainHealthStore,
+) -> Vec<String> {
+    if mode == ApiDomainMode::Custom {
+        return vec![current.to_string()];
+    }
+    let mut list: Vec<String> = Vec::new();
+    let prefer_last_success = last_success.is_some_and(|domain| !domain_health.is_failing(domain));
+    if prefer_last_success {
+        if let Some(last) = last_success {
+            push_unique(&mut list, last);
         }
-        let mut list: Vec<String> = Vec::new();
-        if let Some(last) = self.last_success_domain.read().clone() {
-            push_unique(&mut list, &last);
+    }
+    // 只有当动态列表为空，或当前配置预设仍在官方最新列表中且未持续失效时，
+    // 才把配置线路放在动态域名前面；已从官方列表淘汰的预设退为兜底，
+    // 避免冷启动或换网后总是先撞一遍停放/过期域名。
+    let current_in_updated = updated_domains.iter().any(|domain| domain == current);
+    let prefer_current =
+        (updated_domains.is_empty() || current_in_updated) && !domain_health.is_failing(current);
+    if prefer_current {
+        push_unique(&mut list, current);
+    }
+    for domain in updated_domains {
+        push_unique(&mut list, domain);
+    }
+    if let Some(last) = last_success {
+        push_unique(&mut list, last);
+    }
+    // 放在动态域名之后：已淘汰或实测失效的配置线路仍保留为兜底，但不再优先。
+    push_unique(&mut list, current);
+    for mode in [
+        ApiDomainMode::Domain2,
+        ApiDomainMode::Domain3,
+        ApiDomainMode::Domain4,
+        ApiDomainMode::Domain1,
+        ApiDomainMode::Domain5,
+    ] {
+        if let Some(preset) = mode.preset_domain() {
+            push_unique(&mut list, preset);
         }
-        // 配置线路已确认失效（停放页/拦截/连不上）时不要继续排在动态域名前面：
-        // 每条请求都先撞它一次，用户要多吃一次往返甚至一次 12 秒超时。
-        if !self.domain_health.is_failing(&current) {
-            push_unique(&mut list, &current);
-        }
-        for domain in self.updated_api_domains.read().iter() {
-            push_unique(&mut list, domain);
-        }
-        // 放在动态域名之后：实测失效的配置线路仍保留为兜底，但不再优先。
-        push_unique(&mut list, &current);
-        for mode in [
-            ApiDomainMode::Domain2,
-            ApiDomainMode::Domain3,
-            ApiDomainMode::Domain4,
-            ApiDomainMode::Domain1,
-            ApiDomainMode::Domain5,
-        ] {
-            if let Some(preset) = mode.preset_domain() {
-                push_unique(&mut list, preset);
-            }
-        }
-        // 健康度排序：冷却中的线路排到最后，其余快的优先。
-        // 首位（最近成功的线路 / 用户指定线路）保持不动，只重排其余候选。
+    }
+    // 健康度排序：冷却中的线路排到最后，其余快的优先。
+    // 首位在确认为健康的“最近成功线路 / 优先配置线路”时保持不动，只重排其余候选；
+    // 若首位来自动态列表且已进入冷却，则整体重排让健康线路顶上。
+    if (prefer_last_success || prefer_current) && list.len() > 1 {
         let mut sorted_tail = list[1..].to_vec();
-        self.domain_health.sort_candidates(&mut sorted_tail);
+        domain_health.sort_candidates(&mut sorted_tail);
         list.truncate(1);
         list.extend(sorted_tail);
-        // 候选上限。原先只留 4 条，而动态域名列表本身就有 4 条，加上配置线路后
-        // 被截断，官方刚下发的新线路反而试不到（旧线路全部过期时会一直失败）。
-        // 放宽到 8 条：读接口换线是顺序尝试，实际很少走满。
-        list.truncate(8);
-        list
+    } else {
+        domain_health.sort_candidates(&mut list);
     }
+    // 候选上限。原先只留 4 条，而动态域名列表本身就有 4 条，加上配置线路后
+    // 被截断，官方刚下发的新线路反而试不到（旧线路全部过期时会一直失败）。
+    // 放宽到 8 条：读接口换线是顺序尝试，实际很少走满。
+    list.truncate(8);
+    list
 }
 
 fn push_unique(list: &mut Vec<String>, domain: &str) {
@@ -290,8 +336,11 @@ async fn fetch_domain_list(client: &reqwest::Client, url: &str) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        is_plausible_domain, parse_cached_domains, push_unique, API_DOMAINS_CACHE_MAX_ENTRIES,
+        build_api_domain_candidates, is_plausible_domain, parse_cached_domains, push_unique,
+        ApiDomainMode, API_DOMAINS_CACHE_MAX_ENTRIES,
     };
+    use crate::domain_health::DomainHealthStore;
+    use std::time::Duration;
 
     #[test]
     fn plausible_domain_rejects_url_components() {
@@ -344,5 +393,80 @@ mod tests {
         let (parsed, updated_at) = parse_cached_domains(&raw);
         assert_eq!(parsed.len(), API_DOMAINS_CACHE_MAX_ENTRIES);
         assert_eq!(updated_at, Some(1));
+    }
+
+    #[test]
+    fn retired_preset_yields_to_dynamic_domains() {
+        let health = DomainHealthStore::new();
+        let updated = vec![
+            "www.cdnbtd.cc".to_string(),
+            "www.cdnutc.cc".to_string(),
+            "www.cdngwc.net".to_string(),
+        ];
+        let candidates = build_api_domain_candidates(
+            ApiDomainMode::Domain3,
+            "www.cdnhth.net",
+            None,
+            &updated,
+            &health,
+        );
+        assert_eq!(
+            &candidates[..3],
+            &["www.cdnbtd.cc", "www.cdnutc.cc", "www.cdngwc.net"]
+        );
+        assert!(candidates.contains(&"www.cdnhth.net".to_string()));
+    }
+
+    #[test]
+    fn active_preset_and_empty_pool_keep_configured_domain_first() {
+        let health = DomainHealthStore::new();
+        let updated = vec!["www.cdnbtd.cc".to_string(), "www.cdnutc.cc".to_string()];
+        let active = build_api_domain_candidates(
+            ApiDomainMode::Domain2,
+            "www.cdnbtd.cc",
+            None,
+            &updated,
+            &health,
+        );
+        assert_eq!(active[0], "www.cdnbtd.cc");
+
+        let empty_pool = build_api_domain_candidates(
+            ApiDomainMode::Domain3,
+            "www.cdnhth.net",
+            None,
+            &[],
+            &health,
+        );
+        assert_eq!(empty_pool[0], "www.cdnhth.net");
+    }
+
+    #[test]
+    fn custom_mode_never_switches_and_cooling_dynamic_domain_demotes() {
+        let health = DomainHealthStore::new();
+        let updated = vec!["www.cdnbtd.cc".to_string(), "www.cdnutc.cc".to_string()];
+        assert_eq!(
+            build_api_domain_candidates(
+                ApiDomainMode::Custom,
+                "custom.example.com",
+                Some("www.cdnbtd.cc"),
+                &updated,
+                &health,
+            ),
+            vec!["custom.example.com"]
+        );
+
+        health.record_failure("www.cdnbtd.cc");
+        health.record_failure("www.cdnbtd.cc");
+        health.record_success("www.cdnutc.cc", Duration::from_millis(50));
+        let demoted = build_api_domain_candidates(
+            ApiDomainMode::Domain3,
+            "www.cdnhth.net",
+            None,
+            &updated,
+            &health,
+        );
+        assert_eq!(demoted[0], "www.cdnutc.cc");
+        let btd_pos = demoted.iter().position(|d| d == "www.cdnbtd.cc").unwrap();
+        assert!(btd_pos > 0);
     }
 }

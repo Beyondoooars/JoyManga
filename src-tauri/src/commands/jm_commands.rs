@@ -321,12 +321,16 @@ pub async fn check_network(
     config: crate::config::Config,
     comic_id: Option<i64>,
 ) -> CommandResult<crate::network_check::NetworkCheckReport> {
-    let (domain_pool_count, domain_pool_updated_at) = app.get_jm_client().domain_pool_status();
+    let client = app.get_jm_client();
+    let (domain_pool_count, domain_pool_updated_at) = client.domain_pool_status();
     // 诊断应与正常请求使用同一个（可能已被官方升级的）接口版本号
-    let app_version = app.get_jm_client().current_app_version();
-    let domain_health = app
-        .get_jm_client()
-        .domain_health_status(&config.get_api_domain());
+    let app_version = client.current_app_version();
+    let api_candidates = client.api_domain_candidates_for(&config);
+    let primary_domain = api_candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| config.get_api_domain());
+    let domain_health = client.domain_health_status(&primary_domain);
     crate::network_check::check(
         config,
         comic_id,
@@ -334,6 +338,7 @@ pub async fn check_network(
         domain_pool_updated_at,
         &app_version,
         domain_health,
+        api_candidates,
     )
     .await
     .map_err(|error| CommandError::from("连接检查失败", error))
@@ -346,7 +351,11 @@ pub async fn get_api_domain_status(
 ) -> CommandResult<crate::network_check::NetworkProbe> {
     let client = app.get_jm_client();
     let (domain_pool_count, domain_pool_updated_at) = client.domain_pool_status();
-    let current_api_domain = app.get_config().read().get_api_domain();
+    let current_api_domain = {
+        let config = app.get_config();
+        let config = config.read();
+        client.primary_api_domain(&config)
+    };
     let (failures, cooling_down) = client.domain_health_status(&current_api_domain);
     Ok(crate::network_check::domain_probe(
         &current_api_domain,

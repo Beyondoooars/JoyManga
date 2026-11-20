@@ -138,6 +138,17 @@ pub fn classify(error: &anyhow::Error) -> CommandErrorKind {
         {
             return CommandErrorKind::Cancelled;
         }
+        if let Some(failure) = cause.downcast_ref::<crate::jm_client::ApiFailure>() {
+            if failure.authentication {
+                return CommandErrorKind::Auth;
+            }
+            if failure.unavailable {
+                return CommandErrorKind::Network;
+            }
+            if matches!(failure.status.as_u16(), 404 | 410) {
+                return CommandErrorKind::NotFound;
+            }
+        }
         if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
             if let Some(kind) = kind_for_reqwest_error(err) {
                 return kind;
@@ -268,6 +279,14 @@ pub(crate) fn reqwest_error_in_middleware(
 
 fn failure_kind(error: &anyhow::Error) -> FailureKind {
     for cause in error.chain() {
+        if let Some(failure) = cause.downcast_ref::<crate::jm_client::ApiFailure>() {
+            if failure.authentication || matches!(failure.status.as_u16(), 404 | 410) {
+                return FailureKind::Business;
+            }
+            if failure.unavailable {
+                return FailureKind::Upstream;
+            }
+        }
         if let Some(err) = cause.downcast_ref::<reqwest::Error>() {
             return failure_kind_for_reqwest(err);
         }
@@ -593,5 +612,42 @@ mod tests {
             classify_failure(&wrapped, TaskStage::Downloading).kind,
             FailureKind::Upstream
         );
+    }
+
+    #[test]
+    fn api_failure_classification_handles_route_auth_not_found_and_business() {
+        use crate::jm_client::api_failure;
+        use reqwest::StatusCode;
+
+        let err_401 = api_failure(StatusCode::UNAUTHORIZED, Some(401), "未登录");
+        assert_eq!(classify(&err_401), CommandErrorKind::Auth);
+        let fail_401 = classify_failure(&err_401, TaskStage::FetchMeta);
+        assert_eq!(fail_401.kind, FailureKind::Business);
+        assert!(!fail_401.retryable);
+
+        let err_405 = api_failure(StatusCode::METHOD_NOT_ALLOWED, None, "");
+        assert_eq!(classify(&err_405), CommandErrorKind::Network);
+        let fail_405 = classify_failure(&err_405, TaskStage::FetchMeta);
+        assert_eq!(fail_405.kind, FailureKind::Upstream);
+        assert!(fail_405.retryable);
+
+        let err_lander = api_failure(
+            StatusCode::OK,
+            None,
+            r#"<!DOCTYPE html><html><head><script>window.onload=function(){window.location.href="/lander"}</script></head></html>"#,
+        );
+        assert_eq!(classify(&err_lander), CommandErrorKind::Network);
+        let fail_lander = classify_failure(&err_lander, TaskStage::FetchMeta);
+        assert_eq!(fail_lander.kind, FailureKind::Upstream);
+        assert!(fail_lander.retryable);
+
+        let err_404 = api_failure(StatusCode::NOT_FOUND, Some(404), "资源不存在");
+        assert_eq!(classify(&err_404), CommandErrorKind::NotFound);
+        let fail_404 = classify_failure(&err_404, TaskStage::FetchMeta);
+        assert_eq!(fail_404.kind, FailureKind::Business);
+        assert!(!fail_404.retryable);
+
+        let err_wrong_pwd = api_failure(StatusCode::OK, Some(200), "帳號或密碼錯誤");
+        assert_eq!(classify(&err_wrong_pwd), CommandErrorKind::Auth);
     }
 }

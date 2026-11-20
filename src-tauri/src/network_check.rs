@@ -398,6 +398,9 @@ fn completed(
     }
 }
 
+const API_CHECK_MAX_CANDIDATES: usize = 4;
+const API_CHECK_TOTAL_BUDGET: Duration = Duration::from_secs(15);
+
 pub async fn check(
     config: Config,
     comic_id: Option<i64>,
@@ -405,6 +408,7 @@ pub async fn check(
     domain_pool_updated_at: Option<u64>,
     app_version: &str,
     domain_health: (u32, bool),
+    api_candidates: Vec<String>,
 ) -> anyhow::Result<NetworkCheckReport> {
     config.validate()?;
     // 连接检查期间网络路径变化时整份报告作废，避免两条路径的结果混在一起。
@@ -416,24 +420,84 @@ pub async fn check(
                 .timeout(Duration::from_secs(8)),
         )?
         .build()?;
+    let configured_domain = config.get_api_domain();
+    let candidates: Vec<String> = if api_candidates.is_empty() {
+        vec![configured_domain.clone()]
+    } else {
+        api_candidates
+            .into_iter()
+            .take(API_CHECK_MAX_CANDIDATES)
+            .collect()
+    };
+    let primary_domain = candidates[0].clone();
     let api = async {
         let started = Instant::now();
-        let result = async {
-            let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            // 验证无账号数据的漫画信息接口，不拿域名首页或任意 HTTP 响应代替业务可用性。
-            let response = client.get(format!("https://{}/week", config.get_api_domain()))
-                .header("token", crate::jm_client::crypto::md5_hex(&format!("{ts}{}", crate::jm_client::APP_TOKEN_SECRET)))
-                .header("tokenparam", format!("{ts},{app_version}"))
-                .header("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-                .send().await?;
-            crate::jm_client::parse_encrypted_resp::<GetWeeklyInfoRespData>(response, ts, "信息连接检查").await?;
-            Ok::<_,anyhow::Error>(())
-        }.await;
-        completed(
-            "漫画信息",
-            started,
-            result,
-            "已验证信息接口响应；登录状态未改变。",
+        let budget = tokio::time::Instant::now() + API_CHECK_TOTAL_BUDGET;
+        let mut last_error: Option<anyhow::Error> = None;
+        let mut verified_domain: Option<String> = None;
+        for domain in &candidates {
+            if tokio::time::Instant::now() >= budget {
+                break;
+            }
+            let result = async {
+                let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                // 验证无账号数据的漫画信息接口，不拿域名首页或任意 HTTP 响应代替业务可用性。
+                let response = client
+                    .get(format!("https://{domain}/week"))
+                    .header(
+                        "token",
+                        crate::jm_client::crypto::md5_hex(&format!(
+                            "{ts}{}",
+                            crate::jm_client::APP_TOKEN_SECRET
+                        )),
+                    )
+                    .header("tokenparam", format!("{ts},{app_version}"))
+                    .header(
+                        "user-agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                    )
+                    .send()
+                    .await?;
+                crate::jm_client::parse_encrypted_resp::<GetWeeklyInfoRespData>(
+                    response,
+                    ts,
+                    "信息连接检查",
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    verified_domain = Some(domain.clone());
+                    break;
+                }
+                Err(error) if crate::jm_client::is_route_unreachable(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    break;
+                }
+            }
+        }
+        let (probe_result, success_msg) = match verified_domain.as_deref() {
+            Some(domain) if domain != configured_domain => (
+                Ok(()),
+                format!("已通过自动线路 {domain} 验证信息接口响应；登录状态未改变。"),
+            ),
+            Some(domain) => (
+                Ok(()),
+                format!("已验证信息接口响应（{domain}）；登录状态未改变。"),
+            ),
+            None => (
+                Err(last_error.unwrap_or_else(|| anyhow::anyhow!("信息连接检查超时或无可用线路"))),
+                String::new(),
+            ),
+        };
+        (
+            completed("漫画信息", started, probe_result, &success_msg),
+            verified_domain,
         )
     };
     let image = async {
@@ -447,7 +511,7 @@ pub async fn check(
         };
         let started = Instant::now();
         let result = async {
-            let referer = format!("https://{}", config.get_api_domain());
+            let referer = format!("https://{primary_domain}");
             let url = format!(
                 "https://{}/media/albums/{id}_3x4.jpg",
                 config.get_image_domain()
@@ -475,15 +539,19 @@ pub async fn check(
             "已验证封面图片下载；耗时不代表整章下载速度。",
         )
     };
-    let (api, image) = tokio::join!(api, image);
+    let ((api, verified_domain), image) = tokio::join!(api, image);
     anyhow::ensure!(
         crate::network_state::epoch_is_current(network_epoch),
         "检查期间网络路径已变化（VPN/代理/默认网络切换），请重新检查"
     );
-    let current_api_domain = config.get_api_domain();
-    let (failures, cooling_down) = domain_health;
+    let active_domain = verified_domain.as_deref().unwrap_or(&primary_domain);
+    let (failures, cooling_down) = if active_domain == primary_domain {
+        domain_health
+    } else {
+        (0, false)
+    };
     let domain = domain_probe(
-        &current_api_domain,
+        active_domain,
         domain_pool_count,
         domain_pool_updated_at,
         failures,
