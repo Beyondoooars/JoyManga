@@ -5,150 +5,156 @@
 </p>
 
 <p align="center">
-  <strong>基于 Tauri v2 + Rust + Vue 3 的 Android 漫画下载与离线阅读客户端</strong>
+  <strong>基于 Tauri v2 + Rust + Vue 3 的 Android 漫画下载、CBZ 书库管理与离线阅读客户端</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-v0.3.19-ff69b4.svg" alt="Version 0.3.19" />
-  <img src="https://img.shields.io/badge/Platform-Android-0969da.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/Platform-Android%20(arm64--v8a)-0969da.svg" alt="Platform Android" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20Tauri%20v2-ea580c.svg" alt="Tauri v2" />
   <img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Naive%20UI-10b981.svg" alt="Vue 3" />
 </p>
 
 ---
 
-## 📌 项目概述
+## 简介
 
-**JoyManga** 是一套面向 Android 的全功能漫画工具。它不仅具备工业级的批量高速下载引擎，还深度集成了现代化离线漫画阅读器与书库管理系统。
+**JoyManga** 是一款面向 64 位 Android 设备（`arm64-v8a`，Android 7.0+）的开源漫画下载与离线阅读应用。
 
-底层基于 **Rust** 编写核心异步运行时与反混淆切片图像还原算法，兼顾极致性能与极低内存占用；前端采用 **Vue 3 + Naive UI + 原生 CSS（Design Tokens）**，提供适配手机与平板的操作界面，在 Android 设备上获得流畅的原生级体验。
-
----
-
-## ⚡ 核心功能一览
-
-### 1. 🚀 高性能并发下载与网络调度
-- **反混淆极速解码**：基于 Rust 高性能并行算法，毫秒级完成切片混淆图片的重组与无损保存。
-- **双层并发调度**：章节级与图片级独立并发控制，支持自定义并发数；所有章节共用图片总上限，兼顾下载速度与稳定性。
-- **断点续传与持久化队列**：下载进度实时落盘，异常退出或重启后自动恢复未完成任务。
-- **多线路测速与 CDN 分流**：内置多组 API 与图片 CDN 线路，支持图片并发吞吐测速、一键选用最快线路或手动切换。
-- **网络代理支持**：原生支持系统网络、HTTP 代理及直连模式。VPN 切换后重建连接并清除旧路径的线路健康记录；VPN 是否提速以实际测速为准。
-
-### 2. 📖 内置轻量漫画阅读器
-- **单页与滚动阅读**：直接打开已归档的 CBZ 或下载目录，支持单页翻页与上下滚动两种模式；单页支持「适合宽度 / 适合高度 / 适合屏幕 / 原始尺寸」四种适配，以及双击/双指缩放（最高 5x）与放大平移；滚动模式通过窗口化图片卸载降低长章节内存占用。
-- **手势与按键翻页**：跟手滑动与边界回弹，支持外接键盘 `←/→`、`A/D`、空格及 `Esc`，并支持 Android 音量键翻页与阅读常亮。
-- **进度控制与微调**：底部悬浮进度条支持拖动定位、页码显示，以及前后逐页按钮；章末自动衔接下一章。
-- **阅读记忆与书签**：自动记忆每部漫画的已读章节与页码，支持在任意页添加书签并快速跳转。
-
-### 3. 🗄️ 本地书库与整本 CBZ 自动归档
-- **整本 CBZ 自动合并**：下载完成后自动将漫画已下载章节合并打包为单体 `.cbz` 文件，告别零散文件夹；旧版分话目录也可在书库中一键整理为整本 CBZ。
-- **元数据内嵌（ComicInfo.xml）**：归档的 CBZ 自动嵌入标题、作者、分类标签、话数等标准元数据，与 Tachiyomi、Mihon、Komga、Kavita 等第三方服务器及阅读器无缝衔接。
-- **外部导入与系统打开**：支持将本地已有的 `.cbz` 文件或图片文件夹导入书库，并支持从系统文件管理器点击「用 JoyManga 打开」导入阅读。
-- **备份还原与脱敏诊断**：支持设置、任务队列、阅读进度与书签的备份/恢复，以及自动脱敏的诊断日志包导出。
-
-### 4. 📱 Android 移动端专属优化
-- **固化统一证书签名**：项目固化了标准化发布证书，本地构建与 GitHub CI 云端打包证书完全同源，**版本更新直接无缝覆盖安装，绝无签名冲突报错**。
-- **单一 arm64-v8a 架构**：剔除冗余 ABI，包体轻巧精炼，大幅降低手机存储开销。
-- **公共存储卸载保护**：漫画默认下载至系统公共目录 `Download/JoyManga`，卸载或更新应用时**漫画文件绝不丢失**，支持第三方应用直接访问。
-- **移动交互细节**：适配沉浸式全面屏、多级返回手势拦截、后台下载防系统休眠与通知中心进度推送。
+- **后端核心**：基于 Rust 与 Tokio 异步运行时，负责章节并发抓取、切片图像反混淆还原、整本 CBZ 归档打包与本地书库索引维护。
+- **前端界面**：基于 Vue 3、Pinia、Naive UI 与原生 CSS（Design Tokens），围绕手机与平板触控交互设计。
+- **原生集成**：通过 Kotlin 原生桥接处理 Android 前台下载服务、公共存储（`Download/JoyManga`）读写、SAF 导入导出、系统网络/VPN 监测及应用内更新安装。
 
 ---
 
-## 📥 下载与安装
+## 主要功能
 
-请前往 [GitHub Releases](https://github.com/Beyondoooars/JoyManga/releases) 获取经过验证的稳定版本：
+### 浏览、搜索与账号
 
-| 平台 | 文件包格式 | 适用场景与说明 |
+- **简繁双变体搜索与筛选**：内置 OpenCC 简繁词典，搜索时自动补全繁简体变体并合并去重结果，支持按语言/标签二次过滤。
+- **每周必看与详情页**：按期数与分类浏览每周推荐作品，支持查看详情与按话选择下载。
+- **账号、收藏与签到**：支持账号登录、云端收藏同步（含多文件夹查看与批量下载收藏）及每日签到日历统计。
+
+### 下载与网络调度
+
+- **并行反混淆与双层并发**：使用 Rayon + Rust `image` 并行重组混淆切片；支持设置章节并发数与单话图片并发数（所有章节共用图片总并发上限）。
+- **任务队列落盘与断点续传**：下载进度、阶段状态与失败明细实时写入本地日志/状态文件，应用重启或异常中断后可恢复未完成任务，支持按任务暂停、继续、重试失败与批量取消。
+- **多线路测速与自动切换**：内置多组 API 与图片 CDN 线路，可并发下载样本测试实际吞吐量（MB/s）并一键切换最快线路，也支持自定义域名。
+- **代理管理与网络状态感知**：支持跟随系统网络、直接连接与手动 HTTP 代理。检测到系统 VPN 开启时会自动旁路手动代理并清空旧连接池；Wi-Fi 与移动数据切换时自动重置网络状态，开启「仅 Wi-Fi 下载」后在计费网络下自动暂停。
+
+### 本地书库与整本 CBZ 归档
+
+- **自动整本合并**：漫画下载完成后，通过临时文件与原子替换链自动将已下载章节合并为单体 `.cbz` 文件；历史遗留的分话目录可在书库卡片菜单中一键整理为整本 CBZ。
+- **第三方阅读器兼容**：CBZ 采用标准 ZIP 容器以 `STORE`（无压缩）写入图片，并在根目录嵌入包含标题、作者、标签与话数信息的 `ComicInfo.xml`，兼容 Tachiyomi、Mihon、Kavita、Komga 等客户端与服务器。
+- **外部导入与系统打开**：支持从本地文件或目录批量导入 `.cbz` 与图片漫画，也支持在系统文件管理器中通过「用 JoyManga 打开」直接导入并进入阅读。
+- **备份还原与诊断包导出**：支持导出或恢复配置、任务队列与本地阅读进度/书签，以及一键生成脱敏后的诊断日志包以便排查问题。
+
+### 离线阅读器
+
+- **单页与滚动双模式**：直接读取本地 CBZ 或目录；单页模式提供「适合宽度 / 适合高度 / 适合屏幕 / 原始尺寸」四种适配，支持双击 2 倍放大、双指捏合缩放（最高 5 倍）及放大状态下单指拖拽平移；上下滚动模式对屏幕窗口外的页面按比例占位并卸载图片，控制长章节内存占用。
+- **操控与快捷翻页**：支持点击翻页热区、左右滑动（随日漫右往左 / 从左往右设置联动）、Android 音量键翻页与外接键盘方向键、`A`/`D`、空格及 `Esc`。
+- **阅读进度与书签**：自动防抖保存每部漫画的当前章节与页码，章末支持衔接上一话/下一话，可随时添加、查看并跳转到指定页书签。
+
+### Android 专项支持
+
+- **默认公共存储目录**：优先使用系统公共目录 `Download/JoyManga`（在权限允许的系统版本下），卸载重装不会删除已下载的漫画；也支持随时切换回应用专用目录。
+- **16 KB 页对齐与固化签名**：构建针对 `arm64-v8a` 启用 NDK `29.0.14206865` 16 KB 页对齐；仓库与 CI 使用同一套发布签名证书，同一来源的版本可直接覆盖升级。
+- **应用内更新**：定期或手动检查 GitHub Releases 新版本，通过原生前台服务下载 APK 后直接拉起系统安装器完成安装。
+
+---
+
+## 下载与安装
+
+请前往 [GitHub Releases](https://github.com/Beyondoooars/JoyManga/releases) 下载最新版本：
+
+| 平台 | 安装包 | 系统要求与说明 |
 | :--- | :--- | :--- |
-| **Android** | `joymanga-arm64-v8a.apk` | 主流 64 位安卓手机/平板设备，支持无缝覆盖更新 |
+| **Android** | `joymanga-arm64-v8a.apk` | Android 7.0+ 64 位设备（`arm64-v8a`），同源发布版支持直接覆盖更新 |
 
 ---
 
-## 🔧 常见问题 (FAQ)
+## 常见问题
 
 <details>
-<summary><strong>Q: 手机安装新版本时提示“软件包冲突 / 签名不一致”？</strong></summary>
+<summary><strong>安装新版时提示「软件包冲突 / 签名不一致」怎么办？</strong></summary>
 
-> **原因与解决**：
-> - 从 `v0.2.1` 起，项目已固化统一签名密钥。如果您之前安装过非官方构建或历史临时签名的测试包，首次升级时请**先卸载手机上的旧版本**，然后安装新版。
-> - 放心卸载：下载的漫画存放在系统公共目录 `Download/JoyManga`，卸载应用**不会删除已下载的漫画**。
-> - 首次重装后，后续的所有发布版本均可直接覆盖安装升级，不再冲突。
+- 本仓库从 `v0.2.1` 起已固化发布签名密钥；若手机上原本安装的是旧临时签名测试包或第三方重打包版本，请先卸载旧版再安装新版，后续版本即可直接覆盖升级。
+- 下载在系统公共目录 `Download/JoyManga` 中的漫画文件不会随卸载被删除。
+
 </details>
 
 <details>
-<summary><strong>Q: 遇到漫画封面或章节图片加载缓慢、解析失败？</strong></summary>
+<summary><strong>封面或章节图片加载慢、频繁失败怎么排查？</strong></summary>
 
-> **解决建议**：
-> 1. 打开应用【设置】➔【网络】➔【手动设置线路】。
-> 2. 点击“测速全部图片线路”，查看各线路实际 MB/s，再选择最快线路。
-> 3. 连接或断开系统 VPN 后可重新测速对比；VPN 只在改善 CDN 路由、丢包或拦截时才可能提速，并不保证提升。
-> 4. 特殊网络环境可使用手动 HTTP 代理；已识别到系统 VPN 时会跳过该代理，避免叠加错误代理。
+1. 进入应用【设置】→【网络】→【手动设置线路】，点击「测速全部图片线路」查看各线路实际吞吐量与可用性，选择最快线路或更换接口线路。
+2. 可使用「检查连接」逐项排查接口、图片与域名状态；若需在社区反馈，可到【设置】→【数据】导出脱敏诊断包。
+3. 切换或开启系统 VPN 后建议重新测速；若已连接系统 VPN 却无法联网，应用会自动旁路手动 HTTP 代理以避免端口冲突。
+
 </details>
 
 <details>
-<summary><strong>Q: Android 端后台下载被系统中断或暂停？</strong></summary>
+<summary><strong>锁屏或切到后台后下载任务被系统杀掉怎么处理？</strong></summary>
 
-> **解决建议**：
-> - 国产安卓系统（MIUI/HyperOS/ColorOS/OriginOS/HarmonyOS 等）默认策略会在锁屏后休眠后台应用。
-> - 请前往手机【系统设置 ➔ 应用管理 ➔ JoyManga ➔ 省电策略/电池优化】，将其调整为**“无限制” / “允许后台运行”**。
+- 国产定制 Android 系统通常会在锁屏或后台一段时间后限制网络与后台服务，请在系统【应用管理 → JoyManga → 电池优化 / 省电策略】中设为「无限制」或允许后台高耗电运行，并保持通知权限开启以便显示下载前台服务通知。
+
 </details>
 
 <details>
-<summary><strong>Q: 导出的 CBZ 文件在其他阅读器中打不开或看不到封面？</strong></summary>
+<summary><strong>导出的 CBZ 在第三方阅读器中打不开或缺少封面？</strong></summary>
 
-> **说明**：
-> - 归档生成的 CBZ 属于标准化 ZIP 容器规范（STORE 无压缩打包图片，兼顾读取速度），并在根目录内嵌了 `ComicInfo.xml`。
-> - 兼容市面上绝大多数第三方工具，如 Tachiyomi、Mihon、Kavita、Komga、EhViewer、CDisplayEx 等。若个别老旧阅读器打不开或看不到封面，请检查存储读取权限，或确认归档文件未损坏。
+- 本应用归档的 `.cbz` 为标准 ZIP 文件（`ComicInfo.xml` 位于根目录，图片以无压缩格式存储），兼容 Tachiyomi、Mihon、Komga、Kavita 等工具。如遇到异常，请确认文件管理器/阅读器具备存储访问权限，或检查文件大小是否因强制中断而不完整。
+
 </details>
 
 ---
 
-## 🛠️ 本地开发与构建
+## 本地开发与构建
 
-如果您希望自行从源码编译本应用，请参考以下步骤：
+### 环境要求
 
-### 前置依赖
-- **Node.js** (>= 26.13.0，当前最新稳定版) 及 **pnpm** (>= 11.16.0)
-- **Rust** 稳定版工具链 (`rustc`, `cargo` >= 1.95)
-- **Android SDK 35**, **NDK 28+**（项目固定 29.0.14206865，用于 16 KB 页对齐）, **Java 17**
+- **Node.js**：`>= 26.13.0`（对应 `package.json` `engines.node`）与 **pnpm** `11.16.0`
+- **Rust**：稳定版工具链（`rustc` / `cargo`）
+- **Android 构建依赖**：Java 17、Android SDK 35、Android NDK `29.0.14206865`（需 16 KB 页对齐支持）
 
 ### 常用命令
 
 ```bash
-# 1. 克隆代码并安装前端依赖
+# 1. 克隆仓库并安装前端依赖
 git clone https://github.com/Beyondoooars/JoyManga.git
 cd JoyManga
 pnpm install
 
-# 2. 启动前端调试环境 (热重载)
+# 2. 启动前端开发服务器（支持在浏览器访问 /tests/ui.html 查看离线模拟界面）
 pnpm dev
 
-# 3. 运行与云端 CI 完全一致的检查（提交前建议先跑一遍）
+# 3. 运行与 GitHub Actions 一致的全量检查
+#    (eslint + node --test + vue-tsc && vite build + cargo fmt + cargo clippy + cargo test)
 pnpm check
 
-# 4. 启用 pre-push 钩子：推送到 main 前自动跑上面的检查
+# 4. 启用本地 pre-push 钩子（推送 main 前自动运行上面检查）
 pnpm setup:hooks
 
-# 5. 编译 Android arm64-v8a APK
+# 5. 生成前后端 TypeScript 绑定（修改 Rust IPC 命令/事件后执行）
+pnpm gen:bindings
+
+# 6. 构建 Android arm64-v8a APK（Release / 轻量体积 Debug 测试包）
 pnpm build:android
+pnpm build:android:test
 ```
 
-### 版本发布
+### 自动打包与发布流程
 
-推送到 `main` 即触发云端打包，无需本地改版本号：
+每次向 `main` 分支推送代码时，GitHub Actions（[android-build.yml](.github/workflows/android-build.yml)）会执行以下流程：
 
-1. 先跑与 PR、`pnpm check` 相同的检查（eslint、单元测试、前端构建、cargo fmt / clippy / test）。任何一项失败都会中止，不会打包，也不会发版。
-2. GitHub Actions 自动递增 patch 版本（`package.json`、`tauri.conf.json`、`Cargo.toml`、`Cargo.lock`、README 徽章同步）。
-3. 编译并校验 arm64-v8a 签名 APK。
-4. 校验通过后把版本号提交回 `main`，创建 `vX.Y.Z` Release 并上传 APK，应用内「检查更新」即可发现新版本。
+1. **前置检查**：先运行前端（`eslint`、`pnpm test`、`pnpm build`）与 Rust（`fmt`、`clippy`、`cargo test`）全部门禁，任意失败立即中止。
+2. **版本递增**：默认按 patch 自动递增版本并同步写入 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 与 `README.md` 版本徽章。若需升级 minor 或 major，可在提交说明末尾加一行 `Release-Bump: minor`（或 `major`），或在 Actions 面板手动运行 **Android Build** 并指定版本号。
+3. **签名构建与发布**：编译并验证 `arm64-v8a` APK 签名证书及版本元数据，通过后回写版本提交并创建对应 Release。
 
-> 打包成功后会有一个 `chore: 发布 vX.Y.Z [skip ci]` 提交写回 `main`。本地下次推送前先 `git pull --rebase`；启用 `pnpm setup:hooks` 后，推送时若落后会直接给出提示。
-
-日常修复直接提交到 `main`，每次推送都会自动按 patch 打包发布。需要升 minor/major 时，可在提交信息末尾加一行 `Release-Bump: minor`（或 `major`），或在 Actions 面板手动运行 **Android Build** 并填入 `minor`、`major` 或明确的 `X.Y.Z`；本地仍可用 `pnpm bump <patch|minor|major|X.Y.Z>` 手动同步版本号。
+> 版本号提交会自动推回 `origin/main`，因此本地下一次推送前需要先执行 `git pull --rebase`；也可使用 `pnpm bump <patch|minor|major|X.Y.Z>` 在本地同步版本号。
 
 ---
 
-## 📜 声明
+## 许可与声明
 
-1. **许可协议**：本项目以 [MIT License](LICENSE) 开源，版权归属与许可条款以 LICENSE 文件为准；内嵌第三方组件（OpenCC 词典）的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-2. **免责声明**：本项目所有代码与编译产物仅供个人离线学习、技术研究及归档备份使用。禁止用于任何商业用途、付费分发或侵犯版权的行为。因使用本工具产生的一切法律纠纷与责任均由使用者自行承担。
+1. **开源协议**：本项目基于 [MIT License](LICENSE) 开源。内嵌第三方组件（OpenCC 简繁词典等）的授权声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+2. **免责声明**：本工具仅用于个人离线阅读体验改进与技术研究备份，请勿用于任何商业用途、二次打包分发或侵犯版权的行为；因使用本项目产生的法律责任由使用者自行承担。
