@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { PhCopy } from '@phosphor-icons/vue'
 import { useMessage } from 'naive-ui'
+import { copyPathWithToast } from '../utils/clipboard.ts'
 
 const props = defineProps<{
   label: string
@@ -10,12 +11,7 @@ const value = defineModel<string>('value', { required: true })
 const message = useMessage()
 
 async function copyPath() {
-  try {
-    await navigator.clipboard.writeText(value.value)
-    message.success(`已复制${props.label}到剪贴板`)
-  } catch {
-    message.error('复制失败，请重试')
-  }
+  await copyPathWithToast(value.value, message, `已复制${props.label}到剪贴板`)
 }
 </script>
 

@@ -7,7 +7,20 @@ use crate::types::{
     Comic, DailyCheckInOutcome, DailyCheckInState, FavoriteSort, GetFavoriteResult,
     GetWeeklyResult, SearchDualResult, SearchResultVariant, SearchSort,
 };
-use crate::utils;
+
+pub(crate) async fn load_comic(app: AppHandle, aid: i64) -> anyhow::Result<Comic> {
+    let jm_client = app.get_jm_client();
+
+    let comic_resp_data = jm_client.get_comic(aid).await?;
+
+    let comic = tauri::async_runtime::spawn_blocking(move || {
+        Comic::from_comic_resp_data(&app, comic_resp_data)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+
+    Ok(comic)
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -90,8 +103,15 @@ pub async fn search_dual(
         return Ok(result);
     }
 
-    let id_to_dir_map =
-        utils::create_id_to_dir_map(&app).map_err(|err| CommandError::from("搜索失败", err))?;
+    let id_to_dir_map = std::sync::Arc::new(
+        tauri::async_runtime::spawn_blocking({
+            let app = app.clone();
+            move || crate::library_catalog::create_id_to_dir_map(&app)
+        })
+        .await
+        .map_err(|err| CommandError::from("搜索失败", err))?
+        .map_err(|err| CommandError::from("搜索失败", err))?,
+    );
     let jm_client = app.get_jm_client();
 
     let original_page = original_page.map(|page| page.max(1));
@@ -114,16 +134,29 @@ pub async fn search_dual(
     let (original_resp, converted_resp) = tokio::join!(original_future, converted_future);
 
     if let Some(resp) = original_resp {
-        match resp.and_then(|resp| {
-            SearchResultVariant::from_search_resp_with_map(
-                &app,
-                resp,
-                original_page.unwrap_or(1),
-                &keyword,
-                &id_to_dir_map,
-            )
-        }) {
-            Ok(variant) => result.original = Some(variant),
+        match resp {
+            Ok(resp) => {
+                let app_clone = app.clone();
+                let map = std::sync::Arc::clone(&id_to_dir_map);
+                let keyword_clone = keyword.clone();
+                let page = original_page.unwrap_or(1);
+                let converted = tauri::async_runtime::spawn_blocking(move || {
+                    SearchResultVariant::from_search_resp_with_map(
+                        &app_clone,
+                        resp,
+                        page,
+                        &keyword_clone,
+                        &map,
+                    )
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|res| res);
+                match converted {
+                    Ok(variant) => result.original = Some(variant),
+                    Err(err) => result.original_error = Some(format!("{err:#}")),
+                }
+            }
             Err(err) => result.original_error = Some(format!("{err:#}")),
         }
     }
@@ -136,14 +169,23 @@ pub async fn search_dual(
         let ignored_comic = matches!(&resp, Ok(SearchResp::ComicRespData(_)));
         match resp {
             Ok(resp) => {
-                let keyword_used = converted_keyword.as_deref().unwrap_or_default();
-                match SearchResultVariant::from_search_resp_with_map(
-                    &app,
-                    resp,
-                    converted_page.unwrap_or(1),
-                    keyword_used,
-                    &id_to_dir_map,
-                ) {
+                let app_clone = app.clone();
+                let map = std::sync::Arc::clone(&id_to_dir_map);
+                let keyword_used = converted_keyword.clone().unwrap_or_default();
+                let page = converted_page.unwrap_or(1);
+                let converted = tauri::async_runtime::spawn_blocking(move || {
+                    SearchResultVariant::from_search_resp_with_map(
+                        &app_clone,
+                        resp,
+                        page,
+                        &keyword_used,
+                        &map,
+                    )
+                })
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|res| res);
+                match converted {
                     Ok(variant) => {
                         if ignored_comic {
                             result
@@ -165,7 +207,7 @@ pub async fn search_dual(
 #[tauri::command]
 #[specta::specta]
 pub async fn get_comic(app: AppHandle, aid: i64) -> CommandResult<Comic> {
-    let comic = utils::get_comic(app.clone(), aid)
+    let comic = load_comic(app.clone(), aid)
         .await
         .map_err(|err| CommandError::from(&format!("获取ID为`{aid}`的漫画信息失败"), err))?;
 
@@ -187,8 +229,12 @@ pub async fn get_favorite_folder(
         .await
         .map_err(|err| CommandError::from("获取收藏夹失败", err))?;
 
-    let get_favorite_result = GetFavoriteResult::from_resp_data(&app, get_favorite_resp_data)
-        .map_err(|err| CommandError::from("获取收藏夹失败", err))?;
+    let get_favorite_result = tauri::async_runtime::spawn_blocking(move || {
+        GetFavoriteResult::from_resp_data(&app, get_favorite_resp_data)
+    })
+    .await
+    .map_err(|err| CommandError::from("获取收藏夹失败", err))?
+    .map_err(|err| CommandError::from("获取收藏夹失败", err))?;
 
     Ok(get_favorite_result)
 }
@@ -220,20 +266,14 @@ pub async fn get_weekly(
         .await
         .map_err(|err| CommandError::from("获取每周必看失败", err))?;
 
-    let get_weekly_result = GetWeeklyResult::from_resp_data(&app, get_weekly_resp_data)
-        .map_err(|err| CommandError::from("获取每周必看失败", err))?;
+    let get_weekly_result = tauri::async_runtime::spawn_blocking(move || {
+        GetWeeklyResult::from_resp_data(&app, get_weekly_resp_data)
+    })
+    .await
+    .map_err(|err| CommandError::from("获取每周必看失败", err))?
+    .map_err(|err| CommandError::from("获取每周必看失败", err))?;
 
     Ok(get_weekly_result)
-}
-
-#[tauri::command(async)]
-#[specta::specta]
-pub async fn sync_favorite_folder(app: AppHandle) -> CommandResult<()> {
-    app.get_jm_client()
-        .get_favorite_folder(0, 1, FavoriteSort::FavoriteTime)
-        .await
-        .map(|_| ())
-        .map_err(|err| CommandError::from("刷新收藏夹失败", err))
 }
 
 #[tauri::command(async)]
@@ -264,10 +304,14 @@ pub fn cancel_login(app: AppHandle) {
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn logout(app: AppHandle) -> CommandResult<()> {
-    app.get_jm_client()
-        .logout()
-        .map_err(|err| CommandError::from("退出会话已生效，保存设置失败", err))
+pub async fn logout(app: AppHandle) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.get_jm_client()
+            .logout()
+            .map_err(|err| CommandError::from("退出会话已生效，保存设置失败", err))
+    })
+    .await
+    .map_err(|err| CommandError::from("退出登录任务失败", err))?
 }
 
 #[tauri::command(async)]

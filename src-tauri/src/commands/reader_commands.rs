@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context};
 use parking_lot::Mutex;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::errors::{CommandError, CommandResult};
 use crate::extensions::{mime_for_image, AppHandleExt};
@@ -19,36 +19,23 @@ struct CachedArchive {
 /// 阅读器当前打开的 CBZ。阅读是一页一页的，单槽缓存足够，且避免长期占着文件句柄。
 static ACTIVE_ARCHIVE: OnceLock<Mutex<Option<CachedArchive>>> = OnceLock::new();
 
-/// 释放阅读器持有的归档句柄。
-///
-/// Android 公共存储（FUSE）不允许重命名本进程仍以写入方式打开的文件；
-/// 下载/合并/导出要替换某个 CBZ 之前调用一次，避免书正被阅读时覆盖必然失败。
-pub fn release_archive_handle() {
-    if let Some(lock) = ACTIVE_ARCHIVE.get() {
-        lock.lock().take();
-    }
+fn archive_matches_target(cached_path: &Path, canonical_target: &Path) -> bool {
+    cached_path == canonical_target || cached_path.starts_with(canonical_target)
 }
 
-/// 目标文件是否已被阅读器缓存了读句柄。
-///
-/// 只在 FUSE 语义下才有意义：句柄存在时重命名必失败，必须走覆盖写回退；
-/// 没有句柄时仍然优先原子改名。
-pub fn reader_holds_archive(path: &Path) -> bool {
-    let Some(lock) = ACTIVE_ARCHIVE.get() else {
-        return false;
-    };
-    let Ok(canonical) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    lock.lock()
-        .as_ref()
-        .is_some_and(|cached| cached.path == canonical)
-}
-
-/// 提交（重命名/覆盖）目标文件前释放占用的读句柄；只放掉同一文件的句柄。
+/// 提交（重命名/覆盖）目标文件前释放占用的读句柄；只放掉匹配目标的句柄，
+/// 并在单次 `ACTIVE_ARCHIVE` 持锁内完成校验与释放，避免分片锁下的 TOCTOU 竞态。
 pub fn release_handle_for(target: &Path) {
-    if reader_holds_archive(target) {
-        release_archive_handle();
+    let Some(lock) = ACTIVE_ARCHIVE.get() else {
+        return;
+    };
+    let canonical = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let mut guard = lock.lock();
+    if guard
+        .as_ref()
+        .is_some_and(|cached| archive_matches_target(&cached.path, &canonical))
+    {
+        guard.take();
     }
 }
 
@@ -96,30 +83,24 @@ pub struct ChapterReaderData {
     pub page_sizes: Vec<Option<crate::types::PageSize>>,
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[tauri::command(async)]
 #[specta::specta]
-pub fn get_chapter_reader_data(
+pub async fn get_chapter_reader_data(
     app: AppHandle,
     comic_id: i64,
     chapter_id: i64,
 ) -> CommandResult<ChapterReaderData> {
-    let comic = local_comic(&app, comic_id)?;
-    chapter_reader_data_from_comic(comic, chapter_id)
+    tauri::async_runtime::spawn_blocking(move || {
+        let comic = local_comic(&app, comic_id)?;
+        chapter_reader_data_from_comic(comic, chapter_id)
+    })
+    .await
+    .map_err(|err| CommandError::from("读取章节失败", err))?
 }
 
 pub(crate) fn local_comic(app: &AppHandle, comic_id: i64) -> CommandResult<Comic> {
-    let root = app.get_config().read().download_dir.clone();
-    if let Some(comic) = app
-        .state::<utils::DownloadedLibraryCache>()
-        .comic(&root, comic_id)
-    {
-        return Ok(comic);
-    }
-    super::library_commands::get_downloaded_comics(app.clone())
-        .into_iter()
-        .find(|comic| comic.id == comic_id)
-        .ok_or_else(|| local_comic_missing(comic_id))
+    super::library_commands::find_local_comic(app, comic_id, false)
+        .map_err(|err| CommandError::from("读取本地漫画失败", err))
 }
 
 /// 删除流程专用：解析漫画时包含已被“移除记录”隐藏的条目。
@@ -130,25 +111,8 @@ pub(crate) fn local_comic_including_removed(
     app: &AppHandle,
     comic_id: i64,
 ) -> CommandResult<Comic> {
-    let root = app.get_config().read().download_dir.clone();
-    if let Some(comic) = app
-        .state::<utils::DownloadedLibraryCache>()
-        .comic(&root, comic_id)
-    {
-        return Ok(comic);
-    }
-    super::library_commands::downloaded_library(app, true)
-        .comics
-        .into_iter()
-        .find(|comic| comic.id == comic_id)
-        .ok_or_else(|| local_comic_missing(comic_id))
-}
-
-fn local_comic_missing(comic_id: i64) -> CommandError {
-    CommandError::from(
-        "读取本地漫画失败",
-        anyhow!("本地书库没有漫画ID `{comic_id}`"),
-    )
+    super::library_commands::find_local_comic(app, comic_id, true)
+        .map_err(|err| CommandError::from("读取本地漫画失败", err))
 }
 
 pub(crate) fn chapter_reader_data_from_comic(
@@ -195,7 +159,7 @@ pub(crate) fn chapter_reader_data_from_comic(
             // 提交方「释放句柄 → 重命名」的窗口内不会被这次打开插进
             //（FUSE 下会重新触发 ETXTBSY / 覆盖写截断）。
             // 尺寸解析要逐页读文件头，归档打开的时长不可忽略，必须纳入协议。
-            let _replace_guard = crate::atomic_fs::commit_guard();
+            let _replace_guard = crate::atomic_fs::commit_guard(chapter_target);
             let file = std::fs::File::open(chapter_target)
                 .context(format!("打开章节CBZ文件`{}`失败", chapter_target.display()))
                 .map_err(|err| CommandError::from("读取章节图片失败", err))?;
@@ -234,7 +198,7 @@ pub(crate) fn chapter_reader_data_from_comic(
                 .collect::<Vec<_>>();
             (image_paths_str, page_sizes)
         } else if chapter_target.is_dir() {
-            let image_paths = utils::collect_page_images(chapter_target)
+            let image_paths = crate::comic_scanner::collect_page_images(chapter_target)
                 .map_err(|err| CommandError::from("读取章节图片失败", err))?;
 
             let page_sizes = image_paths
@@ -305,7 +269,7 @@ fn read_page_bytes(app: &AppHandle, file_path: &str) -> anyhow::Result<(Vec<u8>,
         // 与 atomic_fs::REPLACE_LOCK 同序：先替换锁再归档锁。提交方会在持有替换锁时
         // 释放归档句柄，「释放 → 重命名」之间就不会插进一次重新打开，ETXTBSY 才真正消除。
         // 读写会在此短暂互斥：常规提交是毫秒级改名，只有目标被占用时的整文件覆盖会稍慢。
-        let _replace_guard = crate::atomic_fs::commit_guard();
+        let _replace_guard = crate::atomic_fs::commit_guard(&canonical_cbz_path);
         let mut guard = active_lock.lock();
         let is_match = guard
             .as_ref()
@@ -410,20 +374,99 @@ fn image_path_from_url(url: &tauri::Url) -> anyhow::Result<String> {
         .map(|decoded| decoded.into_owned())
 }
 
+const MAX_LAST_IMAGE_ERRORS: usize = 64;
+static LAST_IMAGE_ERRORS: OnceLock<Mutex<indexmap::IndexMap<String, String>>> = OnceLock::new();
+
+fn last_image_errors() -> &'static Mutex<indexmap::IndexMap<String, String>> {
+    LAST_IMAGE_ERRORS.get_or_init(|| Mutex::new(indexmap::IndexMap::new()))
+}
+
+fn record_image_error(file_path: &str, message: &str) {
+    let mut errors = last_image_errors().lock();
+    errors.shift_remove(file_path);
+    while errors.len() >= MAX_LAST_IMAGE_ERRORS {
+        errors.shift_remove_index(0);
+    }
+    errors.insert(file_path.to_string(), message.to_string());
+}
+
+fn clear_image_error(file_path: &str) {
+    if let Some(lock) = LAST_IMAGE_ERRORS.get() {
+        lock.lock().shift_remove(file_path);
+    }
+}
+
+fn classify_image_error(error: &anyhow::Error) -> (u16, &'static str, String) {
+    if let Some(limit_error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::image_data::ImageDataError>())
+    {
+        return match limit_error {
+            crate::image_data::ImageDataError::FileTooLarge { limit_bytes } => (
+                413,
+                "file-too-large",
+                format!(
+                    "图片体积超过限制（上限 {} MB）",
+                    (*limit_bytes / 1024 / 1024).max(1)
+                ),
+            ),
+            crate::image_data::ImageDataError::PixelsTooLarge { max_pixels, .. } => (
+                413,
+                "pixels-too-large",
+                format!("图片像素超过限制（上限 {} 万像素）", max_pixels / 10_000),
+            ),
+            crate::image_data::ImageDataError::InvalidImage(_) => (
+                422,
+                "invalid-image",
+                "图片无法解码，文件可能已损坏".to_string(),
+            ),
+        };
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<image::ImageError>().is_some())
+    {
+        return (
+            422,
+            "invalid-image",
+            "图片无法解码，文件可能已损坏".to_string(),
+        );
+    }
+    (404, "read-error", "图片文件不存在或无法读取".to_string())
+}
+
+/// 查询最近一次 `jmimg://` 读取失败的可读原因，供阅读器在 `<img>` `@error` 时区分
+/// 「图片尺寸或体积超限」与「文件损坏」。纯内存查询，不重新读取磁盘。
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::needless_pass_by_value)]
+pub fn get_reader_image_error(file_path: String) -> Option<String> {
+    LAST_IMAGE_ERRORS
+        .get()
+        .and_then(|lock| lock.lock().get(&file_path).cloned())
+}
+
 /// `jmimg://` 协议处理器：直接返回图片字节，省掉 base64 编码与 IPC 往返。
 pub fn serve_image(
     app: &AppHandle,
     request: tauri::http::Request<Vec<u8>>,
 ) -> tauri::http::Response<Vec<u8>> {
-    let respond = |status: u16, mime: &str, body: Vec<u8>| {
-        tauri::http::Response::builder()
+    let respond = |status: u16, mime: &str, error_code: Option<&str>, body: Vec<u8>| {
+        let cache_control = if status == 200 {
+            // 与 ReaderDialog 的预取及重试（`?retry=` 绕过缓存）配合：
+            // 仅缓存成功响应；错误响应一律 no-store，避免超限或临时占用被长期缓存。
+            "private, max-age=300"
+        } else {
+            "no-store"
+        };
+        let mut builder = tauri::http::Response::builder()
             .status(status)
             .header(tauri::http::header::CONTENT_TYPE, mime)
-            // 与 ReaderDialog 的 `new Image()` 预取配合：允许 WebView 复用同一页的
-            // 解码结果，翻页时不必重新读盘/解压。`no-store` 会让预取请求白白作废。
-            // TTL 取短值：同一路径的图片可能因重新下载而被覆盖，不能让旧图长期驻留。
-            // 失败重试通过变更 URL（`?retry=`）绕过缓存。
-            .header(tauri::http::header::CACHE_CONTROL, "private, max-age=300")
+            .header(tauri::http::header::CACHE_CONTROL, cache_control);
+        if let Some(code) = error_code {
+            builder = builder.header("X-JoyManga-Image-Error", code);
+        }
+        builder
             .body(body)
             .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
     };
@@ -431,21 +474,41 @@ pub fn serve_image(
         Ok(url) => url,
         Err(error) => {
             tracing::warn!(error = %error, "解析图片协议地址失败");
-            return respond(400, "text/plain", b"bad request".to_vec());
+            return respond(
+                400,
+                "text/plain; charset=utf-8",
+                None,
+                b"bad request".to_vec(),
+            );
         }
     };
     let file_path = match image_path_from_url(&url) {
         Ok(file_path) => file_path,
         Err(error) => {
             tracing::warn!(error = %error, "解析图片协议路径失败");
-            return respond(400, "text/plain", b"bad request".to_vec());
+            return respond(
+                400,
+                "text/plain; charset=utf-8",
+                None,
+                b"bad request".to_vec(),
+            );
         }
     };
     match read_page_bytes(app, &file_path) {
-        Ok((bytes, mime)) => respond(200, mime, bytes),
+        Ok((bytes, mime)) => {
+            clear_image_error(&file_path);
+            respond(200, mime, None, bytes)
+        }
         Err(error) => {
-            tracing::warn!(error = %error, "读取阅读器图片失败");
-            respond(404, "text/plain", error.to_string().into_bytes())
+            let (status, code, user_message) = classify_image_error(&error);
+            record_image_error(&file_path, &user_message);
+            tracing::warn!(status, code, error = %error, "读取阅读器图片失败");
+            respond(
+                status,
+                "text/plain; charset=utf-8",
+                Some(code),
+                user_message.into_bytes(),
+            )
         }
     }
 }
@@ -499,7 +562,7 @@ mod tests {
         };
         let mut paths = Vec::new();
         for chapter in [&comic.chapter_infos[0], &comic.chapter_infos[2]] {
-            let path = root.join(utils::cbz_filename(
+            let path = root.join(crate::comic_scanner::cbz_filename(
                 &comic.name,
                 comic.id,
                 &chapter.chapter_title,
@@ -531,5 +594,52 @@ mod tests {
         assert_eq!(first.next_chapter.unwrap().chapter_id, 103);
         assert_eq!(third.prev_chapter.unwrap().chapter_id, 101);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_errors_classify_limits_corruption_and_missing_distinctly() {
+        let too_large = anyhow::Error::new(crate::image_data::ImageDataError::FileTooLarge {
+            limit_bytes: 32 * 1024 * 1024,
+        })
+        .context("包装上下文");
+        let (status, code, msg) = classify_image_error(&too_large);
+        assert_eq!(status, 413);
+        assert_eq!(code, "file-too-large");
+        assert!(msg.contains("32 MB"));
+
+        let too_many_pixels =
+            anyhow::Error::new(crate::image_data::ImageDataError::PixelsTooLarge {
+                width: 9000,
+                height: 8000,
+                max_pixels: 64_000_000,
+            });
+        let (status, code, msg) = classify_image_error(&too_many_pixels);
+        assert_eq!(status, 413);
+        assert_eq!(code, "pixels-too-large");
+        assert!(msg.contains("6400 万像素"));
+
+        let invalid = anyhow::Error::new(crate::image_data::ImageDataError::InvalidImage(
+            "bad".into(),
+        ));
+        let (status, code, msg) = classify_image_error(&invalid);
+        assert_eq!(status, 422);
+        assert_eq!(code, "invalid-image");
+        assert!(msg.contains("无法解码"));
+
+        let (status, code, _) = classify_image_error(&anyhow::anyhow!("missing"));
+        assert_eq!(status, 404);
+        assert_eq!(code, "read-error");
+    }
+
+    #[test]
+    fn get_reader_image_error_returns_recorded_message() {
+        let key = format!("test-path-{}", uuid::Uuid::new_v4());
+        record_image_error(&key, "图片像素超过限制");
+        assert_eq!(
+            get_reader_image_error(key.clone()).as_deref(),
+            Some("图片像素超过限制")
+        );
+        clear_image_error(&key);
+        assert!(get_reader_image_error(key).is_none());
     }
 }

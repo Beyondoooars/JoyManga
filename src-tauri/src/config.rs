@@ -359,7 +359,6 @@ pub struct Config {
     pub username: String,
     pub password: String,
     pub download_dir: PathBuf,
-    pub export_dir: PathBuf,
     pub proxy_mode: ProxyMode,
     pub proxy_host: String,
     pub proxy_port: u16,
@@ -394,7 +393,6 @@ pub struct Config {
 
 impl Config {
     pub fn apply_storage_policy(&mut self) {
-        self.export_dir.clone_from(&self.download_dir);
         // 下载始终默认合并为整本 CBZ；忽略旧版本保留的逐话默认值。
         self.default_cbz_mode = crate::types::CbzMode::Merge;
     }
@@ -459,7 +457,6 @@ impl Config {
             !self.download_dir.as_os_str().is_empty(),
             "下载目录不能为空"
         );
-        ensure!(!self.export_dir.as_os_str().is_empty(), "导出目录不能为空");
         ensure!(
             (1..=10).contains(&self.chapter_concurrency),
             "章节并发数必须在1到10之间（移动端建议1~3）"
@@ -550,8 +547,7 @@ impl Config {
     }
 
     pub fn default(base_dir: &Path) -> Config {
-        let library_dir = base_dir.join("library");
-        let (download_dir, export_dir) = (library_dir.clone(), library_dir);
+        let download_dir = base_dir.join("library");
         // Android 设备的默认并发：移动端网络与内存都更保守
         let (chapter_concurrency, img_concurrency) = (2, 8);
 
@@ -564,7 +560,6 @@ impl Config {
             username: String::new(),
             password: String::new(),
             download_dir,
-            export_dir,
             proxy_mode: ProxyMode::default(),
             proxy_host: "127.0.0.1".to_string(),
             proxy_port: 7890,
@@ -802,11 +797,15 @@ mod tests {
         };
         let mut config = Config::default(&root);
         config.download_dir = library.clone();
-        config.export_dir = old_exports.clone();
-        config.save_to(storage.config_path()).unwrap();
+        let mut raw = serde_json::to_value(&config).unwrap();
+        raw["exportDir"] = json!(old_exports);
+        std::fs::write(
+            storage.config_path(),
+            serde_json::to_string_pretty(&raw).unwrap(),
+        )
+        .unwrap();
         let loaded = Config::new(&storage).unwrap();
         assert_eq!(loaded.download_dir, library);
-        assert_eq!(loaded.export_dir, loaded.download_dir);
         assert_eq!(
             std::fs::read(library.join("chapter.cbz")).unwrap(),
             b"source"

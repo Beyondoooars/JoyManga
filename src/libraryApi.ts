@@ -35,7 +35,11 @@ export function onOpenExternalComic(handler: {
       try {
         handler.onImported(await libraryApi.importComics([path]))
       } catch (error) {
-        handler.onError(error instanceof Error ? error.message : String(error))
+        try {
+          handler.onError(error instanceof Error ? error.message : String(error))
+        } catch (handlerError) {
+          console.error('外部漫画导入错误处理失败', handlerError)
+        }
       } finally {
         // 导入会把文件复制进书库，暂存副本没有保留价值
         if (id) window.JmAndroid?.discardImports(id)

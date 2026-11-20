@@ -2,8 +2,8 @@
 import { type ProgressData } from '../../../types.ts'
 import { computed } from 'vue'
 import { useStore } from '../../../store.ts'
-import { formatCommandError } from '../../../utils/errors.ts'
-import { commands, type Comic } from '../../../bindings.ts'
+import { type Comic } from '../../../bindings.ts'
+import { copyPathWithToast } from '../../../utils/clipboard.ts'
 import { PhBookOpen, PhCheckCircle, PhFolderOpen, PhTrash } from '@phosphor-icons/vue'
 import { useMessage } from 'naive-ui'
 
@@ -13,42 +13,25 @@ const message = useMessage()
 const completedProgresses = computed<[number, ProgressData][]>(() =>
   Array.from(store.progresses.entries())
     .filter(([, { state }]) => state === 'Completed')
-    .sort((a, b) => {
-      return b[1].totalImgCount - a[1].totalImgCount
-    }),
+    .sort((a, b) => (b[1].updatedSeq ?? 0) - (a[1].updatedSeq ?? 0) || b[0] - a[0]),
 )
 
 function clearCompleted() {
-  for (const [id, progress] of store.progresses.entries()) {
-    if (progress.state === 'Completed') {
-      store.progresses.delete(id)
-    }
-  }
+  store.clearCompletedProgresses()
 }
 
 function openReader(comicId: number, chapterId: number, comicTitle: string) {
+  if (store.isArchiving(comicId)) {
+    message.warning('正在整合 CBZ，完成后即可阅读')
+    return
+  }
   store.openReader(comicId, chapterId, comicTitle)
 }
-
-const isAndroid = /Android/i.test(navigator.userAgent)
 
 async function showComicDir(comic: Comic) {
   const dir = comic.comicDownloadDir
   if (!dir) return
-  if (!isAndroid) {
-    const result = await commands.showPathInFileManager(dir)
-    if (result.status === 'ok') return
-  }
-  try {
-    await navigator.clipboard.writeText(dir)
-    message.success('已复制下载目录到剪贴板')
-  } catch {
-    const result = await commands.showPathInFileManager(dir)
-    if (result.status === 'error') {
-      console.error(result.error)
-      message.error(formatCommandError(result.error))
-    }
-  }
+  await copyPathWithToast(dir, message, '已复制下载目录到剪贴板')
 }
 
 </script>
@@ -87,8 +70,8 @@ async function showComicDir(comic: Comic) {
               v-if="comic.comicDownloadDir"
               type="button"
               class="row-action"
-              :aria-label="isAndroid ? '复制下载目录' : '打开下载目录'"
-              :title="isAndroid ? '复制下载目录' : '打开下载目录'"
+              aria-label="复制下载目录"
+              title="复制下载目录"
               @click="showComicDir(comic)">
               <PhFolderOpen :size="17" />
             </button>

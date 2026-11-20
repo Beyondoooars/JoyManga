@@ -1,13 +1,200 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::{atomic_fs, config::ConfigStorage};
+use crate::{
+    atomic_fs,
+    comic_scanner::{read_comic_id_from_cbz, walk_comic_metadata_files},
+    config::ConfigStorage,
+    extensions::{AppHandleExt, PathIsCbz},
+    types::Comic,
+};
 
 pub(crate) static CATALOG_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+type ComicIndex = (PathBuf, HashMap<i64, Comic>);
+
+/// 最近一次书库扫描的摘要，供 `diagnose_library` 复用，避免刷新后立刻再扫一遍整库。
+pub struct LibraryScanSnapshot {
+    pub root: PathBuf,
+    pub comic_count: usize,
+    pub skipped: Vec<String>,
+}
+
+#[derive(Default)]
+pub struct DownloadedLibraryCache {
+    map: RwLock<Option<HashMap<i64, PathBuf>>>,
+    comics: RwLock<Option<ComicIndex>>,
+    scan: RwLock<Option<LibraryScanSnapshot>>,
+}
+
+impl DownloadedLibraryCache {
+    pub fn new() -> Self {
+        Self {
+            map: RwLock::new(None),
+            comics: RwLock::new(None),
+            scan: RwLock::new(None),
+        }
+    }
+
+    pub fn set_scan(&self, root: &Path, comic_count: usize, skipped: Vec<String>) {
+        *self.scan.write() = Some(LibraryScanSnapshot {
+            root: root.to_path_buf(),
+            comic_count,
+            skipped,
+        });
+    }
+
+    /// 只在书库根目录没变时复用；换过目录后旧摘要说明不了新目录的情况。
+    pub fn scan_summary(&self, root: &Path) -> Option<(usize, Vec<String>)> {
+        let guard = self.scan.read();
+        let snapshot = guard.as_ref()?;
+        (snapshot.root == root).then(|| (snapshot.comic_count, snapshot.skipped.clone()))
+    }
+
+    pub fn get(&self) -> Option<HashMap<i64, PathBuf>> {
+        self.map.read().clone()
+    }
+
+    pub fn set(&self, map: HashMap<i64, PathBuf>) {
+        // 路径映射变了，基于旧映射建立的漫画快照同样失效；否则归档整合会拿到
+        // 章节没有下载路径的旧快照，整本合并直接失败。
+        *self.comics.write() = None;
+        *self.scan.write() = None;
+        *self.map.write() = Some(map);
+    }
+
+    pub fn insert(&self, id: i64, path: PathBuf) {
+        *self.comics.write() = None;
+        let mut guard = self.map.write();
+        if let Some(map) = guard.as_mut() {
+            map.insert(id, path);
+        }
+    }
+
+    pub fn remove(&self, id: i64) {
+        *self.comics.write() = None;
+        let mut guard = self.map.write();
+        if let Some(map) = guard.as_mut() {
+            map.remove(&id);
+        }
+    }
+
+    pub fn invalidate(&self) {
+        *self.map.write() = None;
+        *self.comics.write() = None;
+        // 扫描摘要同样过期：下载完成/整合后书库内容已经变了。
+        *self.scan.write() = None;
+    }
+
+    pub fn set_comics(&self, root: &Path, comics: Vec<Comic>) {
+        *self.comics.write() = Some((
+            root.to_path_buf(),
+            comics
+                .into_iter()
+                .map(|mut comic| {
+                    comic.local_cover_data = None;
+                    (comic.id, comic)
+                })
+                .collect(),
+        ));
+    }
+
+    pub fn comic(&self, root: &Path, id: i64) -> Option<Comic> {
+        let index = self.comics.read();
+        let (stored_root, comics) = index.as_ref()?;
+        if stored_root != root {
+            return None;
+        }
+        comics.get(&id).cloned()
+    }
+}
+
+pub fn create_id_to_dir_map(app: &AppHandle) -> anyhow::Result<HashMap<i64, PathBuf>> {
+    let download_dir = app.get_config().read().download_dir.clone();
+    let catalog = {
+        let _guard = CATALOG_LOCK.lock();
+        LibraryCatalog::load(&catalog_path(app))?
+    };
+    let removed = catalog.removed_ids(&download_dir);
+    if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
+        if let Some(mut cached_map) = cache.get() {
+            cached_map.retain(|id, _| !removed.contains(id));
+            return Ok(cached_map);
+        }
+    }
+
+    let mut id_to_dir_map: HashMap<i64, PathBuf> = HashMap::new();
+    if !download_dir.exists() {
+        if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
+            cache.set(id_to_dir_map.clone());
+        }
+        return Ok(id_to_dir_map);
+    }
+
+    // 1. 扫描下载根目录下的平铺 .cbz 文件
+    if let Ok(entries) = std::fs::read_dir(&download_dir) {
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_file() && path.is_cbz() {
+                if let Ok(id) = read_comic_id_from_cbz(&path) {
+                    id_to_dir_map.entry(id).or_insert(path);
+                }
+            }
+        }
+    }
+
+    // 2. 扫描历史子目录中的 元数据.json
+    for entry in walk_comic_metadata_files(&download_dir) {
+        let path = entry.path();
+        let id = match read_comic_id(path) {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "跳过损坏的漫画元数据"
+                );
+                continue;
+            }
+        };
+
+        let parent = path
+            .parent()
+            .context(format!("`{}`没有父目录", path.display()))?;
+
+        id_to_dir_map.entry(id).or_insert(parent.to_path_buf());
+    }
+
+    for record in catalog.visible_imports(&download_dir) {
+        if record.path.is_file() {
+            id_to_dir_map.insert(record.id, record.path);
+        }
+    }
+    id_to_dir_map.retain(|id, _| !removed.contains(id));
+    if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
+        cache.set(id_to_dir_map.clone());
+    }
+
+    Ok(id_to_dir_map)
+}
+
+fn read_comic_id(path: &Path) -> anyhow::Result<i64> {
+    let metadata_str =
+        std::fs::read_to_string(path).context(format!("读取`{}`失败", path.display()))?;
+    let comic_json: serde_json::Value = serde_json::from_str(&metadata_str).context(format!(
+        "将`{}`反序列化为serde_json::Value失败",
+        path.display()
+    ))?;
+    comic_json
+        .get("id")
+        .and_then(serde_json::Value::as_i64)
+        .context(format!("`{}`没有有效的`id`字段", path.display()))
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct RegisteredCbz {
@@ -186,6 +373,10 @@ pub(crate) fn registered_cbz_comic(record: &RegisteredCbz) -> anyhow::Result<cra
     use crate::types::{ChapterInfo, Comic};
     ensure!(record.path.is_file(), "已登记的 CBZ 文件不存在");
     let original = Comic::from_cbz(&record.path).ok();
+    let local_cover_data = original
+        .as_ref()
+        .and_then(|comic| comic.local_cover_data.clone())
+        .or_else(|| crate::comic_scanner::load_local_cover_data(&record.path));
     let title = record
         .path
         .file_stem()
@@ -210,7 +401,7 @@ pub(crate) fn registered_cbz_comic(record: &RegisteredCbz) -> anyhow::Result<cra
         }],
         comic_download_dir: Some(record.path.clone()),
         is_downloaded: Some(true),
-        local_cover_data: crate::comic_scanner::load_local_cover_data(&record.path),
+        local_cover_data,
         ..Comic::default()
     })
 }
@@ -288,5 +479,62 @@ mod tests {
         assert_eq!(ids, vec![kept_id]);
         assert!(!ids.contains(&deleted_id));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn downloaded_library_cache_operations() {
+        let cache = DownloadedLibraryCache::new();
+        assert!(cache.get().is_none());
+
+        let mut map = HashMap::new();
+        map.insert(123, PathBuf::from("dir1"));
+        cache.set(map);
+        assert_eq!(cache.get().unwrap().get(&123), Some(&PathBuf::from("dir1")));
+
+        cache.insert(456, PathBuf::from("dir2"));
+        assert_eq!(cache.get().unwrap().get(&456), Some(&PathBuf::from("dir2")));
+
+        cache.remove(123);
+        assert_eq!(cache.get().unwrap().get(&123), None);
+
+        cache.invalidate();
+        assert!(cache.get().is_none());
+    }
+
+    #[test]
+    fn chapter_index_is_bound_to_root_and_invalidated_when_library_changes() {
+        let cache = DownloadedLibraryCache::new();
+        let root = Path::new("downloads");
+        let comic = Comic {
+            id: 1,
+            local_cover_data: Some("large-cover".into()),
+            ..Comic::default()
+        };
+        cache.set_comics(root, vec![comic.clone()]);
+        assert!(cache.comic(root, 1).unwrap().local_cover_data.is_none());
+        assert!(cache.comic(Path::new("other"), 1).is_none());
+        cache.insert(1, root.join("chapter"));
+        assert!(cache.comic(root, 1).is_none());
+        cache.set_comics(root, vec![comic]);
+        cache.invalidate();
+        assert!(cache.comic(root, 1).is_none());
+    }
+
+    #[test]
+    fn replacing_the_path_map_invalidates_cached_comic_snapshots() {
+        let cache = DownloadedLibraryCache::new();
+        let root = Path::new("downloads");
+        let comic = Comic {
+            id: 1,
+            ..Comic::default()
+        };
+        cache.set_comics(root, vec![comic]);
+        assert!(cache.comic(root, 1).is_some());
+
+        let mut map = HashMap::new();
+        map.insert(1, root.join("chapter.cbz"));
+        cache.set(map);
+        // 重新扫描书库后，旧快照必须失效，否则归档整合会拿到没有下载路径的漫画。
+        assert!(cache.comic(root, 1).is_none());
     }
 }

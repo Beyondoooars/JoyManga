@@ -47,17 +47,6 @@ impl TaskFileWrites {
     }
 }
 
-pub(crate) fn save_download_metadata(
-    comic: &Comic,
-    settings: &DownloadSettings,
-) -> anyhow::Result<()> {
-    // 平铺下载的元数据随各章节写入CBZ，根目录不能共用一个漫画的元数据文件。
-    if comic.comic_download_dir.as_deref() == Some(settings.download_dir.as_path()) {
-        return Ok(());
-    }
-    comic.save_comic_metadata()
-}
-
 #[derive(Clone)]
 pub(crate) struct DownloadTask {
     pub(crate) task_id: uuid::Uuid,
@@ -185,21 +174,11 @@ impl DownloadTask {
         let chapter_title = &self.chapter_info.chapter_title;
         let chapter_id = self.chapter_info.chapter_id;
 
-        if let Err(err) = self
-            .file_writes
-            .run(|| save_download_metadata(&self.comic, &self.settings))
-        {
-            let err_title = format!("`{comic_title}`保存元数据失败");
-            let string_chain = err.to_string_chain();
-            tracing::error!(err_title, message = string_chain);
-
-            self.fail_with_error(err_title, &err);
-
-            return;
-        }
-
         if let Some(dir) = &self.comic.comic_download_dir {
-            if let Some(cache) = self.app.try_state::<utils::DownloadedLibraryCache>() {
+            if let Some(cache) = self
+                .app
+                .try_state::<crate::library_catalog::DownloadedLibraryCache>()
+            {
                 cache.insert(self.comic.id, dir.clone());
             }
         }
@@ -213,33 +192,51 @@ impl DownloadTask {
         self.total_img_count
             .store(urls_with_block_num.len() as u32, Ordering::Relaxed);
         self.set_stage(TaskStage::Downloading);
-        // 创建临时下载目录
-        let Some(temp_download_dir) = self.create_temp_download_dir() else {
-            return;
-        };
-        // 清理临时下载目录中不属于当前页码或不是图片的文件
-        self.clean_temp_download_dir(&temp_download_dir);
+        // 创建并清理临时目录；重下时保留原 CBZ 并将有效页面迁入阻塞线程池，避免占用 Tokio 核心工作线程。
+        let temp_download_dir = {
+            let task = self.clone();
+            let expected_pages = urls_with_block_num.len();
+            match tokio::task::spawn_blocking(move || {
+                let Some(temp_download_dir) = task.create_temp_download_dir() else {
+                    return Ok::<_, (String, anyhow::Error)>(None);
+                };
+                task.clean_temp_download_dir(&temp_download_dir);
 
-        // 重新下载时保留原CBZ，复用可读取的页面，只请求缺失或损坏页面。
-        if let Some(source) = &self.chapter_info.chapter_download_dir {
-            if let Err(error) = self.file_writes.run(|| {
-                if source.is_file() {
-                    super::package::ensure_archive_identity(
-                        source,
-                        &self.comic,
-                        &self.chapter_info,
-                    )?;
+                // 重新下载时保留原CBZ，复用可读取的页面，只请求缺失或损坏页面。
+                if let Some(source) = &task.chapter_info.chapter_download_dir {
+                    task.file_writes
+                        .run(|| {
+                            if source.is_file() {
+                                super::package::ensure_archive_identity(
+                                    source,
+                                    &task.comic,
+                                    &task.chapter_info,
+                                )?;
+                            }
+                            super::image_download::seed_valid_pages(
+                                source,
+                                &temp_download_dir,
+                                expected_pages,
+                            )
+                        })
+                        .map_err(|error| ("复用现有章节图片失败".to_string(), error))?;
                 }
-                super::image_download::seed_valid_pages(
-                    source,
-                    &temp_download_dir,
-                    urls_with_block_num.len(),
-                )
-            }) {
-                self.fail_with_error("复用现有章节图片失败".to_string(), &error);
-                return;
+                Ok(Some(temp_download_dir))
+            })
+            .await
+            {
+                Ok(Ok(Some(dir))) => dir,
+                Ok(Ok(None)) => return,
+                Ok(Err((title, error))) => {
+                    self.fail_with_error(title, &error);
+                    return;
+                }
+                Err(error) => {
+                    self.fail_with_error("准备章节下载目录失败".to_string(), &error.into());
+                    return;
+                }
             }
-        }
+        };
 
         // 窗口上限与 buffer_sem 对齐：单张图片归还网络许可进入本地解码/写盘后，
         // 允许立即派发下一张图片并发拉取网络数据，使网络下载与本地落盘真正重叠。
@@ -306,15 +303,28 @@ impl DownloadTask {
         // 图片全部下载并反混淆校验完成，打包为CBZ并清理临时散图目录
         self.set_stage(TaskStage::Archiving);
         let archive_started = Instant::now();
-        if let Err(err) = self.file_writes.run(|| {
-            package_chapter_to_cbz(
-                &self.comic,
-                &self.chapter_info,
-                &self.app,
-                &temp_download_dir,
-                total_img_count as usize,
-            )
-        }) {
+        let pack_result = {
+            let task = self.clone();
+            let temp_dir = temp_download_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                task.file_writes.run(|| {
+                    package_chapter_to_cbz(
+                        &task.comic,
+                        &task.chapter_info,
+                        &task.app,
+                        &temp_dir,
+                        total_img_count as usize,
+                    )
+                })
+            })
+            .await
+        };
+        let pack_err = match pack_result {
+            Ok(Ok(())) => None,
+            Ok(Err(err)) => Some(err),
+            Err(err) => Some(err.into()),
+        };
+        if let Some(err) = pack_err {
             let err_title = format!("`{comic_title} - {chapter_title}`打包CBZ失败");
             let string_chain = err.to_string_chain();
             tracing::error!(err_title, message = string_chain);
@@ -806,9 +816,12 @@ impl Comic {
                         .is_ok()
                 });
             if !keep_existing {
-                chapter_info.chapter_download_dir = Some(comic_dir.join(
-                    utils::storage_cbz_filename(&self.name, self.id, chapter_info.chapter_id),
-                ));
+                chapter_info.chapter_download_dir =
+                    Some(comic_dir.join(crate::comic_scanner::storage_cbz_filename(
+                        &self.name,
+                        self.id,
+                        chapter_info.chapter_id,
+                    )));
             }
         }
 

@@ -1,14 +1,16 @@
+use std::collections::HashMap;
 use std::io::{Read, Seek};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, ensure, Context};
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use walkdir::WalkDir;
 use zip::ZipArchive;
 
 use crate::{
     atomic_fs,
-    extensions::{mime_for_image, PathIsCbz, PathIsImg},
+    extensions::{mime_for_image, PathIsCbz, PathIsImg, WalkDirEntryExt},
     types::{ChapterInfo, Comic, ComicInfo},
     utils,
 };
@@ -27,6 +29,44 @@ pub(crate) fn image_entry_names<R: Read + Seek>(archive: &mut ZipArchive<R>) -> 
             is_page_image(&name).then_some(name)
         })
         .collect()
+}
+
+fn extract_cover_from_archive<R: Read + Seek>(
+    cbz_path: &Path,
+    archive: &mut ZipArchive<R>,
+) -> Option<String> {
+    let mut img_names = image_entry_names(archive);
+    img_names.sort_by(|a, b| utils::natural_cmp(a, b));
+    let first_img = img_names.first()?;
+    let mut entry = archive.by_name(first_img).ok()?;
+    let declared_size = entry.size();
+    let bytes = crate::image_data::read_limited(
+        &mut entry,
+        declared_size,
+        crate::image_data::MAX_PAGE_BYTES,
+    )
+    .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let mime = mime_for_image(Path::new(first_img));
+    Some(match render_thumbnail(&bytes) {
+        Some(thumbnail) => {
+            crate::cover_cache::write_thumbnail(cbz_path, &thumbnail);
+            base64_data_url("image/jpeg", &thumbnail)
+        }
+        None => raw_cover_data_url(&bytes, mime)?,
+    })
+}
+
+fn load_cover_from_open_archive<R: Read + Seek>(
+    cbz_path: &Path,
+    archive: &mut ZipArchive<R>,
+) -> Option<String> {
+    if let Some(bytes) = crate::cover_cache::read_thumbnail(cbz_path) {
+        return Some(base64_data_url("image/jpeg", &bytes));
+    }
+    extract_cover_from_archive(cbz_path, archive)
 }
 
 pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
@@ -64,41 +104,17 @@ pub fn load_local_cover_data(comic_download_dir: &Path) -> Option<String> {
     });
 
     for cbz_path in &cbz_files {
+        if let Some(bytes) = crate::cover_cache::read_thumbnail(cbz_path) {
+            return Some(base64_data_url("image/jpeg", &bytes));
+        }
         let Ok(file) = std::fs::File::open(cbz_path) else {
             continue;
         };
         let Ok(mut archive) = zip::ZipArchive::new(file) else {
             continue;
         };
-
-        let mut img_names = image_entry_names(&mut archive);
-
-        img_names.sort_by(|a, b| utils::natural_cmp(a, b));
-
-        if let Some(first_img) = img_names.first() {
-            if let Ok(mut entry) = archive.by_name(first_img) {
-                if entry.size() > 32 * 1024 * 1024 {
-                    continue;
-                }
-                let declared_size = entry.size();
-                let Ok(bytes) = crate::image_data::read_limited(
-                    &mut entry,
-                    declared_size,
-                    crate::image_data::MAX_PAGE_BYTES,
-                ) else {
-                    continue;
-                };
-                if !bytes.is_empty() {
-                    // 缩略图按「CBZ 路径 + mtime + 大小」落盘缓存：同一本书重复扫描时
-                    // 不必再解压解码，只有归档被替换后才会重新生成。
-                    let thumbnail =
-                        crate::cover_cache::cached_thumbnail(cbz_path, || render_thumbnail(&bytes));
-                    return Some(match thumbnail {
-                        Some(thumbnail) => base64_data_url("image/jpeg", &thumbnail),
-                        None => raw_cover_data_url(&bytes, mime_for_image(Path::new(first_img)))?,
-                    });
-                }
-            }
+        if let Some(cover) = extract_cover_from_archive(cbz_path, &mut archive) {
+            return Some(cover);
         }
     }
 
@@ -281,7 +297,7 @@ pub fn from_cbz(cbz_path: &Path) -> anyhow::Result<Comic> {
         // 外部 CBZ 没有本应用元数据：用负值稳定哈希作为漫画/章节标识，
         // 既不会与 JM 的正数 ID 冲突（避免被误并进同 ID 的在线漫画并在删除时殃及），
         // 也对同一文件保持稳定。
-        let fallback_id = utils::external_cbz_id(cbz_path);
+        let fallback_id = external_cbz_id(cbz_path);
 
         Comic {
             id: fallback_id,
@@ -327,9 +343,9 @@ pub fn from_cbz(cbz_path: &Path) -> anyhow::Result<Comic> {
     };
 
     comic.comic_download_dir = Some(cbz_path.to_path_buf());
-    comic.local_cover_data = load_local_cover_data(cbz_path);
+    comic.local_cover_data = load_cover_from_open_archive(cbz_path, &mut archive);
 
-    let identity = read_chapter_identity(cbz_path)?;
+    let identity = read_chapter_identity_from_archive(&mut archive)?;
     if let Some((comic_id, _)) = identity {
         ensure!(comic_id == comic.id, "CBZ漫画身份与元数据不一致");
     }
@@ -352,7 +368,7 @@ pub fn from_cbz(cbz_path: &Path) -> anyhow::Result<Comic> {
             matched_any = true;
             continue;
         }
-        let expected_name = utils::cbz_filename(
+        let expected_name = cbz_filename(
             &comic.name,
             comic.id,
             &chapter.chapter_title,
@@ -492,7 +508,7 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
     for chapter in &mut comic.chapter_infos {
         chapter.chapter_download_dir = None;
         chapter.is_downloaded = None;
-        let expected_cbz_name = utils::cbz_filename(
+        let expected_cbz_name = cbz_filename(
             &comic.name,
             comic.id,
             &chapter.chapter_title,
@@ -694,6 +710,362 @@ pub(crate) fn read_merged_archive_identity(
     Ok(Some((comic.id, comic.chapter_infos)))
 }
 
+/// 应用在书库里创建的隐藏工作目录（名字通常带前导 `.`）。
+///
+/// 只用于区分“应用临时目录”和“用户自己的隐藏漫画目录”，不要扩大成
+/// “所有隐藏目录”，否则旧书库中以 `.` 开头的漫画会被永久隐藏。
+fn is_app_work_dir_name(name: &str) -> bool {
+    let name = name.strip_prefix('.').unwrap_or(name);
+    name.starts_with("import-") || name.starts_with("downloading-") || name.contains(".trash-")
+}
+
+/// 智能遍历下载目录中的漫画元数据文件。
+/// 通过智能剪枝跳过包含章节元数据（即纯图片子目录）的深层递归，避免访问数万张图片文件。
+pub fn walk_comic_metadata_files(download_dir: &Path) -> impl Iterator<Item = walkdir::DirEntry> {
+    WalkDir::new(download_dir)
+        .into_iter()
+        .filter_entry(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // 应用自己的工作目录与删除残留（`.import-`、`.downloading-`、
+            // `.原名.trash-*`）必须跳过，避免残留被误识别成新漫画。
+            // 但旧版书库允许漫画目录以 `.` 开头：只要它直接包含元数据，
+            // 仍按漫画继续扫描，否则这类漫画会从书库里消失且无法删除。
+            if entry.depth() > 0 && name.starts_with('.') {
+                let is_app_work_dir = is_app_work_dir_name(&name);
+                let is_comic_dir =
+                    entry.file_type().is_dir() && entry.path().join("元数据.json").is_file();
+                if is_app_work_dir || !is_comic_dir {
+                    return false;
+                }
+            }
+            if entry.file_type().is_dir() {
+                // 如果当前目录是章节目录（包含章节元数据），则跳过下钻
+                !entry.path().join("章节元数据.json").exists()
+            } else {
+                // 文件只关心 元数据.json
+                entry.file_name() == "元数据.json"
+            }
+        })
+        .filter_map(Result::ok)
+        .filter(|entry| entry.is_comic_metadata())
+}
+
+pub fn read_comic_id_from_cbz(path: &Path) -> anyhow::Result<i64> {
+    let file = std::fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    for name in &["元数据.json", "metadata.json"] {
+        if let Ok(mut entry) = archive.by_name(name) {
+            let declared_size = entry.size();
+            let Ok(bytes) = crate::image_data::read_limited(
+                &mut entry,
+                declared_size,
+                crate::image_data::MAX_METADATA_BYTES,
+            ) else {
+                continue;
+            };
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(id) = v.get("id").and_then(serde_json::Value::as_i64) {
+                    return Ok(id);
+                }
+            }
+        }
+    }
+    Ok(external_cbz_id(path))
+}
+
+/// 外部 CBZ（无本应用元数据）的漫画/章节标识。
+///
+/// 使用固定算法（UTF-8 字节 FNV-1a）取**负值**：
+/// - 负值不会与 JM 在线漫画的正数 ID 冲突，避免被误并入同 ID 漫画后在删除时殃及；
+/// - 固定算法跨 Rust 版本稳定（`DefaultHasher` 不保证）；
+/// - 同一文件名重复扫描得到相同 ID，书库记录可复用。
+pub(crate) fn external_cbz_id(path: &Path) -> i64 {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in stem.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    let hash = (hash & 0x7FFF_FFFF_FFFF_FFFF) % 1_000_000_000_000;
+    -(hash as i64).max(1)
+}
+
+pub fn storage_cbz_filename(comic_name: &str, comic_id: i64, chapter_id: i64) -> String {
+    let suffix = format!(" [JM{comic_id}-{chapter_id}].cbz");
+    let title = utils::filename_filter(comic_name);
+    let title = utils::truncate_utf8_by_bytes(&title, 180_usize.saturating_sub(suffix.len()));
+    format!("{}{suffix}", if title.is_empty() { "comic" } else { title })
+}
+
+pub fn cbz_filename(
+    comic_name: &str,
+    comic_id: i64,
+    chapter_title: &str,
+    chapter_id: i64,
+    chapter_order: i64,
+    chapter_count: usize,
+) -> String {
+    const MAX_TOTAL_BYTES: usize = 180;
+    const EXTENSION: &str = ".cbz";
+
+    let clean_comic_name = utils::filename_filter(comic_name);
+    let clean_comic_name = if clean_comic_name.is_empty() {
+        format!("comic-{comic_id}")
+    } else {
+        clean_comic_name
+    };
+
+    if chapter_count <= 1 {
+        let max_comic_bytes = MAX_TOTAL_BYTES.saturating_sub(EXTENSION.len());
+        let truncated = utils::truncate_utf8_by_bytes(&clean_comic_name, max_comic_bytes);
+        let final_comic = if truncated.is_empty() {
+            format!("comic-{comic_id}")
+        } else {
+            truncated.to_string()
+        };
+        return format!("{final_comic}{EXTENSION}");
+    }
+
+    let clean_chapter_name = utils::filename_filter(chapter_title);
+    let clean_chapter_name = if clean_chapter_name.is_empty() {
+        format!("chapter-{chapter_id}")
+    } else {
+        clean_chapter_name
+    };
+
+    let middle = format!(" - {:04} - ", chapter_order);
+    let fixed_len = middle.len() + EXTENSION.len();
+    let available_for_names = MAX_TOTAL_BYTES.saturating_sub(fixed_len);
+
+    let max_chapter_bytes = 50.min(available_for_names.saturating_sub(30));
+    let truncated_chapter = utils::truncate_utf8_by_bytes(&clean_chapter_name, max_chapter_bytes);
+    let chapter_part = if truncated_chapter.is_empty() {
+        format!("chapter-{chapter_id}")
+    } else {
+        truncated_chapter.to_string()
+    };
+
+    let remaining_for_comic = available_for_names.saturating_sub(chapter_part.len());
+    let truncated_comic = utils::truncate_utf8_by_bytes(&clean_comic_name, remaining_for_comic);
+    let comic_part = if truncated_comic.is_empty() {
+        format!("comic-{comic_id}")
+    } else {
+        truncated_comic.to_string()
+    };
+
+    format!("{comic_part}{middle}{chapter_part}{EXTENSION}")
+}
+
+/// 收集章节目录中的有效页面：按自然序排序，并按文件主名去重
+/// （同一页可能残留不同扩展名的旧文件）。
+///
+/// 同一页有多个扩展名时保留**最近写入**的那个：断点续传的 `find_existing_page`
+/// 也按同样规则挑选可解码的文件，两边保持一致，避免阅读/导出拿到旧的坏页。
+pub fn collect_page_images(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let name_of = |path: &Path| -> String {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+
+    // 用 DirEntry 自带的文件类型与元数据：不必再为每个条目额外 stat 两次
+    // （`path.is_file()` 与 `fs::metadata()` 各自都是一次系统调用）。
+    let mut image_paths: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(dir)
+        .with_context(|| format!("读取章节目录`{}`失败", dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()) && entry.path().is_img())
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (entry.path(), modified)
+        })
+        .collect();
+
+    // 先按自然序排好，再逐页挑最近修改的文件；最终结果仍按自然序输出。
+    image_paths.sort_by(|(a, _), (b, _)| utils::natural_cmp(&name_of(a), &name_of(b)));
+    let mut newest_by_stem: HashMap<std::ffi::OsString, (PathBuf, std::time::SystemTime)> =
+        HashMap::new();
+    for (path, modified) in image_paths {
+        let stem = path.file_stem().unwrap_or_default().to_owned();
+        match newest_by_stem.get(&stem) {
+            Some((_, existing)) if *existing >= modified => {}
+            _ => {
+                newest_by_stem.insert(stem, (path, modified));
+            }
+        }
+    }
+    let mut pages: Vec<PathBuf> = newest_by_stem.into_values().map(|(path, _)| path).collect();
+    pages.sort_by(|a, b| utils::natural_cmp(&name_of(a), &name_of(b)));
+    Ok(pages)
+}
+
+#[cfg(test)]
+mod scanner_utils_tests {
+    use super::{
+        cbz_filename, collect_page_images, read_comic_id_from_cbz, storage_cbz_filename,
+        walk_comic_metadata_files,
+    };
+    use std::path::{Path, PathBuf};
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("joymanga-scanner-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn collect_page_images_prefers_newest_file_for_duplicate_stems() {
+        let sandbox = TestDir::new();
+        let dir = sandbox.path().join("chapter");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧实现按自然序保留 jpg；断点续传补下的 webp 才是可用页
+        std::fs::write(dir.join("0001.jpg"), b"old").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("0001.webp"), b"new").unwrap();
+        std::fs::write(dir.join("0002.jpg"), b"page2").unwrap();
+        std::fs::write(dir.join("0010.jpg"), b"page10").unwrap();
+
+        let pages = collect_page_images(&dir).unwrap();
+        let names: Vec<_> = pages
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["0001.webp", "0002.jpg", "0010.jpg"]);
+    }
+
+    #[test]
+    fn walk_comic_metadata_files_prunes_chapter_images() {
+        let sandbox = TestDir::new();
+        let comic_dir = sandbox.path().join("author").join("comic_1");
+        let chapter_dir = comic_dir.join("chapter_1");
+        std::fs::create_dir_all(&chapter_dir).unwrap();
+
+        std::fs::write(comic_dir.join("元数据.json"), b"{}").unwrap();
+        std::fs::write(chapter_dir.join("章节元数据.json"), b"{}").unwrap();
+        std::fs::write(chapter_dir.join("0001.jpg"), b"fake_img").unwrap();
+        std::fs::write(chapter_dir.join("0002.jpg"), b"fake_img").unwrap();
+
+        let entries: Vec<_> = walk_comic_metadata_files(sandbox.path()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_name(), "元数据.json");
+    }
+
+    #[test]
+    fn walk_comic_metadata_files_skips_hidden_work_dirs() {
+        let sandbox = TestDir::new();
+        let comic_dir = sandbox.path().join("comic_1");
+        std::fs::create_dir_all(&comic_dir).unwrap();
+        std::fs::write(comic_dir.join("元数据.json"), b"{}").unwrap();
+
+        // 删除残留（.原名.trash-*）与下载/导入临时目录都是隐藏目录，
+        // 不能被当成一本新漫画扫描出来。
+        for hidden in [".小说.trash-1234", ".downloading-小说-1", ".import-abc"] {
+            let dir = sandbox.path().join(hidden);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("元数据.json"), b"{}").unwrap();
+        }
+
+        let entries: Vec<_> = walk_comic_metadata_files(sandbox.path()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), comic_dir.join("元数据.json"));
+    }
+
+    #[test]
+    fn walk_comic_metadata_files_keeps_legacy_hidden_comic_dirs() {
+        let sandbox = TestDir::new();
+        // 旧版书库允许漫画目录以 `.` 开头；它不是应用的临时目录，不能隐藏。
+        let hidden_comic = sandbox.path().join(".hack  G.U");
+        std::fs::create_dir_all(&hidden_comic).unwrap();
+        std::fs::write(hidden_comic.join("元数据.json"), b"{}").unwrap();
+        // 普通隐藏目录仍然剪枝，避免无谓下钻
+        std::fs::create_dir_all(sandbox.path().join(".cache")).unwrap();
+
+        let entries: Vec<_> = walk_comic_metadata_files(sandbox.path()).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), hidden_comic.join("元数据.json"));
+    }
+
+    #[test]
+    fn read_comic_id_from_cbz_produces_unique_hashes_for_different_titles() {
+        let sandbox = TestDir::new();
+        let cbz_a = sandbox.path().join("(C102) [作者A] 作品一.cbz");
+        let cbz_b = sandbox.path().join("(C102) [作者B] 作品二.cbz");
+
+        {
+            let f = std::fs::File::create(&cbz_a).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            z.start_file("0001.jpg", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.finish().unwrap();
+        }
+        {
+            let f = std::fs::File::create(&cbz_b).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            z.start_file("0001.jpg", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.finish().unwrap();
+        }
+
+        let id_a = read_comic_id_from_cbz(&cbz_a).unwrap();
+        let id_b = read_comic_id_from_cbz(&cbz_b).unwrap();
+
+        assert!(id_a < 0, "外部CBZ应使用负值标识，避免与在线漫画ID冲突");
+        assert!(id_b < 0);
+        assert_ne!(id_a, id_b, "相同数字前缀但不同标题的CBZ不能产生相同的ID");
+        // 同一路径重复计算必须稳定
+        assert_eq!(id_a, read_comic_id_from_cbz(&cbz_a).unwrap());
+    }
+
+    #[test]
+    fn cbz_filename_bounds_byte_length_for_long_titles() {
+        let long_comic = "不擅交际的未亡人雪女与诅咒戒指2 [ぷうのぷうぷうぷう (ぷう崎ぷう奈)] 人付き合いが苦手な未亡人の雪女さんと呪いの指輪 2 [中国翻訳]";
+        let long_chapter = "第2话 淫书馆汉化(可下载) 附录特典全彩高清完全版详细说明特别篇";
+        let filename = cbz_filename(long_comic, 12345, long_chapter, 67890, 2, 5);
+
+        assert!(filename.ends_with(".cbz"));
+        assert!(
+            filename.len() <= 180,
+            "CBZ 文件名 UTF-8 字节长度超过安全上限: {}",
+            filename.len()
+        );
+        assert!(filename.contains(" - 0002 - "));
+    }
+
+    #[test]
+    fn duplicate_titles_and_sanitized_names_keep_distinct_storage_ids() {
+        assert_ne!(
+            storage_cbz_filename("同名", 111, 111),
+            storage_cbz_filename("同名", 222, 222)
+        );
+        assert_ne!(
+            storage_cbz_filename("a/b", 111, 111),
+            storage_cbz_filename("a\\b", 222, 222)
+        );
+        let long = storage_cbz_filename(&"漫画😀".repeat(300), 111, 111);
+        assert!(long.len() <= 180);
+        assert!(long.ends_with("[JM111-111].cbz"));
+    }
+}
+
 #[cfg(test)]
 mod new_storage_tests {
     use super::*;
@@ -721,7 +1093,7 @@ mod new_storage_tests {
             ..Default::default()
         };
         for chapter in &comic.chapter_infos {
-            let path = root.join(utils::storage_cbz_filename(
+            let path = root.join(storage_cbz_filename(
                 &comic.name,
                 comic.id,
                 chapter.chapter_id,
@@ -745,7 +1117,7 @@ mod new_storage_tests {
             assert!(chapter
                 .chapter_download_dir
                 .unwrap()
-                .ends_with(utils::storage_cbz_filename("同名", 111, chapter.chapter_id)));
+                .ends_with(storage_cbz_filename("同名", 111, chapter.chapter_id)));
         }
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -771,7 +1143,7 @@ mod new_storage_tests {
             ..Comic::default()
         };
         for chapter in &chapters {
-            let path = root.join(utils::storage_cbz_filename(
+            let path = root.join(storage_cbz_filename(
                 &comic.name,
                 comic.id,
                 chapter.chapter_id,

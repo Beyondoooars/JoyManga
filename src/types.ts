@@ -7,4 +7,6 @@ export type ProgressesPaneTabName = 'uncompleted' | 'completed'
 export type ProgressData = Extract<DownloadTaskEvent, { event: 'Create' }>['data'] & {
   percentage: number
   indicator: string
+  createdSeq?: number
+  updatedSeq?: number
 }

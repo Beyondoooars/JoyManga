@@ -15,27 +15,15 @@ import {
   type GetFavoriteResult,
   type GetUserProfileRespData,
   type GetWeeklyResult,
-  type LogEvent,
   type SearchResult,
   type TaskFailure,
 } from './bindings.ts'
-import { computed, nextTick, ref, toRaw } from 'vue'
+import { computed, nextTick, ref, toRaw, watch } from 'vue'
 import { mergeServerConfig, hasConfigChanges } from './utils/configState.ts'
 import { applyDownloadEvent } from './utils/downloadProgress.ts'
 import { resolveImageDomain } from './utils/imageDomain.ts'
 import { emptyReadingState, parseReadingState, recordProgress, sanitizeReadingStateValue, toggleBookmark,
   READING_STORAGE_KEY, type ReadingProgress, type ReadingState } from './utils/readingState.ts'
-
-export type LogRecord = LogEvent & { id: number; formatedLog: string }
-
-function formatLogEvent(logEvent: LogEvent): string {
-  const { timestamp, level, fields, target, filename, line_number } = logEvent
-  const fields_str = Object.entries(fields)
-    .sort(([key1], [key2]) => key1.localeCompare(key2))
-    .map(([key, value]) => `${key}=${value}`)
-    .join(' ')
-  return `${timestamp} ${level} ${target}: ${filename}:${line_number} ${fields_str}`
-}
 
 export const useStore = defineStore('store', () => {
   const config = ref<Config>()
@@ -57,9 +45,14 @@ export const useStore = defineStore('store', () => {
   function applyConfig(server: Config, discardLocal = false) {
     if (authoritativeConfig.value && (server.revision ?? 0) < (authoritativeConfig.value.revision ?? 0)) return
     const old = authoritativeConfig.value
+    const previousDownloadDir = config.value?.downloadDir
     const previousCredentials = config.value === undefined ? undefined : `${config.value.username}\u0000${config.value.password}`
     config.value = discardLocal ? structuredClone(toRaw(server)) : mergeServerConfig(config.value, old, server)
     authoritativeConfig.value = structuredClone(toRaw(server))
+    if ((old !== undefined && old.downloadDir !== server.downloadDir)
+      || (previousDownloadDir !== undefined && previousDownloadDir !== config.value.downloadDir)) {
+      invalidateDownloadedLibrary({ clear: true })
+    }
     // 记住的账密被服务端配置改写（重置/恢复/退出登录）时，账号页表单要重新同步
     if (previousCredentials !== undefined && previousCredentials !== `${config.value.username}\u0000${config.value.password}`) {
       accountFormRevision.value++
@@ -204,9 +197,7 @@ export const useStore = defineStore('store', () => {
         if (state && state.runId !== payload.data.runId) break
         archivingComics.value.delete(comicId)
         archiveFailures.value.delete(comicId)
-        if (pickedComic.value?.id === comicId) {
-          pickedComic.value.isDownloaded = true
-        }
+        markComicDownloaded(comicId)
         // 整合会重写书库文件（合并成整本 CBZ 或改名），列表必须重新扫描；
         // 不在书库页时只做陈旧标记，由可见页的单一调度入口扫描。
         invalidateDownloadedLibrary()
@@ -280,17 +271,90 @@ export const useStore = defineStore('store', () => {
     openReader(comic.id, chapter.chapterId, comic.name, chapter.chapterId === progress?.chapterId ? progress.page : 1)
   }
   const configMaintenanceInProgress = ref(false)
-  let waitForConfigSaves = async () => {}
+  let configAutoSaveEnabled = false
+  let configSaveRevision = 0
+  let configSaveTimer: ReturnType<typeof setTimeout> | undefined
+  let configSaveQueue: Promise<void> = Promise.resolve()
+  let pendingConfigSave: { revision: number; snapshot: Config; base: Config } | undefined
+  let configSaveErrorHandler: ((error: unknown) => void) | undefined
 
-  function registerConfigSaveWaiter(waiter: () => Promise<void>) {
-    waitForConfigSaves = waiter
+  function clearPendingConfigSaveTimer() {
+    if (configSaveTimer !== undefined) {
+      clearTimeout(configSaveTimer)
+      configSaveTimer = undefined
+    }
   }
+
+  function enqueueConfigSave(item: { revision: number; snapshot: Config; base: Config }) {
+    configSaveQueue = configSaveQueue
+      .catch((error) => {
+        console.error('上一次配置保存任务异常退出', error)
+      })
+      .then(async () => {
+        if (item.revision !== configSaveRevision || configMaintenanceInProgress.value) return
+        try {
+          await persistConfig(item.snapshot, item.base)
+        } catch (error) {
+          console.error(error)
+          if (item.revision === configSaveRevision) {
+            configSaveErrorHandler?.(error)
+          }
+        }
+      })
+  }
+
+  function flushPendingConfigSave() {
+    if (!configAutoSaveEnabled || configMaintenanceInProgress.value) return
+    clearPendingConfigSaveTimer()
+    const next = pendingConfigSave
+    pendingConfigSave = undefined
+    if (next && next.revision === configSaveRevision) {
+      enqueueConfigSave(next)
+    }
+  }
+
+  function enableConfigAutoSave(onError?: (error: unknown) => void) {
+    configSaveErrorHandler = onError
+    configAutoSaveEnabled = true
+  }
+
+  function disableConfigAutoSave({ flush = false } = {}) {
+    configSaveErrorHandler = undefined
+    if (flush) flushPendingConfigSave()
+    configAutoSaveEnabled = false
+    clearPendingConfigSaveTimer()
+    pendingConfigSave = undefined
+  }
+
+  watch(
+    () => config.value,
+    (nextConfig) => {
+      if (!configAutoSaveEnabled || nextConfig === undefined || configMaintenanceInProgress.value || !configIsDirty()) {
+        return
+      }
+      const revision = ++configSaveRevision
+      const snapshot = structuredClone(toRaw(nextConfig))
+      const base = structuredClone(toRaw(authoritativeConfig.value!))
+      pendingConfigSave = { revision, snapshot, base }
+      clearPendingConfigSaveTimer()
+      configSaveTimer = setTimeout(() => {
+        configSaveTimer = undefined
+        const next = pendingConfigSave
+        pendingConfigSave = undefined
+        if (next) enqueueConfigSave(next)
+      }, 400)
+    },
+    { deep: true },
+  )
 
   async function runConfigMaintenance<T>(action: () => Promise<T>): Promise<T> {
     if (configMaintenanceInProgress.value) throw new Error('配置维护正在进行，请稍后重试')
     configMaintenanceInProgress.value = true
+    configSaveRevision++
+    pendingConfigSave = undefined
+    clearPendingConfigSaveTimer()
     try {
-      await waitForConfigSaves()
+      await configSaveQueue
       return await action()
     } finally {
       await nextTick()
@@ -311,6 +375,7 @@ export const useStore = defineStore('store', () => {
   const currentTabName = ref<CurrentTabName>('search')
   /** 打开「我的」前所在的标签页，返回键/关闭时回到这里 */
   const accountReturnTab = ref<CurrentTabName>('search')
+  const reloginRequested = ref(false)
   const chapterDetailShowing = ref<boolean>(false)
   const progresses = ref<Map<number, ProgressData>>(new Map())
   const getFavoriteResult = ref<GetFavoriteResult>()
@@ -323,7 +388,57 @@ export const useStore = defineStore('store', () => {
   // 不在事件里直接扫描：下载可能连续完成多个章节，攒到用户真正打开书库页时再拉一次。
   const downloadedComicsStale = ref(false)
   const downloadedLibraryEpoch = ref(0)
+  // 仅在切换下载目录/清空缓存时递增，使更早拉取到的发现/收藏/详情快照失效。
+  const downloadedLibraryResetEpoch = ref(0)
+  const pickedComicLibraryEpoch = ref(0)
+  const sessionDownloadedComicIds = ref(new Set<number>())
+  const sessionRemovedComicIds = ref(new Set<number>())
+  const downloadedComicIds = computed(() => {
+    const ids = new Set<number>()
+    for (const comic of downloadedComics.value) {
+      if (!sessionRemovedComicIds.value.has(comic.id)) ids.add(comic.id)
+    }
+    for (const id of sessionDownloadedComicIds.value) ids.add(id)
+    return ids
+  })
   const downloadedSubTab = ref<'library' | 'transfers'>('library')
+
+  function clearComicDownloadMarkers(comic: Comic) {
+    comic.isDownloaded = false
+    comic.comicDownloadDir = null
+    for (const chapter of comic.chapterInfos) {
+      chapter.isDownloaded = false
+      chapter.chapterDownloadDir = null
+    }
+  }
+
+  function markComicDownloaded(comicId: number) {
+    sessionRemovedComicIds.value.delete(comicId)
+    sessionDownloadedComicIds.value.add(comicId)
+  }
+
+  function markComicRemoved(comicId: number) {
+    sessionDownloadedComicIds.value.delete(comicId)
+    sessionRemovedComicIds.value.add(comicId)
+    downloadedComics.value = downloadedComics.value.filter((comic) => comic.id !== comicId)
+    if (pickedComic.value?.id === comicId) {
+      clearComicDownloadMarkers(pickedComic.value)
+    }
+  }
+
+  function isComicDownloaded(
+    comicId: number,
+    initialDownloaded?: boolean | null,
+    initialResetEpoch?: number,
+  ): boolean {
+    if (sessionRemovedComicIds.value.has(comicId)) return false
+    if (sessionDownloadedComicIds.value.has(comicId)) return true
+    if (downloadedComicsLoaded.value) return downloadedComicIds.value.has(comicId)
+    if (initialResetEpoch !== undefined && initialResetEpoch !== downloadedLibraryResetEpoch.value) {
+      return false
+    }
+    return initialDownloaded === true
+  }
 
   function openTransfers() {
     closeComicDetail()
@@ -332,13 +447,20 @@ export const useStore = defineStore('store', () => {
   }
 
   /** 打开「我的」页（账号/登录/在线收藏），并记住来处以便返回。 */
-  function openAccount() {
+  function openAccount(options?: { relogin?: boolean }) {
+    if (options?.relogin) {
+      reloginRequested.value = true
+    }
     if (currentTabName.value !== 'account') {
       accountReturnTab.value = currentTabName.value
     }
     // 走 closeComicDetail 递增请求代数：否则在途的 openComic 返回后会把详情重新盖上来
     closeComicDetail()
     currentTabName.value = 'account'
+  }
+
+  function clearReloginRequest() {
+    reloginRequested.value = false
   }
 
   /** 从「我的」返回之前的页面（未登录时点收藏进入的那一页）。 */
@@ -379,6 +501,7 @@ export const useStore = defineStore('store', () => {
     return { current: 0, total: 0 }
   })
   let speedUnlisten: (() => void) | undefined
+  let speedListenerPromise: Promise<void> | undefined
 
   const activeDownloadCount = computed(() => {
     let count = 0
@@ -398,17 +521,26 @@ export const useStore = defineStore('store', () => {
     for (const [chapterId, progress] of progresses.value) {
       if (progress.state !== 'Downloading') continue
       const result = await commands.cancelDownloadTask(chapterId)
-      if (result.status === 'error') return `${result.error.err_title}：${result.error.err_message}`
+      if (result.status === 'error') {
+        throw new Error(`${result.error.err_title}：${result.error.err_message}`)
+      }
       return progress.chapterInfo.chapterTitle
     }
     return null
   }
 
-  async function initSpeedListener() {
-    if (speedUnlisten) return
-    speedUnlisten = await events.downloadSpeedEvent.listen(({ payload: { speed } }) => {
-      downloadSpeed.value = speed
+  function initSpeedListener(): Promise<void> {
+    if (speedUnlisten) return Promise.resolve()
+    if (speedListenerPromise) return speedListenerPromise
+    speedListenerPromise = (async () => {
+      speedUnlisten = await events.downloadSpeedEvent.listen(({ payload: { speed } }) => {
+        downloadSpeed.value = speed
+      })
+    })().catch((error) => {
+      speedListenerPromise = undefined
+      throw error
     })
+    return speedListenerPromise
   }
 
   let pickedComicRequestGeneration = 0
@@ -441,6 +573,7 @@ export const useStore = defineStore('store', () => {
   function showComic(comic: Comic, fromNetwork = false) {
     pickedComicRequestGeneration += 1
     pickedComic.value = comic
+    pickedComicLibraryEpoch.value = downloadedLibraryResetEpoch.value
     pickedComicFavoriteEpoch.value = fromNetwork ? sessionEpoch.value : undefined
     if (fromNetwork) recordFavorite(comic.id, comic.is_favorite, sessionEpoch.value)
     chapterDetailShowing.value = true
@@ -469,6 +602,7 @@ export const useStore = defineStore('store', () => {
     const generation = ++pickedComicRequestGeneration
     const epoch = sessionEpoch.value
     const observedRevision = favoriteRevision.value
+    const libraryResetEpoch = downloadedLibraryResetEpoch.value
     const result = await commands.getComic(comicId)
     if (generation !== pickedComicRequestGeneration || epoch !== sessionEpoch.value) {
       return { status: 'stale' } as const
@@ -478,6 +612,7 @@ export const useStore = defineStore('store', () => {
     }
 
     pickedComic.value = result.data
+    pickedComicLibraryEpoch.value = libraryResetEpoch
     pickedComicFavoriteEpoch.value = epoch
     recordFavorite(comicId, result.data.is_favorite, epoch, observedRevision)
     if (revealDetail) {
@@ -516,6 +651,8 @@ export const useStore = defineStore('store', () => {
     downloadedComics.value = comics
     downloadedComicsLoaded.value = true
     downloadedComicsStale.value = false
+    sessionDownloadedComicIds.value.clear()
+    sessionRemovedComicIds.value.clear()
     return true
   }
 
@@ -523,9 +660,15 @@ export const useStore = defineStore('store', () => {
     downloadedLibraryEpoch.value++
     downloadedComicsStale.value = true
     if (clear) {
+      downloadedLibraryResetEpoch.value++
+      sessionDownloadedComicIds.value.clear()
+      sessionRemovedComicIds.value.clear()
       downloadedComicsRequestGeneration++
       downloadedComics.value = []
       downloadedComicsLoaded.value = false
+      if (pickedComic.value) {
+        clearComicDownloadMarkers(pickedComic.value)
+      }
     }
   }
 
@@ -557,8 +700,29 @@ export const useStore = defineStore('store', () => {
   let tasksHydrating = true
   let taskListenerPromise: Promise<void> | undefined
   const bufferedTasks: DownloadTaskEvent[] = []
+  const dismissedCompleted = new Map<string, number>()
+
+  function dismissedCompletedKey(chapterId: number, taskId: string) {
+    return `${chapterId}:${taskId}`
+  }
+
+  function clearCompletedProgresses() {
+    for (const [chapterId, progress] of progresses.value.entries()) {
+      if (progress.state !== 'Completed') continue
+      dismissedCompleted.set(dismissedCompletedKey(chapterId, progress.taskId), progress.revision)
+      progresses.value.delete(chapterId)
+    }
+  }
+
   function handleTaskEvent(event: DownloadTaskEvent) {
-    const previous = progresses.value.get(event.event === 'Create' ? event.data.chapterInfo.chapterId : event.data.chapterId)?.state
+    const chapterId = event.event === 'Create' ? event.data.chapterInfo.chapterId : event.data.chapterId
+    if (event.event === 'Create' && event.data.state === 'Completed') {
+      const dismissedRevision = dismissedCompleted.get(dismissedCompletedKey(chapterId, event.data.taskId))
+      if (dismissedRevision !== undefined && event.data.revision <= dismissedRevision) return
+    } else if (event.event === 'Create') {
+      dismissedCompleted.delete(dismissedCompletedKey(chapterId, event.data.taskId))
+    }
+    const previous = progresses.value.get(chapterId)?.state
     const progress = applyDownloadEvent(progresses.value, event)
     if (progress?.state === 'Completed' && previous !== 'Completed') {
       progress.chapterInfo.isDownloaded = true
@@ -607,7 +771,9 @@ function syncCompletedDownload(progressData: ProgressData, libraryChanged = true
   const comicDownloadDir = progressData.comic.comicDownloadDir
 
   if (pickedComic.value?.id === comicId) {
-    pickedComic.value.isDownloaded = true
+    if (libraryChanged) {
+      pickedComic.value.isDownloaded = true
+    }
     if (comicDownloadDir !== undefined && comicDownloadDir !== null) {
       pickedComic.value.comicDownloadDir = comicDownloadDir
     }
@@ -619,29 +785,11 @@ function syncCompletedDownload(progressData: ProgressData, libraryChanged = true
     }
   }
 
-  const summaries = [searchResult.value?.content, getFavoriteResult.value?.list]
-  for (const list of summaries) {
-    const comic = list?.find(({ id }) => id === comicId)
-    if (comic !== undefined) {
-      comic.isDownloaded = true
-      if (comicDownloadDir !== undefined && comicDownloadDir !== null) {
-        comic.comicDownloadDir = comicDownloadDir
-      }
-    }
+  // 只在实时完成时更新会话入库标记与刷新标脏；冷启动历史队列还原不代表文件仍在磁盘上。
+  if (libraryChanged) {
+    markComicDownloaded(comicId)
+    invalidateDownloadedLibrary()
   }
-
-  const weeklyComic = getWeeklyResult.value?.list.find(({ id }) => id === comicId)
-  if (weeklyComic !== undefined) {
-    weeklyComic.is_downloaded = true
-    if (comicDownloadDir !== undefined && comicDownloadDir !== null) {
-      weeklyComic.comic_download_dir = comicDownloadDir
-    }
-  }
-
-  // 无论在哪个页面下载，书库内容都已改变：标记陈旧，用户下次进入书库页时重新扫描。
-  // 正在看书库时立刻刷新，避免停在旧列表上。
-  if (libraryChanged) invalidateDownloadedLibrary()
-
 }
 
 function trimProgressHistory() {
@@ -656,39 +804,14 @@ function trimProgressHistory() {
   }
 }
 
-
-  const logRecords = ref<LogRecord[]>([])
-  let nextLogRecordId = 1
-  let logEventUnlisten: (() => void) | undefined
-
-  async function initLogListener() {
-    if (logEventUnlisten) return
-    logEventUnlisten = await events.logEvent.listen(({ payload: logEvent }) => {
-      const record: LogRecord = {
-        ...logEvent,
-        id: nextLogRecordId++,
-        formatedLog: formatLogEvent(logEvent),
-      }
-      logRecords.value.push(record)
-      if (logRecords.value.length > 5000) {
-        logRecords.value.splice(0, logRecords.value.length - 5000)
-      }
-    })
-  }
-
-  function clearLogRecords() {
-    logRecords.value = []
-    nextLogRecordId = 1
-  }
-
   return {
     config,
     authoritativeConfig, apiDomainPresets, applyConfig, persistConfig, configIsDirty,
-    openAccount, closeAccount, openSettings, closeSettings, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
+    openAccount, clearReloginRequest, reloginRequested, closeAccount, openSettings, closeSettings, sessionEpoch, accountFormRevision, favoriteStatuses, favoritePending, pickedComicFavoriteEpoch,
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch, favoriteListStale,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, handleFavoriteChangedEvent, initStateListeners,
     archivingComics, isArchiving, archiveFailures, archiveFailure,
-    initDownloadListener, reloadTasks, taskLoadError, loadingTasks,
+    initDownloadListener, reloadTasks, taskLoadError, loadingTasks, clearCompletedProgresses,
     readingState,
     readingPersistenceError,
     saveReadingProgress,
@@ -698,7 +821,9 @@ function trimProgressHistory() {
     forgetComicReadingState,
     continueReading,
     configMaintenanceInProgress,
-    registerConfigSaveWaiter,
+    enableConfigAutoSave,
+    disableConfigAutoSave,
+    flushPendingConfigSave,
     runConfigMaintenance,
     saveConfigNow,
     userProfile,
@@ -716,6 +841,12 @@ function trimProgressHistory() {
     downloadedComicsLoaded,
     downloadedComicsStale,
     downloadedLibraryEpoch,
+    downloadedLibraryResetEpoch,
+    downloadedComicIds,
+    pickedComicLibraryEpoch,
+    markComicDownloaded,
+    markComicRemoved,
+    isComicDownloaded,
     invalidateDownloadedLibrary,
     initBackgroundFailureListener,
     downloadedSubTab,
@@ -731,9 +862,6 @@ function trimProgressHistory() {
     openComic,
     refreshPickedComic,
     refreshDownloadedComics,
-    logRecords,
-    initLogListener,
-    clearLogRecords,
     downloadSpeed,
     activeDownloadPages,
     cancelCurrentDownload,

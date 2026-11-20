@@ -3,6 +3,7 @@ import { getVersion } from '@tauri-apps/api/app'
 import { isAndroid } from './useIsMobile.ts'
 import { downloadAndInstallApk, syncUpdateDownloadState, type UpdateProgress } from '../utils/androidStorage.ts'
 import { openExternalUrl, REPO_NAME, REPO_OWNER } from '../utils/externalLink.ts'
+import { compareVersions } from '../utils/semver.ts'
 
 export interface GithubReleaseAsset {
   name: string
@@ -112,28 +113,33 @@ if (isAndroid && typeof document !== 'undefined') {
   })
 }
 
-function compareVersions(v1: string, v2: string): number {
-  const p1 = v1.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0)
-  const p2 = v2.replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0)
-  for (let i = 0; i < Math.max(p1.length, p2.length); i++) {
-    const num1 = p1[i] || 0
-    const num2 = p2[i] || 0
-    if (num1 > num2) return 1
-    if (num1 < num2) return -1
+function safeStorageGet(key: string): string | null {
+  try {
+    return globalThis.localStorage?.getItem(key) ?? null
+  } catch (error) {
+    console.warn(`读取本地存储 ${key} 失败`, error)
+    return null
   }
-  return 0
+}
+
+function safeStorageSet(key: string, value: string): void {
+  try {
+    globalThis.localStorage?.setItem(key, value)
+  } catch (error) {
+    console.warn(`写入本地存储 ${key} 失败`, error)
+  }
 }
 
 /** 距上次静默检查是否已超过允许的间隔；手动检查不受限制。 */
 function silentCheckDue(): boolean {
-  const last = Number(localStorage.getItem(LAST_CHECK_KEY) ?? 0)
+  const last = Number(safeStorageGet(LAST_CHECK_KEY) ?? 0)
   if (!Number.isFinite(last) || last <= 0) return true
   return Date.now() - last >= SILENT_INTERVAL_MS
 }
 
 function markChecked(success: boolean) {
   const next = success ? Date.now() : Date.now() - SILENT_INTERVAL_MS + RETRY_INTERVAL_MS
-  localStorage.setItem(LAST_CHECK_KEY, String(next))
+  safeStorageSet(LAST_CHECK_KEY, String(next))
 }
 
 export function useAppUpdate() {
@@ -194,7 +200,7 @@ export function useAppUpdate() {
       if (compareVersions(tag, currentVersion.value) > 0) {
         hasUpdate.value = true
         // 如果是启动时的静默检查，检查用户是否已设置“跳过此版本”
-        const ignoredVersion = localStorage.getItem(IGNORED_VERSION_KEY)
+        const ignoredVersion = safeStorageGet(IGNORED_VERSION_KEY)
         if (silent && ignoredVersion === tag) {
           showUpdateDialog.value = false
         } else {
@@ -218,7 +224,7 @@ export function useAppUpdate() {
 
   function ignoreCurrentUpdate() {
     if (latestVersion.value) {
-      localStorage.setItem(IGNORED_VERSION_KEY, latestVersion.value)
+      safeStorageSet(IGNORED_VERSION_KEY, latestVersion.value)
     }
     showUpdateDialog.value = false
   }

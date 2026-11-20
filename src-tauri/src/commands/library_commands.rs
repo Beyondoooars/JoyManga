@@ -1,15 +1,12 @@
 use std::path::Path;
-use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use indexmap::IndexMap;
 use tauri::{AppHandle, Manager};
 
-use crate::errors::{CommandError, CommandResult};
-use crate::export;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt, PathIsCbz};
-use crate::types::{Comic, ComicInFavorite, ComicInSearch, ComicInWeekly};
-use crate::utils;
+use crate::library_catalog::DownloadedLibraryCache;
+use crate::types::Comic;
 
 /// 书库扫描结果：漫画列表 + 扫描过程中被跳过的项。
 ///
@@ -20,12 +17,37 @@ pub(crate) struct LibraryScan {
     pub skipped: Vec<String>,
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::too_many_lines)]
 #[tauri::command(async)]
 #[specta::specta]
-pub fn get_downloaded_comics(app: AppHandle) -> Vec<Comic> {
-    downloaded_library(&app, false).comics
+pub async fn get_downloaded_comics(app: AppHandle) -> Vec<Comic> {
+    tauri::async_runtime::spawn_blocking(move || downloaded_library(&app, false).comics)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "读取本地书库任务失败");
+            Vec::new()
+        })
+}
+
+/// 从缓存或书库扫描中定位本地漫画。`include_removed` 供删除流程使用，
+/// 允许命中"文件仍在、记录已被移除"的历史漫画。
+pub(crate) fn find_local_comic(
+    app: &AppHandle,
+    comic_id: i64,
+    include_removed: bool,
+) -> anyhow::Result<Comic> {
+    let root = app.get_config().read().download_dir.clone();
+    if let Some(comic) = app
+        .try_state::<DownloadedLibraryCache>()
+        .and_then(|cache| cache.comic(&root, comic_id))
+    {
+        return Ok(comic);
+    }
+    downloaded_library(app, include_removed)
+        .comics
+        .into_iter()
+        .find(|comic| comic.id == comic_id)
+        .with_context(|| format!("本地书库没有漫画ID `{comic_id}`"))
 }
 
 /// 读取本地书库（扫描结果 + 书库记录里的导入项）。
@@ -72,7 +94,7 @@ pub(crate) fn downloaded_library(app: &AppHandle, include_removed: bool) -> Libr
         .filter(|comic| !removed.contains(&comic.id))
         .cloned()
         .collect();
-    if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
+    if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
         let mut map = std::collections::HashMap::new();
         for comic in &visible {
             if let Some(dir) = &comic.comic_download_dir {
@@ -108,7 +130,7 @@ pub(crate) fn scan_downloaded_comics(download_dir: &Path) -> LibraryScan {
 
     // 2. 遍历历史子目录中的 元数据.json
     let mut metadata_items = Vec::new();
-    for entry in utils::walk_comic_metadata_files(download_dir) {
+    for entry in crate::comic_scanner::walk_comic_metadata_files(download_dir) {
         let path = entry.path();
         let modify_time = path
             .metadata()
@@ -208,18 +230,26 @@ pub struct LibraryDiagnosis {
 /// 这两种情况此前都只呈现为「暂无漫画」，用户无从判断。
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn diagnose_library(app: AppHandle) -> Option<LibraryDiagnosis> {
+pub async fn diagnose_library(app: AppHandle) -> Option<LibraryDiagnosis> {
+    tauri::async_runtime::spawn_blocking(move || diagnose_library_blocking(&app))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(error = %error, "诊断书库任务失败");
+            None
+        })
+}
+
+fn diagnose_library_blocking(app: &AppHandle) -> Option<LibraryDiagnosis> {
     let download_dir = app.get_config().read().download_dir.clone();
     // 刚刷新过书库时直接复用那次扫描的摘要：诊断紧跟在刷新之后调用，
     // 再扫一遍整库会让空书库页也要等一次全量 walkdir。
     let (comic_count, all_skipped) = match app
-        .try_state::<utils::DownloadedLibraryCache>()
+        .try_state::<DownloadedLibraryCache>()
         .and_then(|cache| cache.scan_summary(&download_dir))
     {
         Some(summary) => summary,
         None => {
-            let scan = downloaded_library(&app, false);
+            let scan = downloaded_library(app, false);
             (scan.comics.len(), scan.skipped)
         }
     };
@@ -259,158 +289,6 @@ pub fn diagnose_library(app: AppHandle) -> Option<LibraryDiagnosis> {
             ),
             skipped,
         }),
-    }
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn delete_downloaded_comic(app: AppHandle, comic: Comic) -> CommandResult<()> {
-    // 命令名为“删除已下载漫画”，必须同时删除文件；仅移除书库记录会留下孤儿文件。
-    // 新前端统一走 remove_library_comic（可显式选择是否删文件），此命令仅作兼容保留。
-    super::library_features::remove_library_comic(app, comic.id, true)
-}
-
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn export_cbz(app: AppHandle, comic: Comic) -> CommandResult<()> {
-    let comic_title = &comic.name;
-    export::cbz(&app, &comic)
-        .context(format!("漫画`{comic_title}`导出cbz失败"))
-        .map_err(|err| CommandError::from("导出cbz失败", err))?;
-    Ok(())
-}
-
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn export_merged_cbz(app: AppHandle, comic: Comic) -> CommandResult<()> {
-    // 仅使用当前书库的章节记录，客户端不能把其他漫画的路径混入合并任务。
-    let comic = super::reader_commands::local_comic(&app, comic.id)?;
-    let comic_title = &comic.name;
-    export::merge_cbz(&app, &comic)
-        .context(format!("漫画`{comic_title}`合并导出cbz失败"))
-        .map_err(|err| CommandError::from("合并导出cbz失败", err))?;
-    Ok(())
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn get_synced_comic(app: AppHandle, mut comic: Comic) -> CommandResult<Comic> {
-    let id_to_dir_map = utils::create_id_to_dir_map(&app)
-        .context("创建漫画ID到下载目录映射失败")
-        .map_err(|err| {
-            CommandError::from(&format!("漫画`{}`同步Comic的字段失败", comic.name), err)
-        })?;
-
-    comic.update_fields(&id_to_dir_map).map_err(|err| {
-        CommandError::from(&format!("漫画`{}`同步Comic的字段失败", comic.name), err)
-    })?;
-
-    Ok(comic)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn get_synced_comic_in_favorite(
-    app: AppHandle,
-    mut comic: ComicInFavorite,
-) -> CommandResult<ComicInFavorite> {
-    let id_to_dir_map = utils::create_id_to_dir_map(&app)
-        .context("创建漫画ID到下载目录映射失败")
-        .map_err(|err| {
-            let err_title = format!("漫画`{}`同步ComicInFavorite的字段失败", comic.name);
-            CommandError::from(&err_title, err)
-        })?;
-
-    comic.update_fields(&id_to_dir_map);
-
-    Ok(comic)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn get_synced_comic_in_search(
-    app: AppHandle,
-    mut comic: ComicInSearch,
-) -> CommandResult<ComicInSearch> {
-    let id_to_dir_map = utils::create_id_to_dir_map(&app)
-        .context("创建漫画ID到下载目录映射失败")
-        .map_err(|err| {
-            let err_title = format!("漫画`{}`同步ComicInSearch的字段失败", comic.name);
-            CommandError::from(&err_title, err)
-        })?;
-
-    comic.update_fields(&id_to_dir_map);
-
-    Ok(comic)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub fn get_synced_comic_in_weekly(
-    app: AppHandle,
-    mut comic: ComicInWeekly,
-) -> CommandResult<ComicInWeekly> {
-    let id_to_dir_map = utils::create_id_to_dir_map(&app)
-        .context("创建漫画ID到下载目录映射失败")
-        .map_err(|err| {
-            let err_title = format!("漫画`{}`同步ComicInWeekly的字段失败", comic.name);
-            CommandError::from(&err_title, err)
-        })?;
-
-    comic.update_fields(&id_to_dir_map);
-
-    Ok(comic)
-}
-
-#[allow(clippy::needless_pass_by_value)]
-#[tauri::command(async)]
-#[specta::specta]
-pub async fn test_domain_latency(app: AppHandle, domain: String) -> CommandResult<u64> {
-    let domain = domain.trim();
-    // 与域名池使用同一套严格校验：拒绝含 `/`、`@`、`:` 等 URL 组件的字符串，
-    // 否则可以借该命令向任意 HTTPS 目标发请求
-    if !crate::jm_client::is_plausible_domain(domain) {
-        return Err(CommandError::from("测速失败", anyhow!("域名格式无效")));
-    }
-
-    let builder = crate::tls::client_builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(4));
-
-    let builder = app
-        .get_config()
-        .read()
-        .apply_proxy(builder)
-        .map_err(|err| CommandError::from("测速失败", err))?;
-
-    let client = builder
-        .build()
-        .context("创建HTTP客户端失败")
-        .map_err(|err| CommandError::from("测速失败", err))?;
-
-    let url = format!("https://{domain}");
-    let head_start = std::time::Instant::now();
-    let request_result = client.head(&url).send().await;
-    match request_result {
-        Ok(_) => Ok(u64::try_from(head_start.elapsed().as_millis()).unwrap_or(u64::MAX)),
-        Err(err) => {
-            if err.is_connect() || err.is_timeout() {
-                return Err(CommandError::from("连接超时", err));
-            }
-            let get_start = std::time::Instant::now();
-            let get_result = client.get(&url).header("Range", "bytes=0-0").send().await;
-            match get_result {
-                Ok(_) => Ok(u64::try_from(get_start.elapsed().as_millis()).unwrap_or(u64::MAX)),
-                Err(err) => Err(CommandError::from("测速失败", err)),
-            }
-        }
     }
 }
 
@@ -476,7 +354,7 @@ mod end_to_end_scan_tests {
             chapter_infos: vec![chapter.clone()],
             ..Comic::default()
         };
-        let path = root.join(crate::utils::storage_cbz_filename(
+        let path = root.join(crate::comic_scanner::storage_cbz_filename(
             &comic.name,
             comic.id,
             456,

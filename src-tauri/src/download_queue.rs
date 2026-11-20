@@ -108,6 +108,8 @@ struct QueueFile {
 struct QueueState {
     revision: u64,
     entries: IndexMap<i64, StoredDownload>,
+    mutation_seq: u64,
+    persisted_seq: u64,
     dirty: bool,
 }
 
@@ -115,6 +117,8 @@ pub struct DownloadQueue {
     path: PathBuf,
     app: Option<tauri::AppHandle>,
     state: Mutex<QueueState>,
+    // 严格锁序：persist_lock → state；序列化所有磁盘读写而不阻塞内存状态查询。
+    persist_lock: Mutex<()>,
     #[cfg(test)]
     save_count: std::sync::atomic::AtomicUsize,
 }
@@ -216,20 +220,22 @@ impl DownloadQueue {
 
     /// 先完整写入候选队列，再替换内存状态，写入失败时保留原队列。
     pub fn replace_entries(&self, entries: Vec<StoredDownload>) -> anyhow::Result<()> {
-        let mut state = self.state.lock();
-        let mut candidate = QueueState {
-            revision: state.revision,
-            ..QueueState::default()
-        };
+        let _persist = self.persist_lock.lock();
+        let mut candidate_revision = self.state.lock().revision;
+        let mut candidate_entries = IndexMap::with_capacity(entries.len());
         for mut entry in entries {
-            candidate.revision += 1;
-            entry.snapshot.revision = candidate.revision;
-            candidate
-                .entries
-                .insert(entry.snapshot.chapter_info.chapter_id, entry);
+            candidate_revision += 1;
+            entry.snapshot.revision = candidate_revision;
+            candidate_entries.insert(entry.snapshot.chapter_info.chapter_id, entry);
         }
-        self.save(&candidate)?;
-        *state = candidate;
+        let file = build_queue_file(&candidate_entries);
+        self.write_queue_file(&file)?;
+        let mut state = self.state.lock();
+        state.revision = candidate_revision;
+        state.entries = candidate_entries;
+        state.mutation_seq += 1;
+        state.persisted_seq = state.mutation_seq;
+        state.dirty = false;
         Ok(())
     }
 
@@ -307,6 +313,7 @@ impl DownloadQueue {
                 path,
                 app,
                 state: Mutex::new(state),
+                persist_lock: Mutex::new(()),
                 #[cfg(test)]
                 save_count: std::sync::atomic::AtomicUsize::new(0),
             },
@@ -345,27 +352,61 @@ impl DownloadQueue {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
-        let mut state = self.state.lock();
-        let mut candidate = QueueState {
-            revision: state.revision,
-            entries: state.entries.clone(),
-            dirty: state.dirty,
-        };
-        let mut snapshots = Vec::with_capacity(entries.len());
-        for mut entry in entries {
-            let id = entry.snapshot.chapter_info.chapter_id;
-            if !replace_existing && candidate.entries.contains_key(&id) {
-                anyhow::bail!("章节ID为`{id}`的下载任务已存在");
+        let _persist = self.persist_lock.lock();
+        let (base_seq, candidate_revision, candidate_entries, file, mut snapshots) = {
+            let state = self.state.lock();
+            let base_seq = state.mutation_seq;
+            let mut candidate_revision = state.revision;
+            let mut candidate_entries = state.entries.clone();
+            let mut snapshots = Vec::with_capacity(entries.len());
+            for mut entry in entries.clone() {
+                let id = entry.snapshot.chapter_info.chapter_id;
+                if !replace_existing && candidate_entries.contains_key(&id) {
+                    anyhow::bail!("章节ID为`{id}`的下载任务已存在");
+                }
+                candidate_revision += 1;
+                entry.snapshot.revision = candidate_revision;
+                snapshots.push(entry.snapshot.clone());
+                candidate_entries.insert(id, entry);
             }
-            candidate.revision += 1;
-            entry.snapshot.revision = candidate.revision;
-            candidate.dirty = true;
-            snapshots.push(entry.snapshot.clone());
-            candidate.entries.insert(id, entry);
+            trim_finished_entries(&mut candidate_entries);
+            let file = build_queue_file(&candidate_entries);
+            (
+                base_seq,
+                candidate_revision,
+                candidate_entries,
+                file,
+                snapshots,
+            )
+        };
+        self.write_queue_file(&file)?;
+        let need_follow_up_flush = {
+            let mut state = self.state.lock();
+            if state.mutation_seq == base_seq {
+                state.revision = candidate_revision;
+                state.entries = candidate_entries;
+                state.mutation_seq += 1;
+                state.persisted_seq = state.mutation_seq;
+                state.dirty = false;
+                false
+            } else {
+                snapshots.clear();
+                for mut entry in entries {
+                    let id = entry.snapshot.chapter_info.chapter_id;
+                    state.revision += 1;
+                    entry.snapshot.revision = state.revision;
+                    snapshots.push(entry.snapshot.clone());
+                    state.entries.insert(id, entry);
+                }
+                trim_finished_entries(&mut state.entries);
+                state.mutation_seq += 1;
+                state.dirty = true;
+                true
+            }
+        };
+        if need_follow_up_flush {
+            self.flush_with_persist_guard();
         }
-        self.trim_finished(&mut candidate);
-        self.save(&candidate)?;
-        *state = candidate;
         Ok(snapshots)
     }
 
@@ -374,24 +415,35 @@ impl DownloadQueue {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut state = self.state.lock();
-        let mut candidate = QueueState {
-            revision: state.revision,
-            entries: state.entries.clone(),
-            dirty: state.dirty,
+        let _persist = self.persist_lock.lock();
+        let (base_seq, candidate_entries, file) = {
+            let state = self.state.lock();
+            let base_seq = state.mutation_seq;
+            let mut candidate_entries = state.entries.clone();
+            remove_matching_entries(&mut candidate_entries, entries);
+            let file = build_queue_file(&candidate_entries);
+            (base_seq, candidate_entries, file)
         };
-        for entry in entries {
-            let id = entry.snapshot.chapter_info.chapter_id;
-            if candidate
-                .entries
-                .get(&id)
-                .is_some_and(|current| current.snapshot.task_id == entry.snapshot.task_id)
-            {
-                candidate.entries.shift_remove(&id);
+        self.write_queue_file(&file)?;
+        let need_follow_up_flush = {
+            let mut state = self.state.lock();
+            if state.mutation_seq == base_seq {
+                state.entries = candidate_entries;
+                state.mutation_seq += 1;
+                state.persisted_seq = state.mutation_seq;
+                state.dirty = false;
+                false
+            } else if remove_matching_entries(&mut state.entries, entries) {
+                state.mutation_seq += 1;
+                state.dirty = true;
+                true
+            } else {
+                state.dirty
             }
+        };
+        if need_follow_up_flush {
+            self.flush_with_persist_guard();
         }
-        self.save(&candidate)?;
-        *state = candidate;
         Ok(())
     }
 
@@ -430,21 +482,35 @@ impl DownloadQueue {
             .entries
             .get_mut(&snapshot.chapter_info.chapter_id)?
             .snapshot = snapshot.clone();
-        state.dirty |= persist || !should_persist(&snapshot);
+        if persist || !should_persist(&snapshot) {
+            state.mutation_seq += 1;
+            state.dirty = true;
+        }
         Some(snapshot)
     }
 
-    fn save_dirty(&self, mut state: parking_lot::MutexGuard<'_, QueueState>) {
-        if !state.dirty {
-            return;
-        }
-        let result = self.save(&state);
-        let app = self.app.clone();
+    fn persist_dirty(&self) {
+        let _persist = self.persist_lock.lock();
+        self.flush_with_persist_guard();
+    }
+
+    fn flush_with_persist_guard(&self) {
+        let (target_seq, file) = {
+            let state = self.state.lock();
+            if !state.dirty {
+                return;
+            }
+            (state.mutation_seq, build_queue_file(&state.entries))
+        };
+        let result = self.write_queue_file(&file);
         match result {
-            Ok(()) => state.dirty = false,
+            Ok(()) => {
+                let mut state = self.state.lock();
+                state.persisted_seq = state.persisted_seq.max(target_seq);
+                state.dirty = state.mutation_seq > state.persisted_seq;
+            }
             Err(error) => {
-                // 先提交可恢复的内存终态，再在锁外发布通知；监听器可安全查询队列。
-                drop(state);
+                let app = self.app.clone();
                 background_failure(
                     app.as_ref(),
                     "download-queue",
@@ -456,18 +522,9 @@ impl DownloadQueue {
     }
 
     fn trim_finished(&self, state: &mut QueueState) {
-        // 未完成和失败任务始终保留；限制本次运行的完成历史大小。
-        let finished: Vec<_> = state
-            .entries
-            .iter()
-            .filter(|(_, entry)| !should_restore(entry.snapshot.state))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in finished
-            .iter()
-            .take(finished.len().saturating_sub(MAX_FINISHED_HISTORY))
-        {
-            state.dirty |= state.entries.shift_remove(id).is_some();
+        if trim_finished_entries(&mut state.entries) {
+            state.mutation_seq += 1;
+            state.dirty = true;
         }
     }
 
@@ -475,41 +532,85 @@ impl DownloadQueue {
         if snapshots.is_empty() {
             return Vec::new();
         }
-        let mut state = self.state.lock();
-        let updated: Vec<_> = snapshots
-            .into_iter()
-            .filter_map(|snapshot| self.update_locked(&mut state, snapshot))
-            .collect();
-        self.trim_finished(&mut state);
-        self.save_dirty(state);
+        let (updated, should_flush) = {
+            let mut state = self.state.lock();
+            let updated: Vec<_> = snapshots
+                .into_iter()
+                .filter_map(|snapshot| self.update_locked(&mut state, snapshot))
+                .collect();
+            self.trim_finished(&mut state);
+            (updated, state.dirty)
+        };
+        if should_flush {
+            self.persist_dirty();
+        }
         updated
     }
 
     pub fn update(&self, snapshot: DownloadTaskSnapshot) -> Option<DownloadTaskSnapshot> {
-        let mut state = self.state.lock();
-        let updated = self.update_locked(&mut state, snapshot);
-        self.trim_finished(&mut state);
-        self.save_dirty(state);
+        let (updated, should_flush) = {
+            let mut state = self.state.lock();
+            let updated = self.update_locked(&mut state, snapshot);
+            self.trim_finished(&mut state);
+            (updated, state.dirty)
+        };
+        if should_flush {
+            self.persist_dirty();
+        }
         updated
     }
 
-    fn save(&self, state: &QueueState) -> anyhow::Result<()> {
+    fn write_queue_file(&self, file: &QueueFile) -> anyhow::Result<()> {
         #[cfg(test)]
         self.save_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let file = QueueFile {
-            version: QUEUE_FORMAT_VERSION,
-            tasks: state
-                .entries
-                .values()
-                .filter(|entry| should_persist(&entry.snapshot))
-                .cloned()
-                .map(compact_finished)
-                .collect(),
-        };
-        atomic_fs::write(&self.path, serde_json::to_vec_pretty(&file)?)
-            .context("保存下载队列失败")?;
-        Ok(())
+        atomic_fs::write(&self.path, serde_json::to_vec_pretty(file)?).context("保存下载队列失败")
+    }
+}
+
+fn trim_finished_entries(entries: &mut IndexMap<i64, StoredDownload>) -> bool {
+    // 未完成和失败任务始终保留；限制本次运行的完成历史大小。
+    let finished: Vec<_> = entries
+        .iter()
+        .filter(|(_, entry)| !should_restore(entry.snapshot.state))
+        .map(|(id, _)| *id)
+        .collect();
+    let mut removed = false;
+    for id in finished
+        .iter()
+        .take(finished.len().saturating_sub(MAX_FINISHED_HISTORY))
+    {
+        removed |= entries.shift_remove(id).is_some();
+    }
+    removed
+}
+
+fn remove_matching_entries(
+    entries: &mut IndexMap<i64, StoredDownload>,
+    to_remove: &[StoredDownload],
+) -> bool {
+    let mut removed = false;
+    for entry in to_remove {
+        let id = entry.snapshot.chapter_info.chapter_id;
+        if entries
+            .get(&id)
+            .is_some_and(|current| current.snapshot.task_id == entry.snapshot.task_id)
+        {
+            removed |= entries.shift_remove(&id).is_some();
+        }
+    }
+    removed
+}
+
+fn build_queue_file(entries: &IndexMap<i64, StoredDownload>) -> QueueFile {
+    QueueFile {
+        version: QUEUE_FORMAT_VERSION,
+        tasks: entries
+            .values()
+            .filter(|entry| should_persist(&entry.snapshot))
+            .cloned()
+            .map(compact_finished)
+            .collect(),
     }
 }
 
@@ -649,6 +750,7 @@ mod tests {
             path: blocked_path.join("queue.json"),
             app: None,
             state: Mutex::default(),
+            persist_lock: Mutex::new(()),
             #[cfg(test)]
             save_count: std::sync::atomic::AtomicUsize::new(0),
         };
@@ -897,6 +999,31 @@ mod tests {
         let mut changed = settings;
         changed.download_dir = PathBuf::from("other");
         assert!(DownloadQueue::parse_backup_entries(Some(&valid), &changed).is_err());
+    }
+
+    #[test]
+    fn entries_remain_readable_while_persist_lock_is_held() {
+        let root = std::env::temp_dir().join(format!("jm-queue-lock-{}", uuid::Uuid::new_v4()));
+        let queue = std::sync::Arc::new(DownloadQueue::load(root.join("queue.json")).unwrap());
+        queue
+            .insert(entry(1, DownloadTaskState::Downloading))
+            .unwrap();
+
+        let _persist = queue.persist_lock.lock();
+        let reader_queue = std::sync::Arc::clone(&queue);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let len = reader_queue.entries().len();
+            tx.send(len).unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("entries() must not block on persist_lock"),
+            1
+        );
+        handle.join().unwrap();
+        drop(_persist);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

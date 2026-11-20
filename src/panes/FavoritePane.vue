@@ -24,6 +24,7 @@ const folderIdSelected = ref<number>(0)
 const loading = ref(false)
 const errorMessage = ref('')
 const folderMenuOpen = ref(false)
+const favoriteResultLibraryEpoch = ref(store.downloadedLibraryResetEpoch)
 let favoriteRequestGeneration = 0
 let lastFavoriteAttempt: {
   uid: string | undefined
@@ -50,6 +51,8 @@ const favoritePageCount = computed(() => {
   return count > 0 ? Math.ceil(total / count) : 0
 })
 
+let active = false
+
 watch(
   () => [store.userProfile?.uid, store.sessionEpoch] as const,
   async ([uid]) => {
@@ -60,6 +63,8 @@ watch(
     sortSelected.value = 'FavoriteTime'
     pageSelected.value = 1
     if (uid === undefined) {
+      loading.value = false
+      errorMessage.value = ''
       return
     }
     await getFavourite(0, 1, 'FavoriteTime')
@@ -67,7 +72,6 @@ watch(
   { immediate: true },
 )
 
-let active = false
 async function getFavourite(folderId: number, page: number, sort: FavoriteSort): Promise<boolean> {
   const uid = store.userProfile?.uid
   if (uid === undefined) return false
@@ -75,6 +79,7 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
   const generation = ++favoriteRequestGeneration
   const epoch = store.sessionEpoch
   const observedRevision = store.favoriteRevision
+  const libraryResetEpoch = store.downloadedLibraryResetEpoch
   lastFavoriteAttempt = { uid, epoch, folderId, page, sort }
   loading.value = true
   errorMessage.value = ''
@@ -84,10 +89,12 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
       return false
     }
     if (result.status === 'error') {
+      console.error(result.error)
+      errorMessage.value = result.error.err_message || result.error.err_title
       if (active) {
-        console.error(result.error)
-        errorMessage.value = result.error.err_message || result.error.err_title
         message.error(formatCommandError(result.error))
+      } else {
+        store.favoriteListStale = true
       }
       return false
     }
@@ -101,6 +108,7 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
     }
     store.getFavoriteResult = result.data
     store.favoriteResultEpoch = epoch
+    favoriteResultLibraryEpoch.value = libraryResetEpoch
     store.favoriteListStale = false
     for (const comic of result.data.list) store.recordFavorite(comic.id, true, epoch, observedRevision)
     folderIdSelected.value = folderId
@@ -109,10 +117,14 @@ async function getFavourite(folderId: number, page: number, sort: FavoriteSort):
     errorMessage.value = ''
     return true
   } catch (error) {
-    if (active && generation === favoriteRequestGeneration && store.userProfile?.uid === uid) {
+    if (generation === favoriteRequestGeneration && store.userProfile?.uid === uid && epoch === store.sessionEpoch) {
       console.error(error)
       errorMessage.value = getErrorMessage(error)
-      message.error(`获取收藏夹失败：${errorMessage.value}`)
+      if (active) {
+        message.error(`获取收藏夹失败：${errorMessage.value}`)
+      } else {
+        store.favoriteListStale = true
+      }
     }
     return false
   } finally {
@@ -276,7 +288,7 @@ function pickFolder(folderId: number) {
               重试
             </button>
             <button
-              v-if="errorMessage.includes('登入') || errorMessage.includes('401')"
+              v-if="errorMessage.includes('登录') || errorMessage.includes('登入') || errorMessage.includes('401')"
               type="button"
               class="jm-btn is-ghost"
               @click="emit('open-login')">
@@ -314,7 +326,8 @@ function pickFolder(folderId: number) {
               :comic-author="comic.author"
               :comic-category="comic.category"
               :comic-category-sub="comic.categorySub"
-              :comic-downloaded="comic.isDownloaded" />
+              :comic-downloaded="comic.isDownloaded"
+              :downloaded-epoch="favoriteResultLibraryEpoch" />
           </div>
 
           <nav v-if="favoritePageCount > 1 || pageSelected > 1" class="pager" aria-label="收藏分页">

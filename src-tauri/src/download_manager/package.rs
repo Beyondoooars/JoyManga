@@ -8,8 +8,9 @@ use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
 use crate::atomic_fs;
+use crate::comic_scanner::collect_page_images;
+use crate::library_catalog::DownloadedLibraryCache;
 use crate::types::{ChapterInfo, Comic, ComicInfo, PageSize};
-use crate::utils;
 
 pub(crate) fn package_chapter_to_cbz(
     comic: &Comic,
@@ -46,7 +47,7 @@ pub(crate) fn package_chapter_to_cbz(
 
     // 图片列表要提前收集：ComicInfo.xml 的 PageCount 必须在写入条目前确定
     // （ZIP 条目不可原地修改），且后续校验/打包都复用同一份列表。
-    let image_paths = utils::collect_page_images(temp_download_dir)?;
+    let image_paths = collect_page_images(temp_download_dir)?;
     anyhow::ensure!(
         expected_pages > 0 && image_paths.len() == expected_pages,
         "打包图片数量与章节页数不一致"
@@ -132,7 +133,7 @@ pub(crate) fn package_chapter_to_cbz(
     // 清理散图临时目录
     let _ = std::fs::remove_dir_all(temp_download_dir);
 
-    if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
+    if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
         cache.invalidate();
     }
 

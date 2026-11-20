@@ -31,7 +31,7 @@ useBackHandler(() => {
   if (!show.value) return false
   show.value = false
   return true
-})
+}, 60)
 </script>
 
 <template>

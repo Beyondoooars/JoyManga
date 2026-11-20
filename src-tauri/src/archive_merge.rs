@@ -2,20 +2,13 @@ use std::{
     collections::HashSet,
     io::Write,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicU32, Arc},
 };
 
 use anyhow::{anyhow, ensure, Context};
-
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use tauri::AppHandle;
-use tauri_specta::Event;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
 use crate::{
     atomic_fs,
-    events::ExportCbzEvent,
-    extensions::{AnyhowErrorToStringChain, AppHandleExt},
     types::{ChapterInfo, Comic, ComicInfo},
     utils,
 };
@@ -28,27 +21,11 @@ impl Drop for TempFileCleanup {
     }
 }
 
-fn cbz_filename(comic: &Comic, chapter: &ChapterInfo, chapter_count: usize) -> String {
-    utils::cbz_filename(
-        &comic.name,
-        comic.id,
-        &chapter.chapter_title,
-        chapter.chapter_id,
-        chapter.order,
-        chapter_count,
-    )
-}
-
-fn merged_cbz_filename(comic: &Comic) -> String {
-    let suffix = format!(" [JM{}]（合并）.cbz", comic.id);
-    let title = utils::filename_filter(&comic.name);
-    let title = utils::truncate_utf8_by_bytes(&title, 180_usize.saturating_sub(suffix.len()));
-    format!("{}{suffix}", if title.is_empty() { "comic" } else { title })
-}
-
 fn validate_merge_sources(comic: &Comic, chapters: &[&ChapterInfo]) -> anyhow::Result<()> {
     let mut ids = HashSet::new();
     let mut single_chapter_paths = HashSet::new();
+    let mut identity_cache: std::collections::HashMap<PathBuf, Option<(i64, i64)>> =
+        std::collections::HashMap::new();
     for chapter in chapters {
         ensure!(
             comic
@@ -64,7 +41,14 @@ fn validate_merge_sources(comic: &Comic, chapters: &[&ChapterInfo]) -> anyhow::R
             .context("章节没有本地路径")?;
         let canonical = std::fs::canonicalize(path).context("章节文件不存在")?;
         if path.is_file() {
-            match crate::comic_scanner::read_chapter_identity(path)? {
+            let identity = match identity_cache.entry(canonical.clone()) {
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    let loaded = crate::comic_scanner::read_chapter_identity(&canonical)?;
+                    *vacant.insert(loaded)
+                }
+            };
+            match identity {
                 // 独立章节文件：身份必须匹配，且同一文件不能被多话共用
                 Some(identity) if identity == (comic.id, chapter.chapter_id) => {
                     ensure!(
@@ -95,38 +79,56 @@ fn validate_merge_target(
         return Ok(());
     }
     let target = std::fs::canonicalize(path)?;
+    let mut matching_chapters = Vec::new();
     for chapter in chapters {
         let source = chapter
             .chapter_download_dir
             .as_ref()
             .context("章节没有本地路径")?;
         if std::fs::canonicalize(source)? == target {
-            // 允许整本归档原位重写（更新后再合并）与单话书的最终命名重写；
-            // 拒绝把多话合并写进某个独立章节文件。
-            let identity = crate::comic_scanner::read_chapter_identity(path)?;
-            if let Some(identity) = identity {
-                ensure!(
-                    chapters.len() == 1 && identity == (comic.id, chapter.chapter_id),
-                    "合并文件不能覆盖原章节"
-                );
-            } else {
-                // 无 chapter.json 的整本归档：内嵌的话清单必须全部属于本次重写范围。
-                // 站点下架后本地可能只剩部分话，此时重写会永久丢掉其他话的页面。
-                ensure!(
-                    merged_archive_is_not_wider_than(chapters, path)?,
-                    "目标归档还包含本次未整理的话，保留原文件"
-                );
-            }
+            matching_chapters.push(*chapter);
         }
     }
+
+    // 单次打开目标 ZIP 并读取 chapter.json 与 元数据.json，消除多话复用时上百次重开归档。
     let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-    let mut entry = archive
-        .by_name("元数据.json")
+    let identity = if matching_chapters.is_empty() {
+        None
+    } else {
+        crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)?
+    };
+    let metadata_bytes = match archive.by_name("元数据.json") {
+        Ok(mut entry) => {
+            let size = entry.size();
+            Some(crate::image_data::read_limited(
+                &mut entry,
+                size,
+                crate::image_data::MAX_METADATA_BYTES,
+            )?)
+        }
+        Err(_) => None,
+    };
+
+    if !matching_chapters.is_empty() {
+        if let Some(identity) = identity {
+            ensure!(
+                chapters.len() == 1 && identity == (comic.id, matching_chapters[0].chapter_id),
+                "合并文件不能覆盖原章节"
+            );
+        } else if let Some(bytes) = metadata_bytes.as_deref() {
+            // 无 chapter.json 的整本归档：内嵌的话清单必须全部属于本次重写范围。
+            // 站点下架后本地可能只剩部分话，此时重写会永久丢掉其他话的页面。
+            ensure!(
+                merged_archive_is_not_wider_than_bytes(chapters, bytes)?,
+                "目标归档还包含本次未整理的话，保留原文件"
+            );
+        }
+    }
+
+    let bytes = metadata_bytes
+        .as_deref()
         .context("目标文件没有可确认的漫画身份，保留原文件")?;
-    let size = entry.size();
-    let bytes =
-        crate::image_data::read_limited(&mut entry, size, crate::image_data::MAX_METADATA_BYTES)?;
-    let metadata: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let metadata: serde_json::Value = serde_json::from_slice(bytes)?;
     ensure!(
         metadata["id"].as_i64() == Some(comic.id),
         "目标文件属于其他漫画，保留原文件"
@@ -138,441 +140,16 @@ fn validate_merge_target(
 ///
 /// 整本归档没有 chapter.json，无法用话身份判断归属；若归档里还留着本次未参与
 /// 重写的话（例如站点下架后本地只剩一话），原位重写会永久丢掉那些话的页面。
-fn merged_archive_is_not_wider_than(
+fn merged_archive_is_not_wider_than_bytes(
     chapters: &[&ChapterInfo],
-    path: &Path,
+    bytes: &[u8],
 ) -> anyhow::Result<bool> {
-    let mut archive = zip::ZipArchive::new(std::fs::File::open(path)?)?;
-    let Ok(mut entry) = archive.by_name("元数据.json") else {
-        // 缺少元数据时交给后面的漫画身份校验给出明确错误
-        return Ok(true);
-    };
-    let size = entry.size();
-    let bytes =
-        crate::image_data::read_limited(&mut entry, size, crate::image_data::MAX_METADATA_BYTES)?;
-    let embedded: Comic = serde_json::from_slice(&bytes)?;
+    let embedded: Comic = serde_json::from_slice(bytes)?;
     let keep: HashSet<i64> = chapters.iter().map(|chapter| chapter.chapter_id).collect();
     Ok(embedded
         .chapter_infos
         .iter()
         .all(|chapter| keep.contains(&chapter.chapter_id)))
-}
-
-fn copy_cbz_if_needed(source: &Path, target: &Path) -> anyhow::Result<()> {
-    if target.exists() && std::fs::canonicalize(source)? == std::fs::canonicalize(target)? {
-        return Ok(());
-    }
-    atomic_fs::copy_file(source, target)
-}
-
-fn validate_download_paths(
-    app: &AppHandle,
-    comic: &Comic,
-    chapters: &[&ChapterInfo],
-) -> anyhow::Result<()> {
-    let download_dir = app.get_config().read().download_dir.clone();
-    let canonical_download_dir = std::fs::canonicalize(&download_dir)
-        .context(format!("无法解析下载根目录`{}`", download_dir.display()))?;
-
-    let comic_download_dir = comic
-        .comic_download_dir
-        .as_ref()
-        .context("漫画的comic_download_dir字段为None")?;
-    let canonical_comic_dir = std::fs::canonicalize(comic_download_dir).context(format!(
-        "无法解析漫画目录`{}`",
-        comic_download_dir.display()
-    ))?;
-    let catalog = {
-        let _guard = crate::library_catalog::CATALOG_LOCK.lock();
-        crate::library_catalog::LibraryCatalog::load(&crate::library_catalog::catalog_path(app))?
-    };
-    let imported_cbz = comic.id < 0
-        && catalog.visible_imports(&download_dir).iter().any(|record| {
-            record.id == comic.id
-                && std::fs::canonicalize(&record.path).is_ok_and(|path| path == canonical_comic_dir)
-        });
-    ensure!(
-        canonical_comic_dir.starts_with(&canonical_download_dir) || imported_cbz,
-        "漫画目录`{}`不在下载根目录`{}`内",
-        canonical_comic_dir.display(),
-        canonical_download_dir.display()
-    );
-
-    for chapter in chapters {
-        let chapter_dir = chapter
-            .chapter_download_dir
-            .as_ref()
-            .context(format!("章节`{}`的下载目录为空", chapter.chapter_title))?;
-        let canonical_chapter_dir = std::fs::canonicalize(chapter_dir)
-            .context(format!("无法解析章节目录`{}`", chapter_dir.display()))?;
-        ensure!(
-            canonical_chapter_dir.starts_with(&canonical_download_dir)
-                || (imported_cbz && canonical_chapter_dir == canonical_comic_dir),
-            "章节目录`{}`不在下载根目录`{}`内",
-            canonical_chapter_dir.display(),
-            canonical_download_dir.display()
-        );
-    }
-    Ok(())
-}
-
-struct CbzErrorEventGuard {
-    uuid: String,
-    app: AppHandle,
-    success: bool,
-}
-
-impl Drop for CbzErrorEventGuard {
-    fn drop(&mut self) {
-        if self.success {
-            return;
-        }
-
-        let uuid = self.uuid.clone();
-        let _ = ExportCbzEvent::Error { uuid }.emit(&self.app);
-    }
-}
-
-#[allow(clippy::cast_possible_wrap)]
-#[allow(clippy::cast_possible_truncation)]
-#[allow(clippy::too_many_lines)]
-pub fn cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
-    let downloaded_chapter_infos = comic
-        .chapter_infos
-        .iter()
-        .filter(|chapter_info| chapter_info.is_downloaded.unwrap_or(false))
-        .collect::<Vec<_>>();
-    if downloaded_chapter_infos.is_empty() {
-        return Err(anyhow!("漫画`{}`没有可导出的已下载章节", comic.name));
-    }
-    validate_download_paths(app, comic, &downloaded_chapter_infos)?;
-    let downloaded_chapter_count = downloaded_chapter_infos.len();
-    // 生成格式化的xml
-    let cfg = yaserde::ser::Config {
-        perform_indent: true,
-        ..Default::default()
-    };
-    let event_uuid = uuid::Uuid::new_v4().to_string();
-    // 发送开始导出cbz事件
-    let _ = ExportCbzEvent::Start {
-        uuid: event_uuid.clone(),
-        comic_title: comic.name.clone(),
-        total: downloaded_chapter_infos.len() as u32,
-    }
-    .emit(app);
-    // 如果success为false，drop时发送Error事件
-    let mut error_event_guard = CbzErrorEventGuard {
-        uuid: event_uuid.clone(),
-        app: app.clone(),
-        success: false,
-    };
-    // 用来记录导出进度
-    let current = Arc::new(AtomicU32::new(0));
-
-    let extension = "cbz";
-    let comic_export_dir = comic
-        .get_comic_export_dir(app)
-        .context("获取导出目录失败")?;
-    let chapter_export_dir = utils::create_dir_all_beneath(&comic_export_dir, Path::new(extension))
-        .context(format!(
-            "在漫画导出目录`{}`下安全创建`{extension}`目录失败",
-            comic_export_dir.display()
-        ))?;
-    // 先把封面拷贝到导出目录(如果有)
-    if let Err(err) = copy_cover(comic, &chapter_export_dir) {
-        let comic_title = &comic.name;
-        let err_title = format!("`{comic_title}`导出cbz时，将封面拷贝到导出目录失败");
-        let string_chain = err.to_string_chain();
-        tracing::error!(err_title, message = string_chain);
-    }
-    // 并发处理
-    let downloaded_chapter_infos = downloaded_chapter_infos.into_par_iter();
-    downloaded_chapter_infos.try_for_each(|chapter_info| -> anyhow::Result<()> {
-        let chapter_title = chapter_info.chapter_title.clone();
-        let filename = cbz_filename(comic, chapter_info, downloaded_chapter_count);
-        let save_path = chapter_export_dir.join(filename);
-
-        let chapter_download_dir = chapter_info.chapter_download_dir.as_ref().context(format!(
-            "章节`{chapter_title}`的`chapter_download_dir`字段为`None`"
-        ))?;
-
-        if chapter_download_dir.is_file() {
-            // 身份属于本章的独立章节文件直接复制；整本合并归档则切片重新打包本话，
-            // 否则每一话都会导出整本书（内容重复、占用成倍）。
-            let mut archive =
-                zip::ZipArchive::new(std::fs::File::open(chapter_download_dir).context(
-                    format!("打开CBZ文件`{}`失败", chapter_download_dir.display()),
-                )?)
-                .context(format!(
-                    "解析CBZ文件`{}`失败",
-                    chapter_download_dir.display()
-                ))?;
-            let is_own_chapter_file =
-                crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)?.is_some();
-            if is_own_chapter_file {
-                copy_cbz_if_needed(chapter_download_dir, &save_path).context(format!(
-                    "章节`{chapter_title}`复制CBZ到`{}`失败",
-                    save_path.display()
-                ))?;
-                let current = current.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                let _ = ExportCbzEvent::Progress {
-                    uuid: event_uuid.clone(),
-                    current,
-                }
-                .emit(app);
-                return Ok(());
-            }
-
-            let mut img_names = crate::comic_scanner::image_entry_names(&mut archive);
-            img_names = crate::comic_scanner::select_chapter_pages(&img_names, chapter_info.order)
-                .with_context(|| {
-                    format!(
-                        "整本归档`{}`中找不到章节`{}`的页面",
-                        chapter_download_dir.display(),
-                        chapter_title
-                    )
-                })?;
-            img_names.sort_by(|a, b| utils::natural_cmp(a, b));
-
-            let mut comic_info = ComicInfo::from(comic, chapter_info);
-            comic_info.page_count = i64::try_from(img_names.len()).unwrap_or(0).into();
-            let comic_info_xml =
-                yaserde::ser::to_string_with_config(&comic_info, &cfg).map_err(|err_msg| {
-                    anyhow!("章节`{chapter_title}`序列化`ComicInfo.xml`失败: {err_msg}")
-                })?;
-
-            let temp_path = atomic_fs::temp_path(&save_path)?;
-            let _temp_file_cleanup = TempFileCleanup(temp_path.clone());
-            let zip_file = std::fs::File::create(&temp_path).context(format!(
-                "章节`{chapter_title}`创建文件`{}`失败",
-                temp_path.display()
-            ))?;
-            let mut zip_writer = ZipWriter::new(zip_file);
-            zip_writer
-                .start_file("ComicInfo.xml", SimpleFileOptions::default())
-                .context("在分部CBZ创建`ComicInfo.xml`条目失败")?;
-            zip_writer
-                .write_all(comic_info_xml.as_bytes())
-                .context("写入`ComicInfo.xml`失败")?;
-            let source_pages = crate::page_size::read_pages_entry(&mut archive);
-            let mut page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
-                std::collections::BTreeMap::new();
-            for (page_idx, entry_name) in img_names.iter().enumerate() {
-                let extension = Path::new(entry_name)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or("jpg")
-                    .to_lowercase();
-                let target_name = format!("{:04}.{extension}", page_idx + 1);
-                // 整本源归档里的尺寸表键是原条目名，导出后条目改名，表也要跟着改
-                let size = match source_pages.get(entry_name) {
-                    Some(size) => Some(*size),
-                    None => crate::page_size::size_from_archive(&mut archive, entry_name),
-                };
-                if let Some(size) = size {
-                    page_sizes.insert(target_name.clone(), size);
-                }
-                let mut entry = archive
-                    .by_name(entry_name)
-                    .context(format!("读取原章节图片`{entry_name}`失败"))?;
-                // 从已有归档复制时同样要保证单条目不超过 ZIP32 上限
-                crate::zip_limits::ensure_archive_entry_size(&entry, entry_name)?;
-                zip_writer
-                    .start_file(&target_name, crate::zip_limits::image_entry_options())
-                    .context(format!("在分部CBZ创建条目`{target_name}`失败"))?;
-                std::io::copy(&mut entry, &mut zip_writer)
-                    .context(format!("将图片写入分部CBZ条目`{target_name}`失败"))?;
-            }
-            crate::page_size::write_pages_entry(&mut zip_writer, page_sizes)
-                .context("在分部CBZ写入`pages.json`失败")?;
-            let zip_file = zip_writer.finish().context(format!(
-                "章节`{chapter_title}`关闭`{}`失败",
-                temp_path.display()
-            ))?;
-            zip_file
-                .sync_all()
-                .context(format!("同步临时CBZ`{}`失败", temp_path.display()))?;
-            // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
-            drop(zip_file);
-            // 阅读器读句柄由 atomic_fs 的提交钩子在替换锁内释放
-            if let Err(err) = atomic_fs::commit_file(&temp_path, &save_path) {
-                let _ = std::fs::remove_file(&temp_path);
-                return Err(err).context(format!("提交CBZ`{}`失败", save_path.display()));
-            }
-            let current = current.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            let _ = ExportCbzEvent::Progress {
-                uuid: event_uuid.clone(),
-                current,
-            }
-            .emit(app);
-            return Ok(());
-        }
-
-        // 遍历下载目录，将文件写入cbz
-        let image_paths = utils::collect_page_images(chapter_download_dir)?;
-
-        let mut comic_info = ComicInfo::from(comic, chapter_info);
-        comic_info.page_count = i64::try_from(image_paths.len()).unwrap_or(0).into();
-        let comic_info_xml =
-            yaserde::ser::to_string_with_config(&comic_info, &cfg).map_err(|err_msg| {
-                anyhow!("章节`{chapter_title}`序列化`ComicInfo.xml`失败: {err_msg}")
-            })?;
-
-        let temp_path = atomic_fs::temp_path(&save_path)?;
-        let _temp_file_cleanup = TempFileCleanup(temp_path.clone());
-        let zip_file = std::fs::File::create(&temp_path).context(format!(
-            "章节`{chapter_title}`创建文件`{}`失败",
-            temp_path.display()
-        ))?;
-        let mut zip_writer = ZipWriter::new(zip_file);
-        // 把ComicInfo.xml写入cbz
-        zip_writer
-            .start_file("ComicInfo.xml", SimpleFileOptions::default())
-            .context(format!(
-                "章节`{chapter_title}`在`{}`创建`ComicInfo.xml`失败",
-                save_path.display()
-            ))?;
-        zip_writer
-            .write_all(comic_info_xml.as_bytes())
-            .context(format!("章节`{chapter_title}`写入`ComicInfo.xml`失败"))?;
-        let mut page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
-            std::collections::BTreeMap::new();
-        for image_path in image_paths {
-            let filename = match image_path.file_name() {
-                Some(name) => name.to_string_lossy(),
-                None => continue,
-            };
-            // 将文件写入cbz
-            crate::zip_limits::ensure_entry_size(&image_path)?;
-            let mut file = std::fs::File::open(&image_path)
-                .context(format!("打开`{}`失败", image_path.display()))?;
-            // 同 package.rs：同一句柄先读文件头记尺寸，复位后整文件复制
-            if let Some(size) = crate::page_size::size_from_opened_file(&mut file) {
-                page_sizes.insert(filename.to_string(), size);
-            }
-            zip_writer
-                .start_file(&filename, crate::zip_limits::image_entry_options())
-                .context(format!(
-                    "章节`{chapter_title}`在`{}`创建`{filename}`失败",
-                    save_path.display()
-                ))?;
-            std::io::copy(&mut file, &mut zip_writer).context(format!(
-                "章节`{chapter_title}`将`{}`写入`{}`失败",
-                image_path.display(),
-                save_path.display()
-            ))?;
-        }
-        crate::page_size::write_pages_entry(&mut zip_writer, page_sizes)
-            .context("在分部CBZ写入`pages.json`失败")?;
-
-        let zip_file = zip_writer.finish().context(format!(
-            "章节`{chapter_title}`关闭`{}`失败",
-            temp_path.display()
-        ))?;
-        zip_file
-            .sync_all()
-            .context(format!("同步临时CBZ`{}`失败", temp_path.display()))?;
-        // 见 download_manager/package.rs：公共存储上打开中的文件不能改名
-        drop(zip_file);
-        // 阅读器读句柄由 atomic_fs 的提交钩子在替换锁内释放
-        if let Err(err) = atomic_fs::commit_file(&temp_path, &save_path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(err).context(format!("提交CBZ`{}`失败", save_path.display()));
-        }
-        // 更新导出cbz的进度
-        let current = current.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        // 发送导出cbz进度事件
-        let _ = ExportCbzEvent::Progress {
-            uuid: event_uuid.clone(),
-            current,
-        }
-        .emit(app);
-        Ok(())
-    })?;
-    // 标记为成功，后面drop时就不会发送Error事件
-    error_event_guard.success = true;
-    // 发送导出cbz完成事件
-    let _ = ExportCbzEvent::End {
-        uuid: event_uuid,
-        chapter_export_dir,
-    }
-    .emit(app);
-
-    Ok(())
-}
-
-#[allow(clippy::cast_possible_wrap)]
-#[allow(clippy::cast_possible_truncation)]
-pub fn merge_cbz(app: &AppHandle, comic: &Comic) -> anyhow::Result<()> {
-    let mut downloaded_chapter_infos: Vec<&ChapterInfo> = comic
-        .chapter_infos
-        .iter()
-        .filter(|chapter_info| chapter_info.is_downloaded.unwrap_or(false))
-        .collect();
-    ensure!(
-        downloaded_chapter_infos.len() >= 2,
-        "同一本漫画至少需要两话独立的本地下载才能合并"
-    );
-    validate_merge_sources(comic, &downloaded_chapter_infos)?;
-    downloaded_chapter_infos.sort_by_key(|c| (c.order, c.chapter_id));
-    validate_download_paths(app, comic, &downloaded_chapter_infos)?;
-
-    let total_chapters = downloaded_chapter_infos.len();
-    let event_uuid = uuid::Uuid::new_v4().to_string();
-    let _ = ExportCbzEvent::Start {
-        uuid: event_uuid.clone(),
-        comic_title: format!("{} (合并CBZ)", comic.name),
-        total: total_chapters as u32,
-    }
-    .emit(app);
-
-    let mut error_event_guard = CbzErrorEventGuard {
-        uuid: event_uuid.clone(),
-        app: app.clone(),
-        success: false,
-    };
-
-    let comic_export_dir = comic
-        .get_comic_export_dir(app)
-        .context("获取导出目录失败")?;
-    std::fs::create_dir_all(&comic_export_dir).context(format!(
-        "创建漫画导出目录`{}`失败",
-        comic_export_dir.display()
-    ))?;
-
-    let save_path = comic_export_dir.join(merged_cbz_filename(comic));
-
-    let event_uuid_clone = event_uuid.clone();
-    let app_handle_clone = app.clone();
-    write_merged_cbz_archive(
-        comic,
-        &downloaded_chapter_infos,
-        &save_path,
-        move |current| {
-            let _ = ExportCbzEvent::Progress {
-                uuid: event_uuid_clone.clone(),
-                current,
-            }
-            .emit(&app_handle_clone);
-        },
-    )?;
-
-    let _ = copy_cover(comic, &comic_export_dir);
-
-    error_event_guard.success = true;
-    let _ = ExportCbzEvent::End {
-        uuid: event_uuid,
-        chapter_export_dir: save_path.clone(),
-    }
-    .emit(app);
-
-    tracing::info!(
-        comic_title = %comic.name,
-        save_path = %save_path.display(),
-        "已成功将漫画所有话整合为单体CBZ"
-    );
-
-    Ok(())
 }
 
 pub(crate) fn write_merged_cbz_archive(
@@ -621,14 +198,18 @@ pub(crate) fn write_merged_cbz_archive(
     let pad_width = if total_chapters > 99 { 3 } else { 2 };
     // 合并包的总页数（各话页数之和），写入 ComicInfo 的 PageCount
     let mut total_pages: i64 = 0;
-    // 逐话搬运 pages.json，避免合并后阅读器又要为整本书重读一遍文件头
+    // 再合并时多个话指向同一个整本源归档：仅打开一次并复用条目名、身份与 pages.json，
+    // 务必在 commit_file_checked 前显式 drop，防止 Android FUSE 原位替换触发 ETXTBSY。
+    struct CachedSourceArchive {
+        archive: zip::ZipArchive<std::fs::File>,
+        all_img_names: Vec<String>,
+        identity: Option<(i64, i64)>,
+        pages: std::collections::BTreeMap<String, crate::types::PageSize>,
+    }
     let mut merged_page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
         std::collections::BTreeMap::new();
-    // 再合并时多个话指向同一个整本源归档：pages.json 只解压解析一次
-    let mut source_pages_cache: std::collections::HashMap<
-        std::path::PathBuf,
-        std::collections::BTreeMap<String, crate::types::PageSize>,
-    > = std::collections::HashMap::new();
+    let mut source_archive_cache: std::collections::HashMap<PathBuf, CachedSourceArchive> =
+        std::collections::HashMap::new();
 
     for (chapter_idx, chapter_info) in downloaded_chapter_infos.iter().enumerate() {
         let chapter_download_dir = chapter_info.chapter_download_dir.as_ref().context(format!(
@@ -644,45 +225,51 @@ pub(crate) fn write_merged_cbz_archive(
         );
 
         if chapter_download_dir.is_file() {
-            let file = std::fs::File::open(chapter_download_dir).context(format!(
-                "打开章节CBZ`{}`失败",
-                chapter_download_dir.display()
-            ))?;
-            let mut archive = zip::ZipArchive::new(file).context(format!(
-                "解析章节CBZ`{}`失败",
-                chapter_download_dir.display()
-            ))?;
+            let cached = match source_archive_cache.entry(chapter_download_dir.to_path_buf()) {
+                std::collections::hash_map::Entry::Occupied(occupied) => occupied.into_mut(),
+                std::collections::hash_map::Entry::Vacant(vacant) => {
+                    let file = std::fs::File::open(chapter_download_dir).context(format!(
+                        "打开章节CBZ`{}`失败",
+                        chapter_download_dir.display()
+                    ))?;
+                    let mut archive = zip::ZipArchive::new(file).context(format!(
+                        "解析章节CBZ`{}`失败",
+                        chapter_download_dir.display()
+                    ))?;
+                    let all_img_names = crate::comic_scanner::image_entry_names(&mut archive);
+                    let identity =
+                        crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)?;
+                    let pages = crate::page_size::read_pages_entry(&mut archive);
+                    vacant.insert(CachedSourceArchive {
+                        archive,
+                        all_img_names,
+                        identity,
+                        pages,
+                    })
+                }
+            };
 
-            let mut img_names = crate::comic_scanner::image_entry_names(&mut archive);
             // 来源是独立章节文件时使用全部图片；来源是整本归档（无本章身份）时按话切片，
             // 避免把其他话的页面重复写入合并结果。
-            let is_own_chapter_file =
-                crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)?
-                    == Some((comic.id, chapter_info.chapter_id));
-            if !is_own_chapter_file {
-                img_names =
-                    crate::comic_scanner::select_chapter_pages(&img_names, chapter_info.order)
-                        .with_context(|| {
-                            format!(
-                                "整本归档`{}`中找不到章节`{}`的页面",
-                                chapter_download_dir.display(),
-                                chapter_info.chapter_title
-                            )
-                        })?;
-            }
+            let is_own_chapter_file = cached.identity == Some((comic.id, chapter_info.chapter_id));
+            let mut img_names = if is_own_chapter_file {
+                cached.all_img_names.clone()
+            } else {
+                crate::comic_scanner::select_chapter_pages(
+                    &cached.all_img_names,
+                    chapter_info.order,
+                )
+                .with_context(|| {
+                    format!(
+                        "整本归档`{}`中找不到章节`{}`的页面",
+                        chapter_download_dir.display(),
+                        chapter_info.chapter_title
+                    )
+                })?
+            };
             img_names.sort_by(|a, b| utils::natural_cmp(a, b));
             total_pages += i64::try_from(img_names.len()).unwrap_or(0);
 
-            // 来源归档自带的尺寸表：改名后照搬，省掉合并后的重读。
-            // 再合并时同一源归档只解压解析一次；来源没有该页的尺寸时现读文件头
-            // （归档已在手上），旧版书库/导入源合并后也能带上完整尺寸表。
-            let source_pages = match source_pages_cache.entry(chapter_download_dir.to_path_buf()) {
-                std::collections::hash_map::Entry::Occupied(occupied) => occupied.get().clone(),
-                std::collections::hash_map::Entry::Vacant(vacant) => {
-                    let pages = crate::page_size::read_pages_entry(&mut archive);
-                    vacant.insert(pages).clone()
-                }
-            };
             for (page_idx, entry_name) in img_names.iter().enumerate() {
                 let ext = Path::new(entry_name)
                     .extension()
@@ -694,15 +281,16 @@ pub(crate) fn write_merged_cbz_archive(
                 } else {
                     format!("{chapter_dir_name}/{:04}.{ext}", page_idx + 1)
                 };
-                let size = match source_pages.get(entry_name) {
+                let size = match cached.pages.get(entry_name) {
                     Some(size) => Some(*size),
-                    None => crate::page_size::size_from_archive(&mut archive, entry_name),
+                    None => crate::page_size::size_from_archive(&mut cached.archive, entry_name),
                 };
                 if let Some(size) = size {
                     merged_page_sizes.insert(target_entry_name.clone(), size);
                 }
 
-                let mut entry = archive
+                let mut entry = cached
+                    .archive
                     .by_name(entry_name)
                     .context(format!("读取原章节图片`{entry_name}`失败"))?;
                 crate::zip_limits::ensure_archive_entry_size(&entry, entry_name)?;
@@ -713,7 +301,7 @@ pub(crate) fn write_merged_cbz_archive(
                     .context(format!("将图片写入合并CBZ条目`{target_entry_name}`失败"))?;
             }
         } else if chapter_download_dir.is_dir() {
-            let image_paths = utils::collect_page_images(chapter_download_dir)?;
+            let image_paths = crate::comic_scanner::collect_page_images(chapter_download_dir)?;
             total_pages += i64::try_from(image_paths.len()).unwrap_or(0);
 
             for (page_idx, img_path) in image_paths.into_iter().enumerate() {
@@ -743,8 +331,10 @@ pub(crate) fn write_merged_cbz_archive(
             }
         }
 
-        on_progress((chapter_idx + 1) as u32);
+        on_progress(u32::try_from(chapter_idx + 1).unwrap_or(u32::MAX));
     }
+    // 必须先释放所有源归档读句柄，否则原位重写时 FUSE 触发 ETXTBSY。
+    drop(source_archive_cache);
 
     crate::page_size::write_pages_entry(&mut zip_writer, merged_page_sizes)
         .context("在合并CBZ写入`pages.json`失败")?;
@@ -754,7 +344,7 @@ pub(crate) fn write_merged_cbz_archive(
     let mut merged_comic_info = ComicInfo::from(comic, downloaded_chapter_infos[0]);
     merged_comic_info.title = comic.name.clone();
     merged_comic_info.number = None;
-    merged_comic_info.count = (total_chapters as i64).into();
+    merged_comic_info.count = i64::try_from(total_chapters).unwrap_or(i64::MAX).into();
     merged_comic_info.page_count = total_pages.into();
     let cfg = yaserde::ser::Config {
         perform_indent: true,
@@ -789,82 +379,15 @@ pub(crate) fn write_merged_cbz_archive(
     Ok(())
 }
 
-fn copy_cover(comic: &Comic, chapter_export_dir: &Path) -> anyhow::Result<()> {
-    let src_cover_path = comic.get_cover_path().context("获取封面路径失败")?;
-    let cover_filename = src_cover_path.file_name().context("获取封面的文件名失败")?;
-
-    if src_cover_path.exists() {
-        let dst_cover_path = chapter_export_dir.join(cover_filename);
-        let cover_data = std::fs::read(&src_cover_path)
-            .context(format!("读取封面`{}`失败", src_cover_path.display()))?;
-        atomic_fs::write(&dst_cover_path, cover_data)
-            .context(format!("写入封面`{}`失败", dst_cover_path.display()))?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{cbz_filename, copy_cbz_if_needed, merged_cbz_filename, write_merged_cbz_archive};
+    use super::write_merged_cbz_archive;
     use crate::types::{ChapterInfo, Comic};
     use std::{
         io::{Read, Write},
         path::Path,
     };
     use zip::{write::SimpleFileOptions, ZipWriter};
-
-    fn chapter(title: &str, id: i64, order: i64) -> ChapterInfo {
-        ChapterInfo {
-            chapter_id: id,
-            chapter_title: title.to_string(),
-            order,
-            is_downloaded: Some(true),
-            chapter_download_dir: None,
-        }
-    }
-
-    #[test]
-    fn single_chapter_cbz_uses_comic_name() {
-        let comic = Comic {
-            id: 42,
-            name: "本子：名称".to_string(),
-            ..Comic::default()
-        };
-
-        assert_eq!(
-            cbz_filename(&comic, &chapter("第1话", 1001, 1), 1),
-            "本子：名称.cbz"
-        );
-    }
-
-    #[test]
-    fn multiple_chapter_cbz_names_include_comic_order_and_chapter() {
-        let comic = Comic {
-            id: 42,
-            name: "书/名".to_string(),
-            ..Comic::default()
-        };
-
-        assert_eq!(
-            cbz_filename(&comic, &chapter("第2话/特别篇", 1002, 2), 3),
-            "书 名 - 0002 - 第2话 特别篇.cbz"
-        );
-    }
-
-    #[test]
-    fn empty_filtered_names_fall_back_to_ids() {
-        let comic = Comic {
-            id: 42,
-            name: "...".to_string(),
-            ..Comic::default()
-        };
-
-        assert_eq!(
-            cbz_filename(&comic, &chapter("...", 1002, 2), 3),
-            "comic-42 - 0002 - chapter-1002.cbz"
-        );
-    }
 
     /// 合并时条目会改名（`0001.png` -> `[01] 第1话/0001.png`），尺寸表必须跟着改名，
     /// 否则阅读器拿到的键一个都对不上，整本退回逐页现算。
@@ -916,7 +439,7 @@ mod tests {
             ..Comic::default()
         };
         let save_path = test_dir.join("尺寸书.cbz");
-        super::write_merged_cbz_archive(&comic, &[&ch1, &ch2], &save_path, |_| {}).unwrap();
+        write_merged_cbz_archive(&comic, &[&ch1, &ch2], &save_path, |_| {}).unwrap();
 
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&save_path).unwrap()).unwrap();
         let entry_names: Vec<String> = (0..archive.len())
@@ -947,9 +470,6 @@ mod tests {
 
     #[test]
     fn merge_cbz_combines_chapters_into_single_archive_preserving_sources() {
-        use std::io::Write;
-        use zip::write::SimpleFileOptions;
-
         let test_dir = std::env::temp_dir().join(format!("jm_merge_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&test_dir).unwrap();
 
@@ -1012,7 +532,7 @@ mod tests {
         let before2 = std::fs::read(&ch2_cbz_path).unwrap();
         let save_path = test_dir.join("测试漫画.cbz");
         let mut progress_count = 0;
-        super::write_merged_cbz_archive(&comic, &[&ch2, &ch1], &save_path, |p| {
+        write_merged_cbz_archive(&comic, &[&ch2, &ch1], &save_path, |p| {
             progress_count = p;
         })
         .unwrap();
@@ -1055,6 +575,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&test_dir);
     }
+
     #[test]
     fn merge_allows_single_chapter_but_rejects_cross_comic_and_source_replacement() {
         let root = std::env::temp_dir().join(format!("jm-merge-guards-{}", uuid::Uuid::new_v4()));
@@ -1107,7 +628,7 @@ mod tests {
             chapter_infos: vec![ch1.clone(), ch2.clone()],
             ..Comic::default()
         };
-        let output = root.join(merged_cbz_filename(&comic));
+        let output = root.join("merged.cbz");
         // 单话写入是合法操作（单话漫画的自动整合路径）
         assert!(write_merged_cbz_archive(&comic, &[&ch1], &output, |_| {}).is_ok());
         assert!(output.exists());
@@ -1126,8 +647,6 @@ mod tests {
         let unrelated = std::fs::read(&output).unwrap();
         assert!(write_merged_cbz_archive(&comic, &[&ch1, &ch2], &output, |_| {}).is_err());
         assert_eq!(std::fs::read(&output).unwrap(), unrelated);
-        copy_cbz_if_needed(&a, &a).unwrap();
-        assert_eq!(std::fs::read(&a).unwrap(), source);
         std::fs::remove_dir_all(root).unwrap();
     }
 

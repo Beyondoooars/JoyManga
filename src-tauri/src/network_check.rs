@@ -422,7 +422,7 @@ pub async fn check(
             let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             // 验证无账号数据的漫画信息接口，不拿域名首页或任意 HTTP 响应代替业务可用性。
             let response = client.get(format!("https://{}/week", config.get_api_domain()))
-                .header("token", crate::utils::md5_hex(&format!("{ts}{}", crate::jm_client::APP_TOKEN_SECRET)))
+                .header("token", crate::jm_client::crypto::md5_hex(&format!("{ts}{}", crate::jm_client::APP_TOKEN_SECRET)))
                 .header("tokenparam", format!("{ts},{app_version}"))
                 .header("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
                 .send().await?;

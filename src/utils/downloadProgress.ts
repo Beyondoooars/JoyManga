@@ -65,6 +65,8 @@ export function describeFailure(failure: TaskFailure | null | undefined): string
   return parts.join(' · ')
 }
 
+let nextProgressSeq = 0
+
 /** 快照与事件共用递增版本，迟到的数据不能覆盖新的任务状态。 */
 export function applyDownloadEvent(
   progresses: Map<number, ProgressData>,
@@ -75,9 +77,16 @@ export function applyDownloadEvent(
   if (previous !== undefined && previous.revision >= event.data.revision) return
   if (event.event === 'Update' && previous === undefined) return
 
+  const seq = ++nextProgressSeq
   const progress = event.event === 'Create'
-    ? { ...event.data, percentage: 0, indicator: '' }
-    : Object.assign(previous!, event.data)
+    ? {
+        ...event.data,
+        percentage: 0,
+        indicator: '',
+        createdSeq: previous?.taskId === event.data.taskId ? (previous.createdSeq ?? seq) : seq,
+        updatedSeq: seq,
+      }
+    : Object.assign(previous!, event.data, { updatedSeq: seq })
   const { totalImgCount, downloadedImgCount } = progress
   progress.percentage = totalImgCount === 0 ? 0 : Math.min(100, downloadedImgCount / totalImgCount * 100)
   progress.indicator = indicatorFor(progress)

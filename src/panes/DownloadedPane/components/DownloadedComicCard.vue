@@ -2,11 +2,13 @@
 import { type ArchiveStage, type Comic, commands } from '../../../bindings.ts'
 import { useStore } from '../../../store.ts'
 import { PhArchive, PhCheck, PhDotsThree, PhFolderOpen, PhImage, PhTrash } from '@phosphor-icons/vue'
-import { computed, h, onBeforeUnmount, ref } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { NDropdown, useMessage } from 'naive-ui'
 import { isMergeableComic, localChapters } from '../../../utils/mergeableComics.ts'
 import { formatCommandError, getErrorMessage } from '../../../utils/errors.ts'
 import { failureKindLabels } from '../../../utils/downloadProgress.ts'
+import { copyPathWithToast } from '../../../utils/clipboard.ts'
+import { useLongPress } from '../../../composables/useLongPress.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -55,6 +57,14 @@ const props = defineProps<{
   selectionMode: boolean
 }>()
 
+const coverSrc = computed(() =>
+  props.comic.localCoverData || `https://${store.imageDomain}/media/albums/${props.comic.id}_3x4.jpg`,
+)
+
+watch(coverSrc, () => {
+  coverFailed.value = false
+})
+
 const emit = defineEmits<{
   'toggle-check': [comic: Comic]
   'long-press': [comic: Comic]
@@ -87,40 +97,9 @@ function onCoverClick() {
 }
 
 // 长按进入选择：移动端没有右键，长按是进入批量操作的唯一入口。
-// 按住期间一旦移动就视为滚动，取消计时，避免滑动列表时误选。
-let pressTimer: ReturnType<typeof setTimeout> | undefined
-let pressStart: { x: number; y: number } | undefined
-let longPressed = false
-
-function clearPress() {
-  if (pressTimer !== undefined) {
-    clearTimeout(pressTimer)
-    pressTimer = undefined
-  }
-  pressStart = undefined
-}
-
-function startPress(event: PointerEvent) {
-  if (event.button !== 0) return
-  clearPress()
-  longPressed = false
-  pressStart = { x: event.clientX, y: event.clientY }
-  pressTimer = setTimeout(() => {
-    pressTimer = undefined
-    longPressed = true
-    if (navigator.vibrate) navigator.vibrate(12)
-    emit('long-press', props.comic)
-  }, 480)
-}
-
-function movePress(event: PointerEvent) {
-  if (pressStart === undefined) return
-  if (Math.abs(event.clientX - pressStart.x) > 10 || Math.abs(event.clientY - pressStart.y) > 10) clearPress()
-}
-
-function endPress() {
-  clearPress()
-}
+const { startPress, movePress, endPress, consumeLongPressClick } = useLongPress({
+  onLongPress: () => emit('long-press', props.comic),
+})
 
 // ── 更多菜单：封面墙省掉了原来的整行按钮，用右上角一个 ⋯ 把
 //「复制目录 / 整理 / 选择」收进去。
@@ -166,18 +145,13 @@ async function handleMenu(key: string) {
     await handleMergeCbz()
     return
   }
-  await showComicDownloadDirInFileManager()
+  await copyComicDownloadDir()
 }
 
-async function showComicDownloadDirInFileManager() {
+async function copyComicDownloadDir() {
   const dir = props.comic.comicDownloadDir
   if (!dir) return
-  try {
-    await navigator.clipboard.writeText(dir)
-    message.success('已复制到剪贴板')
-  } catch {
-    message.error('复制失败，请重试')
-  }
+  await copyPathWithToast(dir, message)
 }
 
 async function handleMergeCbz() {
@@ -194,15 +168,6 @@ async function handleMergeCbz() {
   }
 }
 
-// 长按已经进入选择时，抬起后紧跟的 click 不应再触发阅读/取消选择
-function onClickCapture(event: MouseEvent) {
-  if (!longPressed) return
-  longPressed = false
-  event.preventDefault()
-  event.stopPropagation()
-}
-
-onBeforeUnmount(clearPress)
 </script>
 
 <template>
@@ -211,7 +176,7 @@ onBeforeUnmount(clearPress)
       type="button"
       class="tile-cover"
       :aria-label="selectionMode ? `选择《${comic.name}》` : archiving ? `《${comic.name}》正在整合` : archiveFailure ? `《${comic.name}》整合失败` : `阅读《${comic.name}》`"
-      @click.capture="onClickCapture"
+      @click.capture="consumeLongPressClick"
       @click="onCoverClick"
       @pointerdown="startPress"
       @pointermove="movePress"
@@ -221,7 +186,7 @@ onBeforeUnmount(clearPress)
       <img
         v-if="!coverFailed && (comic.localCoverData || comic.id > 0)"
         class="tile-img"
-        :src="comic.localCoverData || `https://${store.imageDomain}/media/albums/${comic.id}_3x4.jpg`"
+        :src="coverSrc"
         :alt="comic.name"
         :draggable="false"
         loading="lazy"

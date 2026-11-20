@@ -1,20 +1,90 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use parking_lot::{Mutex, MutexGuard};
 
-static REPLACE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+const LOCK_SHARDS: usize = 64;
+static REPLACE_LOCKS: OnceLock<[Mutex<()>; LOCK_SHARDS]> = OnceLock::new();
 
-fn replace_guard() -> MutexGuard<'static, ()> {
-    REPLACE_LOCK.get_or_init(|| Mutex::new(())).lock()
+fn lock_shards() -> &'static [Mutex<()>; LOCK_SHARDS] {
+    REPLACE_LOCKS.get_or_init(|| std::array::from_fn(|_| Mutex::new(())))
 }
 
-/// 替换事务锁。阅读器读取归档时也要先拿这把锁，保证「提交方释放读句柄 → 重命名」
-/// 之间不会被一次重新打开插入（公共存储/FUSE 下会重新触发 ETXTBSY）。
-pub fn commit_guard() -> MutexGuard<'static, ()> {
-    replace_guard()
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component);
+                }
+            }
+            Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+fn normalized_lock_key(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let abs = if path.is_absolute() {
+        normalize_lexical(path)
+    } else if let Ok(cwd) = std::env::current_dir() {
+        normalize_lexical(&cwd.join(path))
+    } else {
+        normalize_lexical(path)
+    };
+    let mut tail = Vec::new();
+    let mut cursor = abs.as_path();
+    while !cursor.as_os_str().is_empty() {
+        if let Ok(canonical) = std::fs::canonicalize(cursor) {
+            let mut key = canonical;
+            for part in tail.into_iter().rev() {
+                key.push(part);
+            }
+            return key;
+        }
+        let Some(name) = cursor.file_name() else {
+            break;
+        };
+        tail.push(name.to_os_string());
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent;
+    }
+    abs
+}
+
+fn lock_shard_index(path: &Path) -> usize {
+    let key = normalized_lock_key(path);
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for ch in key.to_string_lossy().chars() {
+        for lower in ch.to_lowercase() {
+            let mut buf = [0u8; 4];
+            for byte in lower.encode_utf8(&mut buf).as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+    }
+    (hash as usize) % LOCK_SHARDS
+}
+
+fn replace_guard_for(path: &Path) -> MutexGuard<'static, ()> {
+    lock_shards()[lock_shard_index(path)].lock()
+}
+
+/// 按规范化目标路径分片的替换事务锁。阅读器读取归档与提交方替换同一路径时先拿同一分片锁，
+/// 保证「提交方释放读句柄 → 重命名」之间不会被重新打开插入（FUSE 下触发 ETXTBSY），
+/// 同时允许不同漫画/不同缓存文件完全并行。
+pub fn commit_guard(path: &Path) -> MutexGuard<'static, ()> {
+    replace_guard_for(path)
 }
 
 /// 提交前要做的全局清理（由 lib.rs 注册为「释放阅读器归档句柄」）。
@@ -90,35 +160,6 @@ where
         let _ = std::fs::remove_file(&temp_path);
     }
     result
-}
-
-pub fn copy_file(source: &Path, target: &Path) -> Result<()> {
-    anyhow::ensure!(source.is_file(), "源文件不存在或不是文件");
-    if target.exists() {
-        anyhow::ensure!(
-            std::fs::canonicalize(source)? != std::fs::canonicalize(target)?,
-            "源文件与目标文件相同"
-        );
-    }
-    let parent = target.parent().context("目标没有父目录")?;
-    std::fs::create_dir_all(parent)?;
-    let staged = temp_path(target)?;
-    let result = (|| -> Result<()> {
-        std::fs::copy(source, &staged).context("复制到临时文件失败")?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&staged)?
-            .sync_all()?;
-        commit_file(&staged, target)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&staged);
-    }
-    result
-}
-
-pub fn commit_file(temp_path: &Path, target_path: &Path) -> Result<()> {
-    commit_file_checked(temp_path, target_path, |_| Ok(()))
 }
 
 fn is_cross_device_error(err: &std::io::Error) -> bool {
@@ -278,7 +319,7 @@ pub fn commit_file_checked<F>(
 where
     F: FnOnce(&Path) -> Result<()>,
 {
-    let _guard = replace_guard();
+    let _guard = replace_guard_for(target_path);
     if !target_path.exists() {
         return rename_or_copy_fallback(temp_path, target_path);
     }
@@ -295,7 +336,7 @@ where
 /// 恢复旧版本在两次 rename 之间退出留下的文件备份。
 /// 有多个候选时保留全部文件并报错，避免猜测后覆盖用户配置。
 pub fn recover_file_backup(path: &Path) -> Result<()> {
-    let _guard = replace_guard();
+    let _guard = replace_guard_for(path);
     if path.exists() {
         return Ok(());
     }
@@ -337,7 +378,7 @@ pub fn recover_file_backup(path: &Path) -> Result<()> {
 /// 在文件系统同卷下 rename 属于毫秒级原子操作，实现瞬间与资料库解绑。
 #[cfg(test)]
 pub fn evict_to_trash(path: &Path) -> Result<PathBuf> {
-    let _guard = replace_guard();
+    let _guard = replace_guard_for(path);
     if !path.exists() {
         return Ok(path.to_path_buf());
     }
@@ -353,7 +394,6 @@ pub fn evict_to_trash(path: &Path) -> Result<PathBuf> {
 /// 扫描并清理指定目录下遗留的隐藏回收临时目录（命名形如 `.*.trash-{UUID}`）。
 /// 用于应用启动时清理先前崩溃或未正常结束的后台异步删除任务遗留物。
 pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
-    let _guard = replace_guard();
     if !dir.exists() || !dir.is_dir() {
         return Ok(0);
     }
@@ -388,6 +428,7 @@ pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
                 .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok());
         if is_trash {
             let path = entry.path();
+            let _guard = replace_guard_for(&path);
             let remove_res = if path.is_dir() {
                 std::fs::remove_dir_all(&path)
             } else {
@@ -410,8 +451,8 @@ pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_residual_trash, commit_file, evict_to_trash, recover_file_backup, sibling_path,
-        write, write_checked,
+        cleanup_residual_trash, commit_file_checked, evict_to_trash, recover_file_backup,
+        sibling_path, write, write_checked,
     };
     use anyhow::anyhow;
     use std::path::{Path, PathBuf};
@@ -454,7 +495,9 @@ mod tests {
         let sandbox = TestDir::new();
         let target = sandbox.path().join("config.json");
         write(&target, "old").unwrap();
-        assert!(commit_file(&sandbox.path().join("missing.part"), &target).is_err());
+        assert!(
+            commit_file_checked(&sandbox.path().join("missing.part"), &target, |_| Ok(())).is_err()
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
         write(&target, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
@@ -539,39 +582,36 @@ mod tests {
         assert!(normal_comic.exists());
         assert!(non_trash_hidden.exists());
     }
-}
 
-#[cfg(test)]
-mod export_copy_tests {
-    use super::*;
     #[test]
-    fn missing_source_and_same_file_do_not_destroy_an_existing_export() {
-        let root = std::env::temp_dir().join(format!("jm-copy-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let target = root.join("export.cbz");
-        std::fs::write(&target, b"old").unwrap();
-        assert!(copy_file(&root.join("missing"), &target).is_err());
-        assert!(copy_file(&target, &target).is_err());
-        assert_eq!(std::fs::read(&target).unwrap(), b"old");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-}
+    fn sharded_commit_guard_matches_before_and_after_creation_and_does_not_block_other_shards() {
+        let sandbox = TestDir::new();
+        let path_a = sandbox.path().join("alpha.cbz");
+        let shard_before_create = super::lock_shard_index(&path_a);
+        std::fs::write(&path_a, b"v1").unwrap();
+        let shard_after_create = super::lock_shard_index(&path_a);
+        assert_eq!(shard_before_create, shard_after_create);
 
-#[cfg(test)]
-mod successful_copy_tests {
-    use super::*;
-    #[test]
-    fn copying_an_existing_archive_commits_new_bytes_and_preserves_source() {
-        let root = std::env::temp_dir().join(format!("jm-copy-success-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let source = root.join("source.cbz");
-        let target = root.join("output.cbz");
-        std::fs::write(&source, b"new archive bytes").unwrap();
-        std::fs::write(&target, b"old archive bytes").unwrap();
-        copy_file(&source, &target).unwrap();
-        assert_eq!(std::fs::read(&source).unwrap(), b"new archive bytes");
-        assert_eq!(std::fs::read(&target).unwrap(), b"new archive bytes");
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
-        std::fs::remove_dir_all(root).unwrap();
+        let mut index = 0usize;
+        let path_b = loop {
+            let candidate = sandbox.path().join(format!("beta-{index}.cbz"));
+            if super::lock_shard_index(&candidate) != shard_after_create {
+                break candidate;
+            }
+            index += 1;
+        };
+
+        let _guard_a = super::commit_guard(&path_a);
+        let target_b = path_b.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            write(&target_b, "parallel-ok").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("writing unrelated shard must not be blocked");
+        writer.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&path_b).unwrap(), "parallel-ok");
     }
 }

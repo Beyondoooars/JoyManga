@@ -195,8 +195,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.name 'Beyondoooars'
+          git config user.email '101119019+Beyondoooars@users.noreply.github.com'
           git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock README.md
           # 显式发布版本号时文件可能本来就是这个值，仍需一次提交作为 tag 的落点
           git commit --allow-empty -m "chore: 发布 v${VERSION} [skip ci]"

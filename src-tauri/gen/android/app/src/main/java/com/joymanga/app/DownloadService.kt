@@ -3,8 +3,10 @@ package com.joymanga.app
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.os.*
 import android.content.pm.ServiceInfo
+import android.net.Uri
+import android.os.*
+import android.util.Log
 
 /**
  * 下载前台服务。
@@ -14,10 +16,15 @@ import android.content.pm.ServiceInfo
  */
 class DownloadService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
+    private var foregroundStarted = false
     private val handler = Handler(Looper.getMainLooper())
     private val renew = object : Runnable {
         override fun run() {
-            wakeLock?.acquire(15 * 60 * 1000L)
+            try {
+                wakeLock?.acquire(15 * 60 * 1000L)
+            } catch (error: Exception) {
+                Log.w("JoyManga", "续期下载 WakeLock 失败", error)
+            }
             handler.postDelayed(this, 10 * 60 * 1000L)
         }
     }
@@ -34,22 +41,86 @@ class DownloadService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
-            // 交给前端决定取消哪一个（前端持有任务列表），服务只负责转发
-            sendToWeb("window.dispatchEvent(new Event('jm-download-cancel'))")
+            // 若通过 startForegroundService 冷拉起，必须先转前台再决定去留，避免 5 秒超时崩溃
+            if (!foregroundStarted && !startForegroundSafe(buildIdleNotification("正在取消下载"))) {
+                return START_NOT_STICKY
+            }
+            // 交给前端决定取消哪一个（前端持有任务列表）；若前端已销毁，主动清理服务与唤醒锁
+            val delivered = sendToWeb("window.dispatchEvent(new Event('jm-download-cancel'))")
+            if (!delivered) {
+                stopGracefully(startId)
+            }
             return START_NOT_STICKY
         }
         val active = intent?.getIntExtra("active", 0) ?: 0
-        if (active <= 0) { stopSelf(); return START_NOT_STICKY }
+        if (intent == null || active <= 0) {
+            if (!foregroundStarted) {
+                startForegroundSafe(buildIdleNotification("下载已完成"))
+            }
+            stopGracefully(startId)
+            return START_NOT_STICKY
+        }
 
-        // 走到这里 active > 0，说明 intent 非空；用局部非空引用避免可空接收者报错。
-        val extras = intent ?: run { stopSelf(); return START_NOT_STICKY }
-        val total = extras.getIntExtra("total", 0)
-        val current = extras.getIntExtra("current", 0)
-        val speed = extras.getStringExtra("speed").orEmpty()
+        val total = intent.getIntExtra("total", 0)
+        val current = intent.getIntExtra("current", 0)
+        val speed = intent.getStringExtra("speed").orEmpty()
         val notification = buildNotification(active, current, total, speed)
-        if (Build.VERSION.SDK_INT >= 29) startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        else startForeground(ID, notification)
+        if (!startForegroundSafe(notification)) {
+            return START_NOT_STICKY
+        }
         return START_NOT_STICKY
+    }
+
+    private fun startForegroundSafe(notification: Notification): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(ID, notification)
+            }
+            foregroundStarted = true
+            true
+        } catch (error: Exception) {
+            Log.w("JoyManga", "启动下载前台服务失败", error)
+            stopGracefully()
+            false
+        }
+    }
+
+    private fun stopForegroundCompat() {
+        if (!foregroundStarted) return
+        foregroundStarted = false
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
+
+    private fun releaseWakeLockSafely() {
+        val lock = wakeLock ?: return
+        wakeLock = null
+        try {
+            if (lock.isHeld) lock.release()
+        } catch (error: RuntimeException) {
+            Log.w("JoyManga", "释放下载 WakeLock 失败", error)
+        }
+    }
+
+    private fun stopGracefully(startId: Int? = null) {
+        handler.removeCallbacks(renew)
+        releaseWakeLockSafely()
+        AppState.downloadServiceRunning = false
+        stopForegroundCompat()
+        if (startId != null) stopSelf(startId) else stopSelf()
+    }
+
+    private fun buildIdleNotification(title: String): Notification {
+        val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pending = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
+        return builder.setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(title)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(pending)
+            .build()
     }
 
     private fun buildNotification(active: Int, current: Int, total: Int, speed: String): Notification {
@@ -93,15 +164,31 @@ class DownloadService : Service() {
      */
     private fun sendToWeb(script: String) = AppState.emit(script)
 
+    override fun onTimeout(startId: Int) {
+        Log.w("JoyManga", "下载前台服务达到系统时长限制，安全释放并停止")
+        stopGracefully(startId)
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Log.w("JoyManga", "下载前台服务达到系统时长限制（fgsType=$fgsType），安全释放并停止")
+        stopGracefully(startId)
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // 最近任务划掉界面导致后续无法再通过前端推进/结束前台通知时，及时收口唤醒锁；
+        // 断点进度已在 Rust 下载队列持久化，下次冷启动会自动恢复。
+        stopGracefully()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         AppState.downloadServiceRunning = false
         handler.removeCallbacks(renew)
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        wakeLock = null
+        releaseWakeLockSafely()
+        stopForegroundCompat()
         super.onDestroy()
     }
-    // 从最近任务划掉界面时不要停服务：下载在 Rust 侧继续执行，停掉前台服务会让
-    // 进程更容易被系统回收。任务真正结束时前端把 active 置 0，服务自行停止。
+
     override fun onBind(intent: Intent?) = null
     companion object {
         const val CHANNEL = "joymanga_downloads"
@@ -131,12 +218,29 @@ object AppState {
     @Volatile var foreground = false
     /** 漫画下载前台服务是否在运行；运行中时再次启动不受「后台不能起前台服务」限制 */
     @Volatile var downloadServiceRunning = false
+    /** 待前端通知就绪的外部打开 URI 队列：放在全局单例里避免 Activity 重建丢失 */
+    val pendingViewUris = ArrayDeque<Uri>()
+    private val activeStagingDirs = HashSet<String>()
 
-    /** @return 事件是否已投递给 WebView；Activity 已销毁时返回 false */
+    fun markStagingActive(dirName: String) {
+        synchronized(activeStagingDirs) { activeStagingDirs.add(dirName) }
+    }
+
+    fun unmarkStagingActive(dirName: String) {
+        synchronized(activeStagingDirs) { activeStagingDirs.remove(dirName) }
+    }
+
+    fun isStagingActive(dirName: String): Boolean {
+        synchronized(activeStagingDirs) { return activeStagingDirs.contains(dirName) }
+    }
+
+    /** @return 事件是否已投递给 WebView；Activity 已销毁或正在结束时返回 false */
     fun emit(script: String): Boolean {
         val activity = activity ?: return false
+        if (activity.isDestroyed || activity.isFinishing) return false
         return try {
             activity.runOnUiThread {
+                if (activity.isDestroyed || activity.isFinishing) return@runOnUiThread
                 try { activity.webView?.evaluateJavascript(script, null) } catch (_: Exception) {}
             }
             true

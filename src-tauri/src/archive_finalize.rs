@@ -13,7 +13,7 @@ use crate::atomic_fs;
 use crate::errors::classify_failure;
 use crate::events::ComicArchiveEvent;
 use crate::extensions::AppHandleExt;
-use crate::types::{ArchiveStage, CbzMode, ChapterInfo, Comic, TaskStage};
+use crate::types::{ArchiveStage, ChapterInfo, Comic, TaskStage};
 use crate::utils;
 
 #[derive(Default)]
@@ -182,7 +182,7 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
     {
         return;
     }
-    let comic = match local_comic(app, comic_id) {
+    let comic = match crate::commands::library_commands::find_local_comic(app, comic_id, false) {
         Ok(comic) => comic,
         Err(error) => {
             tracing::error!(comic_id, error = %error, "归档最终整合：读取本地漫画失败");
@@ -221,7 +221,7 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
     let has_new_tasks = app
         .get_download_manager()
         .has_active_tasks_for_comic(comic_id);
-    match run_finalize(app, &comic, mode, &mut progress) {
+    match run_finalize(app, &comic, &mut progress) {
         Ok(archive_path) => {
             // 运行期间有章节完成时会记录重跑；此时保留意图，让补跑继续使用用户
             // 选择的整理方式，而不是退回配置默认值。
@@ -236,7 +236,7 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
                     intents.remove(comic_id);
                 }
             }
-            if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
+            if let Some(cache) = app.try_state::<crate::library_catalog::DownloadedLibraryCache>() {
                 cache.invalidate();
             }
             let _ = ComicArchiveEvent::End {
@@ -331,24 +331,9 @@ impl ArchiveProgressReporter {
     }
 }
 
-fn local_comic(app: &AppHandle, comic_id: i64) -> anyhow::Result<Comic> {
-    let root = app.get_config().read().download_dir.clone();
-    if let Some(comic) = app
-        .state::<utils::DownloadedLibraryCache>()
-        .comic(&root, comic_id)
-    {
-        return Ok(comic);
-    }
-    crate::commands::library_commands::get_downloaded_comics(app.clone())
-        .into_iter()
-        .find(|comic| comic.id == comic_id)
-        .with_context(|| format!("本地书库没有漫画ID `{comic_id}`"))
-}
-
 fn run_finalize(
     app: &AppHandle,
     comic: &Comic,
-    mode: CbzMode,
     progress: &mut ArchiveProgressReporter,
 ) -> anyhow::Result<PathBuf> {
     progress.emit(ArchiveStage::Collecting, 0);
@@ -372,61 +357,28 @@ fn run_finalize(
     }
     progress.emit(ArchiveStage::Packing, 0);
 
-    match mode {
-        CbzMode::Merge => {
-            let target = resolve_merged_target(&canonical_root, comic)?;
-            // 读句柄的释放放在真正的提交之前（write_merged_cbz_archive 内）：
-            // 合并耗时较长，提前释放会被期间的翻页重新缓存。
-            crate::export::write_merged_cbz_archive(comic, &downloaded, &target, |current| {
-                progress.emit(ArchiveStage::Packing, current);
-            })?;
-            progress.emit(
-                ArchiveStage::Finalizing,
-                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
-            );
-            progress.emit(
-                ArchiveStage::Cleaning,
-                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
-            );
-            cleanup_merged_sources(&canonical_root, &target, comic, &downloaded);
-            tracing::info!(
-                comic_title = %comic.name,
-                archive = %target.display(),
-                chapters = downloaded.len(),
-                "已自动合并为整本CBZ并清理来源章节文件"
-            );
-            Ok(target)
-        }
-        CbzMode::PerChapter => {
-            let total_chapters = comic.chapter_infos.len();
-            for (index, chapter) in downloaded.iter().enumerate() {
-                if let Err(error) =
-                    rename_chapter_archive(&canonical_root, comic, total_chapters, chapter)
-                {
-                    tracing::warn!(
-                        comic_title = %comic.name,
-                        chapter = %chapter.chapter_title,
-                        error = %error,
-                        "章节归档命名整理失败，保留原文件名"
-                    );
-                }
-                progress.emit(
-                    ArchiveStage::Packing,
-                    u32::try_from(index + 1).unwrap_or(u32::MAX),
-                );
-            }
-            progress.emit(
-                ArchiveStage::Finalizing,
-                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
-            );
-            progress.emit(
-                ArchiveStage::Cleaning,
-                u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
-            );
-            // 逐话模式的最终形态就是各章节文件本身，回传书库目录便于前端提示定位
-            Ok(canonical_root)
-        }
-    }
+    let target = resolve_merged_target(&canonical_root, comic)?;
+    // 读句柄的释放放在真正的提交之前（write_merged_cbz_archive 内）：
+    // 合并耗时较长，提前释放会被期间的翻页重新缓存。
+    crate::archive_merge::write_merged_cbz_archive(comic, &downloaded, &target, |current| {
+        progress.emit(ArchiveStage::Packing, current);
+    })?;
+    progress.emit(
+        ArchiveStage::Finalizing,
+        u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
+    );
+    progress.emit(
+        ArchiveStage::Cleaning,
+        u32::try_from(downloaded.len()).unwrap_or(u32::MAX),
+    );
+    cleanup_merged_sources(&canonical_root, &target, comic, &downloaded);
+    tracing::info!(
+        comic_title = %comic.name,
+        archive = %target.display(),
+        chapters = downloaded.len(),
+        "已自动合并为整本CBZ并清理来源章节文件"
+    );
+    Ok(target)
 }
 
 /// 解析整本合并的目标路径：优先 `<本子名>.cbz`，被其他漫画占用时回退 `[JM{id}]` 后缀。
@@ -488,7 +440,7 @@ fn cleanup_merged_sources(root: &Path, target: &Path, comic: &Comic, sources: &[
             Ok(Some(identity)) if identity == (comic.id, chapter.chapter_id) => {
                 // 来源章节可能正被阅读器打开：删除前释放读句柄
                 let remove_result = {
-                    let _guard = atomic_fs::commit_guard();
+                    let _guard = atomic_fs::commit_guard(&canonical_source);
                     crate::commands::reader_commands::release_handle_for(&canonical_source);
                     std::fs::remove_file(&canonical_source)
                 };
@@ -501,70 +453,6 @@ fn cleanup_merged_sources(root: &Path, target: &Path, comic: &Comic, sources: &[
                 }
             }
             _ => {}
-        }
-    }
-}
-
-/// 逐话模式：把身份匹配的章节 CBZ 整理为「本子名 - 序号 - 话名.cbz」。
-/// 目标名被其他文件占用时保留原存储名，不做破坏性替换。
-fn rename_chapter_archive(
-    root: &Path,
-    comic: &Comic,
-    total_chapters: usize,
-    chapter: &ChapterInfo,
-) -> anyhow::Result<()> {
-    let Some(source) = chapter.chapter_download_dir.as_deref() else {
-        return Ok(());
-    };
-    if !source.is_file() {
-        return Ok(());
-    }
-    let canonical_source =
-        std::fs::canonicalize(source).context(format!("解析章节文件`{}`失败", source.display()))?;
-    if !canonical_source.starts_with(root) {
-        return Ok(());
-    }
-    if crate::comic_scanner::read_chapter_identity(&canonical_source)?
-        != Some((comic.id, chapter.chapter_id))
-    {
-        return Ok(());
-    }
-
-    let desired_name = utils::cbz_filename(
-        &comic.name,
-        comic.id,
-        &chapter.chapter_title,
-        chapter.chapter_id,
-        chapter.order,
-        total_chapters,
-    );
-    let desired = root.join(desired_name);
-    if desired == canonical_source {
-        return Ok(());
-    }
-    if desired.exists() {
-        // 同名文件必须属于本话才允许替换；否则保留存储名
-        let existing_identity = crate::comic_scanner::read_chapter_identity(&desired)?;
-        if existing_identity != Some((comic.id, chapter.chapter_id)) {
-            return Ok(());
-        }
-        atomic_fs::copy_file(&canonical_source, &desired)?;
-        let _ = std::fs::remove_file(&canonical_source);
-        return Ok(());
-    }
-    // 阅读器可能正打开着这个章节 CBZ：改名/删除来源前释放它的读句柄
-    let rename_result = {
-        let _guard = atomic_fs::commit_guard();
-        crate::commands::reader_commands::release_handle_for(&canonical_source);
-        std::fs::rename(&canonical_source, &desired)
-    };
-    match rename_result {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            // 跨卷等无法直接改名的情况：复制到目标后再删除来源
-            atomic_fs::copy_file(&canonical_source, &desired)?;
-            let _ = std::fs::remove_file(&canonical_source);
-            Ok(())
         }
     }
 }
@@ -654,35 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn rename_uses_clean_names_and_never_replaces_other_chapters() {
-        let root = std::env::temp_dir().join(format!("jm-rename-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        // 被调函数用 canonicalize 后的路径做包含判断；Windows 上临时目录可能是 8.3 短名，
-        // canonicalize 会展开长名并附加 `\\?\` 前缀，测试先规范化再使用，避免混用比较。
-        let root = std::fs::canonicalize(&root).unwrap();
-        let comic = Comic {
-            id: 5,
-            name: "书".into(),
-            ..Comic::default()
-        };
-        let src = root.join(utils::storage_cbz_filename("书", 5, 501));
-        make_chapter_cbz(&src, 5, 501);
-        let ch = chapter(501, "第1话", 1, &src);
-        rename_chapter_archive(&root, &comic, 3, &ch).unwrap();
-        let renamed = root.join("书 - 0001 - 第1话.cbz");
-        assert!(renamed.is_file());
-        assert!(!src.exists());
-
-        // 目标名被其他话占用时保持原样
-        let src2 = root.join(utils::storage_cbz_filename("书", 5, 502));
-        make_chapter_cbz(&src2, 5, 502);
-        let ch2 = chapter(502, "第1话", 1, &src2);
-        rename_chapter_archive(&root, &comic, 3, &ch2).unwrap();
-        assert!(src2.is_file(), "不能覆盖其他话已占用的目标名");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn cleanup_only_removes_own_chapter_files() {
         let root = std::env::temp_dir().join(format!("jm-cleanup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -693,7 +552,7 @@ mod tests {
             name: "书".into(),
             ..Comic::default()
         };
-        let own = root.join(utils::storage_cbz_filename("书", 8, 801));
+        let own = root.join(crate::comic_scanner::storage_cbz_filename("书", 8, 801));
         make_chapter_cbz(&own, 8, 801);
         let foreign = root.join("other.cbz");
         make_chapter_cbz(&foreign, 42, 801);

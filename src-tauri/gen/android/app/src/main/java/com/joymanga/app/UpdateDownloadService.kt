@@ -18,6 +18,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * 更新安装包下载前台服务。
@@ -41,7 +42,11 @@ class UpdateDownloadService : Service() {
 
     private val renew = object : Runnable {
         override fun run() {
-            wakeLock?.acquire(30 * 60 * 1000L)
+            try {
+                wakeLock?.acquire(30 * 60 * 1000L)
+            } catch (error: Exception) {
+                android.util.Log.w("JoyManga", "续期更新 WakeLock 失败", error)
+            }
             handler.postDelayed(this, 10 * 60 * 1000L)
         }
     }
@@ -67,27 +72,44 @@ class UpdateDownloadService : Service() {
             return START_NOT_STICKY
         }
         lastPercent = 0
-        startForegroundCompat(buildProgressNotification(0))
-        if (url.isEmpty()) {
-            stopForegroundCompat()
-            stopSelf()
+        if (!startForegroundCompat(buildProgressNotification(0))) {
             return START_NOT_STICKY
         }
-        running = true
+        if (url.isEmpty() || worker.isShutdown) {
+            stopForegroundCompat()
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        val runId = synchronized(runLock) {
+            running = true
+            ++currentRunId
+        }
         terminal = null
         // 新一轮下载开始：上一轮留下的待安装包作废，避免失败后误装旧版本
+        val appCtx = applicationContext
         pendingInstall = null
-        clearPendingInstall(this)
-        worker.execute { download(url, fileName) }
+        clearPendingInstall(appCtx)
+        try {
+            worker.execute { download(runId, appCtx, url, fileName) }
+        } catch (error: RejectedExecutionException) {
+            synchronized(runLock) {
+                if (currentRunId == runId) running = false
+            }
+            val message = error.message ?: "更新下载服务正在关闭，请重试"
+            terminal = "error" to message
+            AppState.emitUpdate("error", message = message)
+            stopForegroundCompat()
+            stopSelf(startId)
+        }
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun download(url: String, fileName: String) {
+    private fun download(runId: Long, appCtx: Context, url: String, fileName: String) {
         try {
-            val target = updateTarget(fileName)
-            val partial = partialFile(url, fileName)
+            val target = updateTarget(appCtx, fileName)
+            val partial = partialFile(appCtx, url, fileName)
             // 上次下载被系统杀掉时留下的半成品：先按已有长度请求剩余部分
             var resumeFrom = if (partial.exists()) partial.length() else 0L
             val connection = URL(url).openConnection() as HttpURLConnection
@@ -103,7 +125,7 @@ class UpdateDownloadService : Service() {
                     // 服务器认为已经取到文件末尾：半成品就是完整包，直接进入安装
                     connection.disconnect()
                     require(partial.renameTo(target)) { "无法保存安装包" }
-                    finishSuccess(target)
+                    finishSuccess(appCtx, target)
                     return
                 }
                 if (connection.responseCode == HttpURLConnection.HTTP_OK) {
@@ -130,7 +152,7 @@ class UpdateDownloadService : Service() {
                                 val percent = (copied * 100 / total).toInt().coerceIn(0, 99)
                                 if (percent != lastReported) {
                                     lastReported = percent
-                                    report(percent)
+                                    report(appCtx, percent)
                                 }
                             }
                         }
@@ -142,38 +164,49 @@ class UpdateDownloadService : Service() {
             }
             require(partial.length() > 0) { "下载的安装包为空" }
             require(partial.renameTo(target)) { "无法保存安装包" }
-            finishSuccess(target)
+            finishSuccess(appCtx, target)
         } catch (error: Exception) {
             val message = error.message ?: "下载更新失败"
             terminal = "error" to message
             AppState.emitUpdate("error", message = message)
-            notifyFailure(message)
+            notifyFailure(appCtx, message)
         } finally {
-            // 失败时保留半成品：下次点击更新可以从断点继续
-            running = false
-            // 下载期间服务可能被系统销毁重建（running 为 true 时新实例只负责维持
-            // 前台状态），结束时要停的是当前存活的实例，而不是发起下载的那个。
-            val alive = current ?: this
-            alive.stopForegroundCompat()
-            alive.stopSelf()
+            // 在主线程按 runId 串行结束当前前台状态，防止刚启动的新一轮下载被旧线程 finally 误停。
+            handler.post {
+                val shouldStop = synchronized(runLock) {
+                    if (currentRunId == runId) {
+                        running = false
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (shouldStop) {
+                    val alive = current ?: this
+                    alive.handler.removeCallbacks(alive.renew)
+                    alive.releaseWakeLockSafely()
+                    alive.stopForegroundCompat()
+                    alive.stopSelf()
+                }
+            }
         }
     }
 
     /** 进度回传前端（每 1%），通知栏按 500ms 节流刷新。 */
-    private fun report(percent: Int) {
+    private fun report(appCtx: Context, percent: Int) {
         lastPercent = percent
         AppState.emitUpdate("progress", percent = percent)
         val now = SystemClock.elapsedRealtime()
         if (now - lastNotifyAt < 500) return
         lastNotifyAt = now
         try {
-            notificationManager().notify(ID, buildProgressNotification(percent))
+            notificationManager(appCtx).notify(ID, buildProgressNotification(percent))
         } catch (error: Exception) {
             android.util.Log.w("JoyManga", "刷新更新下载通知失败", error)
         }
     }
 
-    private fun finishSuccess(apk: File) {
+    private fun finishSuccess(appCtx: Context, apk: File) {
         lastPercent = 100
         AppState.emitUpdate("done", percent = 100)
         // 应用在前台：直接拉起安装器，保持原来的「点更新→确认安装」一步到位。
@@ -188,16 +221,16 @@ class UpdateDownloadService : Service() {
         // 后台：记下来（内存 + 偏好设置，进程被杀也不丢），交给通知
         terminal = "installer" to "安装包已下载完成，请继续安装"
         pendingInstall = apk
-        savePendingInstall(apk)
-        notifyReady()
+        savePendingInstall(appCtx, apk)
+        notifyReady(appCtx)
     }
 
     /** 安装包落盘路径；顺带清掉 1 小时前的旧包（系统安装器可能还在读，不能删新的） */
-    private fun updateTarget(fileName: String): File {
+    private fun updateTarget(appCtx: Context, fileName: String): File {
         val name = safeFileName(fileName).ifBlank { "update.apk" }.let {
             if (it.endsWith(".apk", ignoreCase = true)) it else "$it.apk"
         }
-        val dir = File(cacheDir, "updates").apply { mkdirs() }
+        val dir = File(appCtx.cacheDir, "updates").apply { mkdirs() }
         dir.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000 }?.forEach { it.delete() }
         return File(dir, name)
     }
@@ -206,12 +239,12 @@ class UpdateDownloadService : Service() {
      * 半成品路径。按下载地址的哈希区分：换了版本的安装包绝不能接着旧文件续传，
      * 否则拼出的是两个 APK 的混合体，装上去只会校验失败。
      */
-    private fun partialFile(url: String, fileName: String): File {
+    private fun partialFile(appCtx: Context, url: String, fileName: String): File {
         val name = safeFileName(fileName).ifBlank { "update.apk" }.let {
             if (it.endsWith(".apk", ignoreCase = true)) it else "$it.apk"
         }
         val tag = Integer.toHexString(url.hashCode()).padStart(8, '0')
-        return File(File(cacheDir, "updates"), ".part-$tag-$name")
+        return File(File(appCtx.cacheDir, "updates"), ".part-$tag-$name")
     }
 
     private fun buildProgressNotification(percent: Int): Notification {
@@ -230,14 +263,14 @@ class UpdateDownloadService : Service() {
             .build()
     }
 
-    private fun notifyReady() {
+    private fun notifyReady(appCtx: Context) {
         try {
-            val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val open = Intent(appCtx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             val pending = PendingIntent.getActivity(
-                this, 2, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                appCtx, 2, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-            notificationManager().notify(
+            val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(appCtx, CHANNEL) else Notification.Builder(appCtx)
+            notificationManager(appCtx).notify(
                 READY_ID,
                 builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
                     .setContentTitle("安装包已下载完成")
@@ -252,14 +285,14 @@ class UpdateDownloadService : Service() {
         }
     }
 
-    private fun notifyFailure(message: String) {
+    private fun notifyFailure(appCtx: Context, message: String) {
         try {
-            val open = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val open = Intent(appCtx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
             val pending = PendingIntent.getActivity(
-                this, 3, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                appCtx, 3, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else Notification.Builder(this)
-            notificationManager().notify(
+            val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(appCtx, CHANNEL) else Notification.Builder(appCtx)
+            notificationManager(appCtx).notify(
                 FAILED_ID,
                 builder.setSmallIcon(android.R.drawable.stat_notify_error)
                     .setContentTitle("更新下载失败")
@@ -274,30 +307,67 @@ class UpdateDownloadService : Service() {
         }
     }
 
-    private fun savePendingInstall(apk: File) {
+    private fun savePendingInstall(appCtx: Context, apk: File) {
         try {
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_PENDING_APK, apk.absolutePath).apply()
+            appCtx.getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_PENDING_APK, apk.absolutePath).apply()
         } catch (error: Exception) {
             android.util.Log.w("JoyManga", "记录待安装更新包失败", error)
         }
     }
 
-    private fun notificationManager() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    private fun notificationManager(appCtx: Context) =
+        appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-    private fun startForegroundCompat(notification: Notification) {
-        if (Build.VERSION.SDK_INT >= 29) startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        else startForeground(ID, notification)
+    private fun startForegroundCompat(notification: Notification): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(ID, notification)
+            }
+            true
+        } catch (error: Exception) {
+            android.util.Log.w("JoyManga", "启动更新前台服务失败", error)
+            val message = error.message ?: "无法启动后台更新下载服务"
+            terminal = "error" to message
+            AppState.emitUpdate("error", message = message)
+            stopSelf()
+            false
+        }
     }
 
     private fun stopForegroundCompat() {
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
+    private fun releaseWakeLockSafely() {
+        val lock = wakeLock ?: return
+        wakeLock = null
+        try {
+            if (lock.isHeld) lock.release()
+        } catch (error: RuntimeException) {
+            android.util.Log.w("JoyManga", "释放更新 WakeLock 失败", error)
+        }
+    }
+
+    override fun onTimeout(startId: Int) {
+        handler.removeCallbacks(renew)
+        releaseWakeLockSafely()
+        stopForegroundCompat()
+        stopSelf(startId)
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handler.removeCallbacks(renew)
+        releaseWakeLockSafely()
+        stopForegroundCompat()
+        stopSelf(startId)
+    }
+
     override fun onDestroy() {
         if (current === this) current = null
         handler.removeCallbacks(renew)
-        if (wakeLock?.isHeld == true) wakeLock?.release()
-        wakeLock = null
+        releaseWakeLockSafely()
         // 注意：不要在这里 shutdownNow，也不要在这里复位 running。
         // 服务可能在下到一半时被系统销毁，而下载线程仍在同一进程里继续跑完，
         // 它自己的 finally 会复位 running；提前打断只会留下半截文件，
@@ -315,6 +385,8 @@ class UpdateDownloadService : Service() {
         const val FAILED_ID = 1205
         private const val PREFS = "joymanga_updates"
         private const val KEY_PENDING_APK = "pending_apk"
+        private val runLock = Any()
+        @Volatile private var currentRunId = 0L
 
         /**
          * 是否有安装包正在下载；界面重建后也据此拦住重复点击，并补发当前进度。

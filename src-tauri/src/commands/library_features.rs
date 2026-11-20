@@ -9,11 +9,12 @@ use tauri::{AppHandle, Manager};
 use crate::comic_scanner::is_page_image;
 use crate::errors::{CommandError, CommandResult};
 use crate::extensions::{AppHandleExt, PathIsCbz, PathIsImg};
-use crate::library_catalog::{catalog_path, LibraryCatalog, CATALOG_LOCK};
-use crate::types::{ChapterInfo, Comic};
+use crate::image_data::MAX_PAGE_BYTES;
+use crate::library_catalog::{catalog_path, DownloadedLibraryCache, LibraryCatalog, CATALOG_LOCK};
+use crate::types::{ChapterInfo, Comic, ComicInfo};
 use crate::utils;
 
-const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CBZ_IMPORT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PAGES: usize = 10_000;
 
 #[derive(Default, Serialize, Type)]
@@ -22,6 +23,13 @@ pub struct ImportReport {
     imported: usize,
     skipped: usize,
     errors: Vec<String>,
+}
+
+enum PreparedImport {
+    RestoreKnown { comic_id: i64 },
+    Imported { imported: bool, id: Option<i64> },
+    RegisterPath { label: PathBuf, canonical: PathBuf },
+    Error { label: PathBuf, error: String },
 }
 
 #[tauri::command(async)]
@@ -34,16 +42,18 @@ pub async fn import_local_comics(
     ensure_import_batch(&paths).map_err(|err| CommandError::from("导入失败", err))?;
     let records_path = catalog_path(&app);
     let report = tokio::task::spawn_blocking(move || {
+        // 扫描、拷贝与哈希全部在 CATALOG_LOCK 之外完成；只把加载/回写记录锁在最后。
+        let prepared = prepare_imports(&paths, &download_dir, true);
         let _guard = CATALOG_LOCK.lock();
         let mut catalog = LibraryCatalog::load(&records_path)?;
-        let report = import_batch_with_mode(paths, &download_dir, &mut catalog, true);
+        let report = apply_prepared_imports(&download_dir, &mut catalog, prepared);
         catalog.save(&records_path)?;
         Ok::<_, anyhow::Error>(report)
     })
     .await
     .map_err(|err| CommandError::from("导入任务失败", err))?
     .map_err(|err| CommandError::from("保存导入记录失败", err))?;
-    app.state::<utils::DownloadedLibraryCache>().invalidate();
+    app.state::<DownloadedLibraryCache>().invalidate();
     Ok(report)
 }
 
@@ -53,70 +63,120 @@ fn import_batch(
     download_dir: &Path,
     catalog: &mut LibraryCatalog,
 ) -> ImportReport {
-    import_batch_with_mode(paths, download_dir, catalog, false)
+    let prepared = prepare_imports(&paths, download_dir, false);
+    apply_prepared_imports(download_dir, catalog, prepared)
 }
 
-fn import_batch_with_mode(
-    paths: Vec<String>,
-    download_dir: &Path,
-    catalog: &mut LibraryCatalog,
-    copy_files: bool,
-) -> ImportReport {
-    let mut report = ImportReport::default();
+fn build_known_path_index(known: &[Comic]) -> std::collections::HashMap<PathBuf, i64> {
+    let mut index = std::collections::HashMap::new();
+    for comic in known {
+        for chapter in &comic.chapter_infos {
+            if let Some(path) = chapter.chapter_download_dir.as_ref() {
+                if let Ok(canonical) = std::fs::canonicalize(path) {
+                    index.entry(canonical).or_insert(comic.id);
+                }
+            }
+        }
+    }
+    index
+}
+
+fn prepare_imports(paths: &[String], download_dir: &Path, copy_files: bool) -> Vec<PreparedImport> {
+    let mut prepared = Vec::new();
     let known = super::library_commands::scan_downloaded_comics(download_dir).comics;
-    for source in paths {
-        let source = Path::new(&source);
+    let known_paths = build_known_path_index(&known);
+    for source_str in paths {
+        let source = Path::new(source_str);
         let files = if source.is_dir() {
             find_cbz_files(source)
         } else {
             Ok(vec![source.to_path_buf()])
         };
         match files {
-            Ok(files) if files.is_empty() => {
-                record_import_result(&mut report, source, import_source(source, download_dir));
-            }
+            Ok(files) if files.is_empty() => match import_source(source, download_dir) {
+                Ok((imported, id)) => prepared.push(PreparedImport::Imported { imported, id }),
+                Err(error) => prepared.push(PreparedImport::Error {
+                    label: source.to_path_buf(),
+                    error: format!("{error:#}"),
+                }),
+            },
             Ok(files) => {
                 for file in files {
-                    let result = (|| -> anyhow::Result<bool> {
+                    let item = (|| -> anyhow::Result<PreparedImport> {
                         ensure!(file.is_cbz(), "请选择 CBZ 文件");
-                        validate_archive_structure(&file)?;
                         let canonical = std::fs::canonicalize(&file)?;
-                        if let Some(comic) = known.iter().find(|comic| {
-                            comic.chapter_infos.iter().any(|chapter| {
-                                chapter.chapter_download_dir.as_ref().is_some_and(|path| {
-                                    std::fs::canonicalize(path).is_ok_and(|path| path == canonical)
-                                })
-                            })
-                        }) {
-                            return Ok(catalog.restore(download_dir, comic.id));
+                        if let Some(&comic_id) = known_paths.get(&canonical) {
+                            validate_archive_structure(&canonical)?;
+                            return Ok(PreparedImport::RestoreKnown { comic_id });
                         }
                         if copy_files {
-                            let imported = import_source(&canonical, download_dir)?;
-                            let id = source_id(&canonical)?;
-                            Ok(catalog.restore(download_dir, id) || imported)
+                            let (imported, id) = import_source(&canonical, download_dir)?;
+                            Ok(PreparedImport::Imported { imported, id })
                         } else {
-                            Ok(catalog.register(download_dir, &canonical)?.1)
+                            validate_archive_structure(&canonical)?;
+                            Ok(PreparedImport::RegisterPath {
+                                label: file.clone(),
+                                canonical,
+                            })
                         }
                     })();
-                    record_import_result(&mut report, &file, result);
+                    match item {
+                        Ok(item) => prepared.push(item),
+                        Err(error) => prepared.push(PreparedImport::Error {
+                            label: file,
+                            error: format!("{error:#}"),
+                        }),
+                    }
                 }
             }
-            Err(error) => report
-                .errors
-                .push(format!("{}：{error:#}", source.display())),
+            Err(error) => prepared.push(PreparedImport::Error {
+                label: source.to_path_buf(),
+                error: format!("{error:#}"),
+            }),
+        }
+    }
+    prepared
+}
+
+fn apply_prepared_imports(
+    download_dir: &Path,
+    catalog: &mut LibraryCatalog,
+    prepared: Vec<PreparedImport>,
+) -> ImportReport {
+    let mut report = ImportReport::default();
+    for item in prepared {
+        match item {
+            PreparedImport::RestoreKnown { comic_id } => {
+                let restored = catalog.restore(download_dir, comic_id);
+                if restored {
+                    report.imported += 1;
+                } else {
+                    report.skipped += 1;
+                }
+            }
+            PreparedImport::Imported { imported, id } => {
+                let restored = id.is_some_and(|id| catalog.restore(download_dir, id));
+                if restored || imported {
+                    report.imported += 1;
+                } else {
+                    report.skipped += 1;
+                }
+            }
+            PreparedImport::RegisterPath { label, canonical } => {
+                match catalog.register(download_dir, &canonical) {
+                    Ok((_, true)) => report.imported += 1,
+                    Ok((_, false)) => report.skipped += 1,
+                    Err(error) => report
+                        .errors
+                        .push(format!("{}：{error:#}", label.display())),
+                }
+            }
+            PreparedImport::Error { label, error } => {
+                report.errors.push(format!("{}：{error}", label.display()));
+            }
         }
     }
     report
-}
-
-fn record_import_result(report: &mut ImportReport, source: &Path, result: anyhow::Result<bool>) {
-    match result {
-        Ok(true) => report.imported += 1,
-        Ok(false) => report.skipped += 1,
-        Err(error) => report
-            .errors
-            .push(format!("{}：{error:#}", source.display())),
-    }
 }
 
 fn find_cbz_files(source: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -138,8 +198,20 @@ fn find_cbz_files(source: &Path) -> anyhow::Result<Vec<PathBuf>> {
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn remove_library_comic(
+pub async fn remove_library_comic(
     app: AppHandle,
+    comic_id: i64,
+    delete_files: bool,
+) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        remove_library_comic_blocking(&app, comic_id, delete_files)
+    })
+    .await
+    .map_err(|err| CommandError::from("移除漫画任务失败", err))?
+}
+
+fn remove_library_comic_blocking(
+    app: &AppHandle,
     comic_id: i64,
     delete_files: bool,
 ) -> CommandResult<()> {
@@ -174,13 +246,13 @@ pub fn remove_library_comic(
                 );
             }
         }
-        Some(resolve_comic_for_delete(&app, comic_id)?)
+        Some(resolve_comic_for_delete(app, comic_id)?)
     } else {
         // 只删库存记录不依赖扫描结果：漫画已经不在书库里（或文件损坏被跳过）时也要能删掉记录。
         None
     };
     let _guard = CATALOG_LOCK.lock();
-    let records_path = catalog_path(&app);
+    let records_path = catalog_path(app);
     let mut catalog = LibraryCatalog::load(&records_path)
         .map_err(|err| CommandError::from("读取书库记录失败", err))?;
     let previous: LibraryCatalog = serde_json::from_value(
@@ -203,8 +275,7 @@ pub fn remove_library_comic(
             .save(&records_path)
             .map_err(|err| CommandError::from("保存书库记录失败", err))?;
     }
-    app.state::<utils::DownloadedLibraryCache>()
-        .remove(comic_id);
+    app.state::<DownloadedLibraryCache>().remove(comic_id);
     tracing::info!(comic_id, delete_files, "移除书库记录成功");
     Ok(())
 }
@@ -293,15 +364,44 @@ fn sorted_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn fingerprint_to_id(fingerprint: md5::Context) -> anyhow::Result<i64> {
+    let key = format!("{:x}", fingerprint.finalize());
+    Ok(-i64::from_str_radix(&key[..13], 16)?.max(1))
+}
+
+fn copy_file_with_md5(source: &Path, dest: &Path) -> anyhow::Result<i64> {
+    use std::io::{Read, Write};
+    let metadata = std::fs::metadata(source)?;
+    ensure!(metadata.len() <= MAX_CBZ_IMPORT_BYTES, "归档文件超过 2 GB");
+    let mut src = std::fs::File::open(source)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)?;
+    let mut fingerprint = md5::Context::new();
+    let mut buffer = [0_u8; 65536];
+    let mut total_written: u64 = 0;
+    loop {
+        let count = src.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total_written += count as u64;
+        ensure!(total_written <= MAX_CBZ_IMPORT_BYTES, "归档文件超过 2 GB");
+        fingerprint.consume(&buffer[..count]);
+        dst.write_all(&buffer[..count])?;
+    }
+    dst.flush()?;
+    drop(dst);
+    fingerprint_to_id(fingerprint)
+}
+
 fn source_id(source: &Path) -> anyhow::Result<i64> {
     use std::io::Read;
     let metadata = std::fs::metadata(source)?;
     let mut fingerprint = md5::Context::new();
     if source.is_file() {
-        ensure!(
-            metadata.len() <= 2 * 1024 * 1024 * 1024,
-            "归档文件超过 2 GB"
-        );
+        ensure!(metadata.len() <= MAX_CBZ_IMPORT_BYTES, "归档文件超过 2 GB");
         let mut file = std::fs::File::open(source)?;
         let mut buffer = [0_u8; 65536];
         loop {
@@ -330,7 +430,7 @@ fn source_id(source: &Path) -> anyhow::Result<i64> {
                         .to_string_lossy()
                         .as_bytes(),
                 );
-                ensure!(metadata.len() <= 2 * 1024 * 1024 * 1024, "导入文件过大");
+                ensure!(metadata.len() <= MAX_CBZ_IMPORT_BYTES, "导入文件过大");
                 let mut file = std::fs::File::open(entry.path())?;
                 let mut buffer = [0_u8; 65536];
                 loop {
@@ -343,20 +443,93 @@ fn source_id(source: &Path) -> anyhow::Result<i64> {
             }
         }
     }
-    let key = format!("{:x}", fingerprint.finalize());
-    Ok(-i64::from_str_radix(&key[..13], 16)?.max(1))
+    fingerprint_to_id(fingerprint)
 }
 
-fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<bool> {
+fn import_cbz_source(source: &Path, download_dir: &Path) -> anyhow::Result<(bool, Option<i64>)> {
+    ensure!(source.is_cbz(), "目前支持 CBZ 文件和图片文件夹");
+    let imported_root = utils::create_dir_all_beneath(download_dir, Path::new("本地导入"))?;
+    let staging = imported_root.join(format!(".import-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&staging)?;
+
+    let mut result_id = None;
+    let outcome = (|| -> anyhow::Result<bool> {
+        let title = format!(
+            "第1话 {}",
+            source.file_stem().unwrap_or_default().to_string_lossy()
+        );
+        let staged_cbz = staging.join(format!("{}.cbz", utils::filename_filter(&title)));
+        // 单个 CBZ 在锁外完成拷贝与流式 MD5 计算（单遍读盘），并一次性验证结构与提取轻量元数据。
+        let id = copy_file_with_md5(source, &staged_cbz)?;
+        result_id = Some(id);
+        let target = imported_root.join(format!("local-{}", -id));
+        if target.exists() {
+            return Ok(false);
+        }
+
+        let summary = validate_cbz_and_extract_metadata(&staged_cbz)?;
+        let default_name = source
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("本地漫画")
+            .to_owned();
+        let (name, author, tags) = match summary {
+            Some((parsed_name, parsed_author, parsed_tags)) => (
+                parsed_name.unwrap_or(default_name),
+                parsed_author,
+                parsed_tags,
+            ),
+            None => (default_name, vec!["本地导入".into()], Vec::new()),
+        };
+
+        let comic = Comic {
+            id,
+            name,
+            author,
+            tags,
+            comic_download_dir: Some(staging.clone()),
+            chapter_infos: vec![ChapterInfo {
+                chapter_id: id - 1,
+                chapter_title: title,
+                order: 1,
+                is_downloaded: None,
+                chapter_download_dir: None,
+            }],
+            ..Comic::default()
+        };
+        comic.save_comic_metadata()?;
+        ensure!(!target.exists(), "该文件已由另一项导入任务加入书库");
+        std::fs::rename(&staging, &target)?;
+        Ok(true)
+    })();
+
+    match outcome {
+        Ok(true) => Ok((true, result_id)),
+        Ok(false) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Ok((false, result_id))
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(error)
+        }
+    }
+}
+
+fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<(bool, Option<i64>)> {
     let source = std::fs::canonicalize(source).context("源文件不存在或无法访问")?;
     if std::fs::canonicalize(download_dir).is_ok_and(|root| source.starts_with(root)) {
-        return Ok(false);
+        return Ok((false, None));
     }
+    if source.is_file() {
+        return import_cbz_source(&source, download_dir);
+    }
+
     let id = source_id(&source)?;
     let imported_root = utils::create_dir_all_beneath(download_dir, Path::new("本地导入"))?;
     let target = imported_root.join(format!("local-{}", -id));
     if target.exists() {
-        return Ok(false);
+        return Ok((false, Some(id)));
     }
     let staging = imported_root.join(format!(".import-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&staging)?;
@@ -372,25 +545,14 @@ fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<bool> {
             comic_download_dir: Some(staging.clone()),
             ..Comic::default()
         };
-        let groups = if source.is_file() {
-            ensure!(source.is_cbz(), "目前支持 CBZ 文件和图片文件夹");
-            validate_archive_structure(&source)?;
-            if let Ok(original) = Comic::from_cbz(&source) {
-                comic.name = original.name;
-                comic.author = original.author;
-                comic.tags = original.tags;
-            }
+        let children = sorted_files(&source)?;
+        let groups = if children.iter().any(|path| path.is_file() && path.is_img()) {
             vec![source.clone()]
         } else {
-            let children = sorted_files(&source)?;
-            if children.iter().any(|path| path.is_file() && path.is_img()) {
-                vec![source.clone()]
-            } else {
-                children
-                    .into_iter()
-                    .filter(|path| path.is_dir() || path.is_cbz())
-                    .collect()
-            }
+            children
+                .into_iter()
+                .filter(|path| path.is_dir() || path.is_cbz())
+                .collect()
         };
         ensure!(
             !groups.is_empty() && groups.len() <= 1_000,
@@ -450,11 +612,60 @@ fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<bool> {
         let _ = std::fs::remove_dir_all(&staging);
     }
     result?;
-    Ok(true)
+    Ok((true, Some(id)))
 }
 
-fn validate_archive_structure(path: &Path) -> anyhow::Result<()> {
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+type ImportedComicSummary = (Option<String>, Vec<String>, Vec<String>);
+
+fn extract_comic_summary_from_zip<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+) -> Option<ImportedComicSummary> {
+    for metadata_name in ["元数据.json", "metadata.json"] {
+        if let Ok(mut entry) = zip.by_name(metadata_name) {
+            let declared_size = entry.size();
+            if let Ok(content) = crate::image_data::read_limited(
+                &mut entry,
+                declared_size,
+                crate::image_data::MAX_METADATA_BYTES,
+            ) {
+                if let Ok(comic) = serde_json::from_slice::<Comic>(&content) {
+                    return Some((Some(comic.name), comic.author, comic.tags));
+                }
+            }
+        }
+    }
+    if let Ok(mut entry) = zip.by_name("ComicInfo.xml") {
+        let declared_size = entry.size();
+        if let Ok(content) = crate::image_data::read_limited(
+            &mut entry,
+            declared_size,
+            crate::image_data::MAX_METADATA_BYTES,
+        ) {
+            if let Ok(info) = yaserde::de::from_reader::<_, ComicInfo>(content.as_slice()) {
+                let authors = if info.writer.is_empty() {
+                    Vec::new()
+                } else {
+                    info.writer
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect()
+                };
+                let tags = if info.tags.is_empty() {
+                    Vec::new()
+                } else {
+                    info.tags.split(',').map(|s| s.trim().to_string()).collect()
+                };
+                let name = (!info.series.is_empty()).then_some(info.series);
+                return Some((name, authors, tags));
+            }
+        }
+    }
+    None
+}
+
+fn validate_zip_entries<R: std::io::Read + std::io::Seek>(
+    zip: &mut zip::ZipArchive<R>,
+) -> anyhow::Result<()> {
     ensure!(zip.len() <= MAX_PAGES + 100, "压缩包条目过多");
     let mut pages = 0;
     for index in 0..zip.len() {
@@ -472,6 +683,17 @@ fn validate_archive_structure(path: &Path) -> anyhow::Result<()> {
     }
     ensure!(pages > 0, "压缩包没有漫画图片");
     Ok(())
+}
+
+fn validate_cbz_and_extract_metadata(path: &Path) -> anyhow::Result<Option<ImportedComicSummary>> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+    validate_zip_entries(&mut zip)?;
+    Ok(extract_comic_summary_from_zip(&mut zip))
+}
+
+fn validate_archive_structure(path: &Path) -> anyhow::Result<()> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+    validate_zip_entries(&mut zip)
 }
 
 #[cfg(test)]
@@ -496,8 +718,8 @@ mod tests {
         std::fs::write(source.join("page2.png"), png()).unwrap();
         std::fs::write(source.join("page10.png"), png()).unwrap();
         let library = root.join("library");
-        assert!(import_source(&source, &library).unwrap());
-        assert!(!import_source(&source, &library).unwrap());
+        assert!(import_source(&source, &library).unwrap().0);
+        assert!(!import_source(&source, &library).unwrap().0);
         let comics = super::super::library_commands::scan_downloaded_comics(&library).comics;
         assert_eq!(comics.len(), 1);
         assert!(comics[0].id < 0);
@@ -514,7 +736,7 @@ mod tests {
         assert!(source.join("page2.png").exists());
         assert!(comics[0].local_cover_data.is_some());
         std::fs::write(source.join("page2.png"), b"new-source-content").unwrap();
-        assert!(import_source(&source, &library).unwrap());
+        assert!(import_source(&source, &library).unwrap().0);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -529,7 +751,7 @@ mod tests {
         zip.write_all(&png()).unwrap();
         zip.finish().unwrap();
         let library = root.join("library");
-        assert!(import_source(&source, &library).unwrap());
+        assert!(import_source(&source, &library).unwrap().0);
         let comics = super::super::library_commands::scan_downloaded_comics(&library).comics;
         assert_eq!(comics.len(), 1);
         assert_eq!(
@@ -637,6 +859,29 @@ mod tests {
         forged.id = 123;
         assert!(delete_comic_files(&library, &forged, &catalog).is_err());
         assert!(records[1].path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn single_pass_cbz_import_matches_source_id() {
+        let root = std::env::temp_dir().join(format!("jm-cbz-md5-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("单遍测试.cbz");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&source).unwrap());
+        zip.start_file("0001.png", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&png()).unwrap();
+        zip.finish().unwrap();
+
+        let expected_id = source_id(&source).unwrap();
+        let library = root.join("library");
+        let (imported, actual_id) = import_source(&source, &library).unwrap();
+        assert!(imported);
+        assert_eq!(actual_id, Some(expected_id));
+        assert!(library
+            .join("本地导入")
+            .join(format!("local-{}", -expected_id))
+            .is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

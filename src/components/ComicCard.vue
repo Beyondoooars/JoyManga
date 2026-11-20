@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { CategoryRespData, CategorySubRespData, commands } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import FavoriteButton from './FavoriteButton.vue'
@@ -23,7 +23,12 @@ const props = defineProps<{
   comicFavorite?: boolean
   favoriteEpoch?: number
   comicDownloaded: boolean
+  downloadedEpoch?: number
 }>()
+
+const isDownloaded = computed(() =>
+  store.isComicDownloaded(props.comicId, props.comicDownloaded, props.downloadedEpoch),
+)
 
 async function pickComic() {
   if (opening.value) return
@@ -60,6 +65,11 @@ async function downloadComic() {
 }
 
 const categoryLabel = () => props.comicCategorySub.title || props.comicCategory.title || ''
+const coverSrc = computed(() => `https://${store.imageDomain}/media/albums/${props.comicId}_3x4.jpg`)
+
+watch(coverSrc, () => {
+  coverFailed.value = false
+})
 </script>
 
 <template>
@@ -69,7 +79,7 @@ const categoryLabel = () => props.comicCategorySub.title || props.comicCategory.
         <img
           v-if="!coverFailed"
           class="comic-cover"
-          :src="`https://${store.imageDomain}/media/albums/${comicId}_3x4.jpg`"
+          :src="coverSrc"
           :alt="comicTitle"
           loading="lazy"
           referrerpolicy="no-referrer"
@@ -77,7 +87,7 @@ const categoryLabel = () => props.comicCategorySub.title || props.comicCategory.
         <span v-else class="cover-fallback"><PhImageBroken :size="26" weight="duotone" /></span>
       </button>
 
-      <span v-if="comicDownloaded" class="downloaded-mark" title="已入库">
+      <span v-if="isDownloaded" class="downloaded-mark" title="已入库">
         <PhCheckCircle :size="13" weight="fill" />
       </span>
 
@@ -108,9 +118,9 @@ const categoryLabel = () => props.comicCategorySub.title || props.comicCategory.
         <button
           type="button"
           class="quick-download"
-          :disabled="downloading || comicDownloaded"
-          :title="comicDownloaded ? '已入库' : '下载全部章节'"
-          :aria-label="comicDownloaded ? '已入库' : `下载《${comicTitle}》全部章节`"
+          :disabled="downloading || isDownloaded"
+          :title="isDownloaded ? '已入库' : '下载全部章节'"
+          :aria-label="isDownloaded ? '已入库' : `下载《${comicTitle}》全部章节`"
           @click.stop="downloadComic">
           <PhDownloadSimple :size="17" weight="bold" />
         </button>

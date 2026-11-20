@@ -1,19 +1,13 @@
-<script setup lang="tsx">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, toRaw, watch } from 'vue'
+<script setup lang="ts">
+import { computed, defineAsyncComponent } from 'vue'
 import type { Component } from 'vue'
-import { commands } from './bindings.ts'
 import { useMessage } from 'naive-ui'
 import { PhBooks, PhCompass, PhDownloadSimple, PhHeart, PhUser } from '@phosphor-icons/vue'
 import { useStore } from './store.ts'
 import icon from './assets/icon.png'
 import type { CurrentTabName } from './types.ts'
-import { getErrorMessage } from './utils/errors.ts'
-import { runAutoLogin } from './utils/autoLogin.ts'
 import { handleRootBackExit, useBackHandler } from './composables/useAndroidBack.ts'
-import { isAndroid } from './composables/useIsMobile.ts'
-import { useAppUpdate } from './composables/useAppUpdate.ts'
-import { canWritePublicDownloads, downloadsPath, hasAllFilesAccess, requestAllFilesAccessAndWait, supportsPublicStorage, watchNetworkMetered, watchNetworkVpn } from './utils/androidStorage.ts'
-import { onOpenExternalComic } from './libraryApi.ts'
+import { useAppBootstrap } from './composables/useAppBootstrap.ts'
 
 const StorageOnboardingDialog = defineAsyncComponent(() => import('./dialogs/StorageOnboardingDialog.vue'))
 const ReaderDialog = defineAsyncComponent(() => import('./dialogs/ReaderDialog.vue'))
@@ -30,31 +24,9 @@ const pageComponents: Record<CurrentTabName, Component> = {
 
 const store = useStore()
 const message = useMessage()
-const { checkForUpdates } = useAppUpdate()
 
 /** 底部导航的四个一级页面；其余（详情、设置）是压栈的二级页面 */
 const MAIN_TABS: CurrentTabName[] = ['search', 'favorite', 'downloaded', 'account']
-
-const initializing = ref(false)
-const initializationError = ref('')
-// 首次启动（未完成过存储初始化且未获所有文件权限）时弹存储引导；不阻塞应用使用
-const storageOnboardingShowing = ref(false)
-// 配置加载与监听注册全部完成前不渲染主界面：否则“拿到配置但监听注册失败”时
-// 错误页永远不出现，用户只看到一闪而过的提示、下载事件却无人接收。
-const appReady = ref(false)
-let configLoaded = false
-let configSaveRevision = 0
-let configSaveTimer: ReturnType<typeof setTimeout> | undefined
-let configSaveQueue = Promise.resolve()
-
-store.registerConfigSaveWaiter(async () => {
-  configSaveRevision++
-  if (configSaveTimer !== undefined) {
-    clearTimeout(configSaveTimer)
-    configSaveTimer = undefined
-  }
-  await configSaveQueue
-})
 
 const chromeVisible = computed(() => MAIN_TABS.includes(store.currentTabName) && !store.chapterDetailShowing)
 
@@ -102,212 +74,13 @@ useBackHandler(() => {
   return handleRootBackExit((msg) => message.info(msg))
 }, 1)
 
-watch(
-  () => [store.activeDownloadCount, store.downloadSpeed, store.activeDownloadPages] as const,
-  ([active, speed, pages]) => {
-    if (isAndroid) window.JmAndroid?.downloadStatus(active, speed, pages.current, pages.total)
-  },
-  { immediate: true },
-)
-
-watch(
-  () => store.config,
-  (config) => {
-    if (!configLoaded || config === undefined || store.configMaintenanceInProgress || !store.configIsDirty()) {
-      return
-    }
-
-    const revision = ++configSaveRevision
-    const snapshot = structuredClone(toRaw(config))
-    const base = structuredClone(toRaw(store.authoritativeConfig!))
-    if (configSaveTimer !== undefined) {
-      clearTimeout(configSaveTimer)
-    }
-    configSaveTimer = setTimeout(() => {
-      configSaveQueue = configSaveQueue
-        .catch((error) => {
-          console.error('上一次配置保存任务异常退出', error)
-        })
-        .then(async () => {
-          if (revision !== configSaveRevision || store.configMaintenanceInProgress) return
-          try {
-            await store.persistConfig(snapshot, base)
-          } catch (error) {
-            console.error(error)
-            if (revision === configSaveRevision) {
-              message.error(`保存配置失败：${getErrorMessage(error)}`)
-            }
-          }
-        })
-    }, 400)
-  },
-  { deep: true },
-)
-
-/** 屏蔽 WebView 长按菜单，但输入框要保留系统粘贴菜单。 */
-function preventContextMenu(event: MouseEvent) {
-  const target = event.target as HTMLElement | null
-  if (target?.closest('input, textarea, [contenteditable="true"]')) return
-  event.preventDefault()
-}
-
-async function initializeApp() {
-  if (initializing.value) return
-
-  initializing.value = true
-  initializationError.value = ''
-  appReady.value = false
-  try {
-    await store.initStateListeners()
-    store.applyConfig(await commands.getConfig())
-    if (isAndroid && store.config && window.JmAndroid) {
-      const bridge = window.JmAndroid
-      // 已初始化也可能停在旧的私有目录（旧版配置迁移过来的），或用户撤销了
-      // 「所有文件访问」权限。这两种情况都要重新选书库，否则下载写进一个目录、
-      // 书库扫描另一个目录，表现就是「下载完成却看不到本子」。
-      const libraryLocationUninitialized = !store.config.androidStorageInitialized
-      if (libraryLocationUninitialized || !hasAllFilesAccess()) {
-        if (!supportsPublicStorage()) {
-          // Android 10 既没有「所有文件访问」也无法申请写外部存储：直接落到应用专用目录
-          if (!store.config.androidStorageInitialized) {
-            const result = await commands.initializeAndroidStorage(bridge.libraryPath() ?? '')
-            if (result.status === 'error') throw new Error(result.error.err_message)
-            store.applyConfig(result.data)
-          }
-        } else {
-          // 默认就落在公共下载 Download/JoyManga：未授权时先申请「所有文件访问」，
-          // 用户返回后再完成初始化，不再让用户手动挑目录。
-          if (!hasAllFilesAccess()) {
-            await requestAllFilesAccessAndWait()
-          }
-          if (hasAllFilesAccess() && canWritePublicDownloads()) {
-            const result = await commands.initializeAndroidStorage(downloadsPath())
-            if (result.status === 'error') {
-              // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
-              console.error(result.error)
-              storageOnboardingShowing.value = true
-            } else {
-              store.applyConfig(result.data)
-            }
-          } else if (libraryLocationUninitialized) {
-            // 用户拒绝授权或公共目录暂不可写：兜底引导，可改用应用专用目录
-            storageOnboardingShowing.value = true
-          }
-        }
-      }
-    }
-    await store.initDownloadListener()
-    for (const notice of await commands.getStartupNotices()) message.warning(notice, { duration: 10_000 })
-    await nextTick()
-    configLoaded = true
-    appReady.value = true
-  } catch (error) {
-    console.error(error)
-    initializationError.value = getErrorMessage(error)
-    message.error(`应用初始化失败：${initializationError.value}`)
-    return
-  } finally {
-    initializing.value = false
-  }
-
-  if (store.config?.autoLogin && store.config.username !== '' && store.config.password !== '') {
-    const username = store.config.username
-    const password = store.config.password
-    const outcome = await runAutoLogin({
-      username,
-      password,
-      login: (name, secret) => commands.login(name, secret),
-      // 用户已手动登录、正在手动登录，或手动改了表单：停止自动重试，
-      // 避免自动登录的新请求把正在进行的会话顶掉。
-      shouldStop: () => store.userProfile !== undefined
-        || store.manualLoginInProgress
-        || store.config?.username !== username
-        || store.config?.password !== password,
-      onRetry: (attempt, error) => console.warn(`自动登录第 ${attempt} 次失败，准备重试`, error),
-    })
-    if (outcome.status === 'success') {
-      store.applyLoginResult(outcome.data)
-      message.success(outcome.attempts > 1 ? `自动登录成功（第 ${outcome.attempts} 次尝试）` : '自动登录成功')
-    } else if (outcome.status === 'failed') {
-      const errorMessage = typeof outcome.error === 'string' ? outcome.error : outcome.error.err_message
-      console.error(outcome.error)
-      message.warning(`自动登录失败：${errorMessage}`)
-    }
-  }
-}
-
-let stopNetworkWatch: (() => void) | undefined
-let stopVpnWatch: (() => void) | undefined
-let networkMeteredQueue = Promise.resolve()
-let stopCancelListener: (() => void) | undefined
-let stopOpenFileListener: (() => void) | undefined
-let stopBackgroundFailureListener: (() => void) | undefined
-
-onMounted(() => {
-  document.addEventListener('contextmenu', preventContextMenu)
-  // 把 Android 的网络计费状态同步给后端，「仅 Wi-Fi 下载」依赖它做判断
-  stopNetworkWatch = watchNetworkMetered((metered) => {
-    // IPC 命令可能并发执行；按原生事件顺序串行提交，避免旧的计费状态最后覆盖新状态。
-    networkMeteredQueue = networkMeteredQueue
-      .then(() => commands.setNetworkMetered(metered))
-      .then(() => undefined, () => { /* 旧后端无此命令时忽略，且不能阻断后续上报 */ })
-  })
-  // VPN 开启时后端跳过手动代理，否则「开 VPN 反而连不上」
-  stopVpnWatch = watchNetworkVpn((active, networkKey) => {
-    void commands.setNetworkVpn(active, networkKey).catch(() => { /* 旧后端无此命令时忽略 */ })
-  })
-  // 通知栏"取消当前"：由原生转发事件，这里执行取消并给出反馈
-  const onCancelCurrent = async () => {
-    const cancelled = await store.cancelCurrentDownload()
-    if (cancelled) message.info(`已取消：${cancelled}`)
-  }
-  window.addEventListener('jm-download-cancel', onCancelCurrent)
-  stopCancelListener = () => window.removeEventListener('jm-download-cancel', onCancelCurrent)
-  // 文件管理器/其他应用「用 JoyManga 打开」CBZ：导入后切换到本地书库
-  stopOpenFileListener = onOpenExternalComic({
-    onImported: (report) => {
-      store.invalidateDownloadedLibrary()
-      // 导入是逐文件进行的：损坏/非法 CBZ 会进入 errors，成功数可能为 0。不能一律提示成功。
-      if (report.imported > 0) {
-        message.success(`已导入 ${report.imported} 本`)
-        navigateToTab('downloaded')
-      } else if (report.errors.length === 0) {
-        message.info(report.skipped > 0 ? `漫画已在书库中（${report.skipped} 本）` : '没有可导入的漫画')
-      }
-      if (report.errors.length > 0) {
-        message.error(`导入失败：${report.errors[0]}`)
-      }
-    },
-    onError: (text) => message.error(`打开文件失败：${text}`),
-  })
-  stopBackgroundFailureListener = store.initBackgroundFailureListener((title, description) => {
-    message.error(`${title}：${description}`, { duration: 8000 })
-  })
-  void store.initLogListener()
-  void store.initSpeedListener()
-  void initializeApp()
-  // 延迟 2.5 秒静默检测更新，避开冷启动峰值
-  setTimeout(() => {
-    void checkForUpdates(true)
-  }, 2500)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('contextmenu', preventContextMenu)
-  stopNetworkWatch?.()
-  stopNetworkWatch = undefined
-  stopVpnWatch?.()
-  stopVpnWatch = undefined
-  stopCancelListener?.()
-  stopCancelListener = undefined
-  stopOpenFileListener?.()
-  stopOpenFileListener = undefined
-  stopBackgroundFailureListener?.()
-  stopBackgroundFailureListener = undefined
-  if (configSaveTimer !== undefined) {
-    clearTimeout(configSaveTimer)
-  }
-})
+const {
+  initializing,
+  initializationError,
+  storageOnboardingShowing,
+  appReady,
+  initializeApp,
+} = useAppBootstrap({ onNavigateToTab: navigateToTab })
 </script>
 
 <template>
@@ -359,7 +132,7 @@ onUnmounted(() => {
           v-else
           :is="currentPaneComponent"
           :key="store.currentTabName"
-          @open-login="navigateToTab('account')"
+          @open-login="store.openAccount({ relogin: true })"
           @back="store.closeSettings"
           @open-transfers="store.openTransfers()" />
       </KeepAlive>

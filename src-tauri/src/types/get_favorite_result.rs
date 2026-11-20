@@ -6,11 +6,11 @@ use specta::Type;
 use tauri::AppHandle;
 
 use crate::{
+    library_catalog::create_id_to_dir_map,
     responses::{
         CategoryRespData, CategorySubRespData, ComicInFavoriteRespData, FavoriteFolderRespData,
         GetFavoriteRespData,
     },
-    utils,
 };
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -27,8 +27,7 @@ impl GetFavoriteResult {
         app: &AppHandle,
         resp_data: GetFavoriteRespData,
     ) -> anyhow::Result<GetFavoriteResult> {
-        let id_to_dir_map =
-            utils::create_id_to_dir_map(app).context("创建漫画ID到下载目录映射失败")?;
+        let id_to_dir_map = create_id_to_dir_map(app).context("创建漫画ID到下载目录映射失败")?;
 
         let list = resp_data
             .list
@@ -92,11 +91,7 @@ impl ComicInFavorite {
     }
 
     pub fn update_fields(&mut self, id_to_dir_map: &HashMap<i64, PathBuf>) {
-        self.comic_download_dir = PathBuf::new();
-        self.is_downloaded = false;
-        if let Some(comic_download_dir) = id_to_dir_map.get(&self.id) {
-            self.comic_download_dir = comic_download_dir.clone();
-            self.is_downloaded = true;
-        }
+        (self.is_downloaded, self.comic_download_dir) =
+            super::resolve_download_status(self.id, id_to_dir_map);
     }
 }

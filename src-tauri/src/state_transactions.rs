@@ -124,7 +124,7 @@ pub(crate) fn remove_with_catalog(
             // 阅读器缓存着这个 CBZ 的读句柄时，公共存储（FUSE）会拒绝改名；
             // 拿替换锁后释放，避免释放与改名之间被重新打开
             let rename_result = {
-                let _guard = crate::atomic_fs::commit_guard();
+                let _guard = crate::atomic_fs::commit_guard(&original);
                 crate::commands::reader_commands::release_handle_for(&original);
                 std::fs::rename(&original, &staged)
             };
@@ -140,7 +140,7 @@ pub(crate) fn remove_with_catalog(
                 // 恢复事务也不会把已不存在的文件记录写回书库。
                 journal.direct_deletes.push(original.clone());
                 save_removal(&journal_path, &journal)?;
-                let _guard = crate::atomic_fs::commit_guard();
+                let _guard = crate::atomic_fs::commit_guard(&original);
                 crate::commands::reader_commands::release_handle_for(&original);
                 if original.is_dir() {
                     std::fs::remove_dir_all(&original)

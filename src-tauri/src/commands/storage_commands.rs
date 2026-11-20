@@ -69,50 +69,58 @@ fn prepare_browsable_dir(candidate: &Path) -> anyhow::Result<PathBuf> {
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn list_directory_entries(path: String) -> CommandResult<Vec<DirectoryEntry>> {
-    let canonical = ensure_browsable(Path::new(&path))
-        .map_err(|err| CommandError::from("读取目录失败", err))?;
-    let entries = std::fs::read_dir(&canonical)
-        .map_err(|err| CommandError::from("读取目录失败", anyhow!("{err}")))?;
-    let mut directories = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
+pub async fn list_directory_entries(path: String) -> CommandResult<Vec<DirectoryEntry>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let canonical = ensure_browsable(Path::new(&path))
+            .map_err(|err| CommandError::from("读取目录失败", err))?;
+        let entries = std::fs::read_dir(&canonical)
+            .map_err(|err| CommandError::from("读取目录失败", anyhow!("{err}")))?;
+        let mut directories = Vec::new();
+        for entry in entries.filter_map(Result::ok) {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // 隐藏目录（. 开头）对用户没有浏览价值
+            if name.starts_with('.') {
+                continue;
+            }
+            directories.push(DirectoryEntry {
+                name,
+                path: entry.path().to_string_lossy().to_string(),
+            });
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        // 隐藏目录（. 开头）对用户没有浏览价值
-        if name.starts_with('.') {
-            continue;
-        }
-        directories.push(DirectoryEntry {
-            name,
-            path: entry.path().to_string_lossy().to_string(),
-        });
-    }
-    directories.sort_by(|a, b| crate::utils::natural_cmp(&a.name, &b.name));
-    Ok(directories)
+        directories.sort_by(|a, b| crate::utils::natural_cmp(&a.name, &b.name));
+        Ok(directories)
+    })
+    .await
+    .map_err(|err| CommandError::from("读取目录任务失败", err))?
 }
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn validate_download_dir(path: String) -> CommandResult<ValidatedDownloadDir> {
-    let validate = || -> anyhow::Result<ValidatedDownloadDir> {
-        let candidate = PathBuf::from(&path);
-        let canonical = prepare_browsable_dir(&candidate)?;
-        // 写探测：确认应用对该目录有写权限（如「所有文件访问」未授予时公共目录不可写）
-        if !crate::utils::probe_directory_writable(&canonical) {
-            return Err(anyhow!(
-                "目录`{}`不可写，请检查存储权限",
-                canonical.display()
-            ));
-        }
-        Ok(ValidatedDownloadDir {
-            canonical_path: canonical.to_string_lossy().to_string(),
-        })
-    };
-    validate().map_err(|err| CommandError::from("目录不可用", err))
+pub async fn validate_download_dir(path: String) -> CommandResult<ValidatedDownloadDir> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let validate = || -> anyhow::Result<ValidatedDownloadDir> {
+            let candidate = PathBuf::from(&path);
+            let canonical = prepare_browsable_dir(&candidate)?;
+            // 写探测：确认应用对该目录有写权限（如「所有文件访问」未授予时公共目录不可写）
+            if !crate::utils::probe_directory_writable(&canonical) {
+                return Err(anyhow!(
+                    "目录`{}`不可写，请检查存储权限",
+                    canonical.display()
+                ));
+            }
+            Ok(ValidatedDownloadDir {
+                canonical_path: canonical.to_string_lossy().to_string(),
+            })
+        };
+        validate().map_err(|err| CommandError::from("目录不可用", err))
+    })
+    .await
+    .map_err(|err| CommandError::from("校验目录任务失败", err))?
 }
 
 #[cfg(test)]

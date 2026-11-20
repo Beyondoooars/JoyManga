@@ -40,6 +40,7 @@ function request(action: (id: string) => void): Promise<MobileResult> {
     // 没有超时的话调用方（导入/备份/导出）会永久挂起，界面停在 loading。
     const timeout = setTimeout(() => {
       window.removeEventListener('jm-mobile-result', listener)
+      try { window.JmAndroid?.discardImports(requestId) } catch { /* ignore */ }
       reject(new Error('等待系统文件选择器超时，请重试'))
     }, 5 * 60 * 1000)
     const listener = (event: Event) => {

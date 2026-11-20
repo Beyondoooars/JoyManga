@@ -3,15 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::AppHandle;
 
 use crate::{
-    extensions::AppHandleExt,
+    library_catalog::create_id_to_dir_map,
     responses::{GetComicRespData, RelatedListRespData},
-    utils,
 };
 
 use super::ChapterInfo;
@@ -131,8 +130,7 @@ impl Comic {
             local_cover_data: None,
         };
 
-        let id_to_dir_map =
-            utils::create_id_to_dir_map(app).context("创建漫画ID到下载目录映射失败")?;
+        let id_to_dir_map = create_id_to_dir_map(app).context("创建漫画ID到下载目录映射失败")?;
 
         comic
             .update_fields(&id_to_dir_map)
@@ -181,62 +179,9 @@ impl Comic {
         crate::comic_scanner::from_cbz(cbz_path)
     }
 
-    pub fn get_comic_export_dir(&self, app: &AppHandle) -> anyhow::Result<PathBuf> {
-        let (download_dir, export_dir) = {
-            let config = app.get_config();
-            let config = config.read();
-            (config.download_dir.clone(), config.export_dir.clone())
-        };
-
-        let Some(comic_download_dir) = self.comic_download_dir.clone() else {
-            return Err(anyhow!("`comic_download_dir`字段为`None`"));
-        };
-
-        let _ = std::fs::create_dir_all(&download_dir);
-        let _ = std::fs::create_dir_all(&export_dir);
-
-        let canonical_download_dir = std::fs::canonicalize(&download_dir)
-            .context(format!("规范化下载根目录`{}`失败", download_dir.display()))?;
-        let canonical_comic_download_dir = std::fs::canonicalize(&comic_download_dir).context(
-            format!("规范化漫画下载目录`{}`失败", comic_download_dir.display()),
-        )?;
-
-        if canonical_comic_download_dir.is_file()
-            || canonical_comic_download_dir == canonical_download_dir
-        {
-            utils::create_dir_all_beneath(
-                &export_dir,
-                Path::new(&format!(
-                    "{} [JM{}]",
-                    utils::filename_filter(&self.name),
-                    self.id
-                )),
-            )
-        } else {
-            let relative_dir =
-                utils::relative_subpath(&canonical_download_dir, &canonical_comic_download_dir)?;
-            utils::create_dir_all_beneath(&export_dir, &relative_dir)
-        }
-        .context(format!(
-            "在导出根目录`{}`下安全创建漫画导出目录失败",
-            export_dir.display()
-        ))
-    }
-
     #[inline]
     pub fn save_comic_metadata(&self) -> anyhow::Result<()> {
         crate::comic_scanner::save_comic_metadata(self)
-    }
-
-    pub fn get_cover_path(&self) -> anyhow::Result<PathBuf> {
-        let comic_download_dir = self
-            .comic_download_dir
-            .as_ref()
-            .context("`comic_download_dir`字段为`None`")?;
-
-        let cover_path = comic_download_dir.join("cover.jpg");
-
-        Ok(cover_path)
     }
 
     #[inline]

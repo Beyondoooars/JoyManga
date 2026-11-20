@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -6,7 +6,7 @@ use tauri_specta::Event;
 
 use crate::{
     download_manager::DownloadTaskState,
-    types::{ArchiveStage, FailureCount, LogLevel, TaskFailure, TaskStage},
+    types::{ArchiveStage, FailureCount, TaskFailure, TaskStage},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
@@ -59,38 +59,6 @@ pub enum DownloadAllFavoritesEvent {
 
     #[serde(rename_all = "camelCase")]
     GetComicsEnd,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
-#[serde(tag = "event", content = "data")]
-pub enum ExportCbzEvent {
-    #[serde(rename_all = "camelCase")]
-    Start {
-        uuid: String,
-        comic_title: String,
-        total: u32,
-    },
-    #[serde(rename_all = "camelCase")]
-    Progress { uuid: String, current: u32 },
-    #[serde(rename_all = "camelCase")]
-    Error { uuid: String },
-    #[serde(rename_all = "camelCase")]
-    End {
-        uuid: String,
-        chapter_export_dir: PathBuf,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
-#[serde(rename_all = "camelCase")]
-pub struct LogEvent {
-    pub timestamp: String,
-    pub level: LogLevel,
-    pub fields: HashMap<String, serde_json::Value>,
-    pub target: String,
-    pub filename: String,
-    #[serde(rename = "line_number")]
-    pub line_number: i64,
 }
 
 /// 没有命令调用方可承接的后台持久化失败。不要用通用 ERROR 日志代替该事件。

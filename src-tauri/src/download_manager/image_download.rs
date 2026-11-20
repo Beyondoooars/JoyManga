@@ -16,13 +16,13 @@ use crate::atomic_fs;
 use crate::download_scheduler::DownloadPermit;
 use crate::errors::classify_failure;
 use crate::extensions::{AnyhowErrorToStringChain, AppHandleExt};
+use crate::image_data::{decode_image_limited, MAX_PAGE_BYTES};
 use crate::types::TaskStage;
 
 use super::download_task::{DownloadTask, TaskFileWrites};
 use super::scramble::stitch_img;
 use super::{DownloadManager, DownloadTaskState};
 
-const MAX_PAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PAGES: usize = 10_000;
 
 /// 单张图片的网络请求与缓冲许可状态。
@@ -112,7 +112,13 @@ impl DownloadImgTask {
         let index_filename = format!("{:04}", self.index + 1);
 
         // 只保留原始格式：未混淆图片按源格式原样落盘，需反混淆的图片编码为无损 WebP。
-        let already_saved = find_existing_page(temp_download_path, self.index + 1).is_some();
+        let existing_dir = temp_download_path.clone();
+        let page_num = self.index + 1;
+        let already_saved = tokio::task::spawn_blocking(move || {
+            find_existing_page(&existing_dir, page_num).is_some()
+        })
+        .await
+        .unwrap_or(false);
         if already_saved {
             // 如果图片已经存在，直接返回
             self.download_task
@@ -327,23 +333,29 @@ pub(crate) async fn save_img(
     if src_format == ImageFormat::Gif || block_num == 0 {
         // GIF 原样保存避免二次编码丢帧；未切片混淆的图片直接写入网络原始字节，
         // 避免二次编解码的 CPU 开销与 JPEG 二次有损压缩导致的画质损失。
-        let write_started = Instant::now();
-        file_writes
-            .run(|| atomic_fs::write(save_path, src_img_data))
-            .context(format!("保存图片`{}`失败", save_path.display()))?;
-        return Ok(SaveImgMetrics {
-            processing_nanos: 0,
-            write_nanos: elapsed_nanos(write_started),
-        });
+        // 放到阻塞线程池完成 atomic_fs 落盘，防止阻塞 Tokio 异步 worker。
+        let save_path_buf = save_path.to_path_buf();
+        return tokio::task::spawn_blocking(move || {
+            let write_started = Instant::now();
+            file_writes
+                .run(|| atomic_fs::write(&save_path_buf, src_img_data))
+                .context(format!("保存图片`{}`失败", save_path_buf.display()))?;
+            Ok(SaveImgMetrics {
+                processing_nanos: 0,
+                write_nanos: elapsed_nanos(write_started),
+            })
+        })
+        .await?;
     }
 
     // 图像处理的闭包
     let save_path = save_path.to_path_buf();
     let process_img = move || -> anyhow::Result<SaveImgMetrics> {
         // 这里必然需要反混淆：block_num == 0 的情况已在上面直接落盘返回
-        // 用 into_rgb8：解码器已产出 Rgb8 时直接移交缓冲区，省掉一次全图拷贝
+        // 用 into_rgb8：解码器已产出 Rgb8 时直接移交缓冲区，省掉一次全图拷贝；
+        // 并与阅读器/校验共用一致的 image::Limits + 6400 万像素上限防 OOM。
         let processing_started = Instant::now();
-        let mut src_img = image::load_from_memory(&src_img_data)
+        let mut src_img = decode_image_limited(&src_img_data)
             .context("解码图片失败")?
             .into_rgb8();
         let dst_img = stitch_img(&mut src_img, block_num);
@@ -454,15 +466,7 @@ fn find_existing_page(dir: &Path, page: usize) -> Option<PathBuf> {
 }
 
 fn valid_page(bytes: &[u8]) -> bool {
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format();
-    reader.is_ok_and(|mut reader| {
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(30_000);
-        limits.max_image_height = Some(30_000);
-        limits.max_alloc = Some(256 * 1024 * 1024);
-        reader.limits(limits);
-        reader.decode().is_ok()
-    })
+    decode_image_limited(bytes).is_ok()
 }
 
 fn read_page(reader: impl Read) -> anyhow::Result<Vec<u8>> {
@@ -741,5 +745,36 @@ mod saved_page_extension_tests {
         // 需要反混淆的页面统一编码为 WebP
         assert_eq!(saved_page_extension(ImageFormat::Jpeg, 20), "webp");
         assert_eq!(saved_page_extension(ImageFormat::Png, 20), "webp");
+    }
+
+    #[test]
+    fn descramble_decode_rejects_oversized_pixel_header_before_allocating() {
+        use image::ImageEncoder;
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc: u32 = 0xffff_ffff;
+            for &b in bytes {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+                }
+            }
+            !crc
+        }
+
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&[0, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        png[16..20].copy_from_slice(&8001_u32.to_be_bytes());
+        png[20..24].copy_from_slice(&8000_u32.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+
+        let err = decode_image_limited(&png).unwrap_err();
+        assert!(matches!(
+            err.downcast_ref::<crate::image_data::ImageDataError>(),
+            Some(crate::image_data::ImageDataError::PixelsTooLarge { .. })
+        ));
     }
 }

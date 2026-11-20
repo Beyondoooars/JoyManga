@@ -8,11 +8,11 @@ test('chapter list does not mount the empty-selector viselect layer', () => {
   assert.doesNotMatch(source, /@viselect\/vue|<SelectionArea|selectables/)
 })
 
-test('chapter list keeps scrolling, context menu, checkboxes, and downloads', () => {
-  assert.match(source, /<div class="selection-container custom-scrollbar" @contextmenu="onContextMenu">/)
+test('chapter list removes desktop context menu and supports single-tap reading on downloaded chapters', () => {
+  assert.match(source, /<div class="selection-container">/)
   assert.match(source, /<n-checkbox-group v-model:value="checkedIds"/)
   assert.match(source, /@click="downloadChapters"/)
-  assert.match(source, /@dblclick="handleChapterDoubleClick/)
-  assert.doesNotMatch(source, /showCbzModeDialog/)
+  assert.match(source, /@click="openChapterReader\(item\.chapterId\)"/)
+  assert.doesNotMatch(source, /custom-scrollbar|@contextmenu|showCbzModeDialog|@dblclick/)
   assert.doesNotMatch(source, /@click="handleChapterClick/)
 })

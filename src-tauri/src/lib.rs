@@ -1,7 +1,6 @@
 use anyhow::Context;
 use events::{
     BackgroundFailureEvent, DownloadAllFavoritesEvent, DownloadSpeedEvent, DownloadTaskEvent,
-    ExportCbzEvent, LogEvent,
 };
 use parking_lot::RwLock;
 use tauri::{Manager, WebviewWindowBuilder, Wry};
@@ -14,6 +13,7 @@ use crate::jm_client::JmClient;
 
 mod archive_finalize;
 mod archive_intents;
+mod archive_merge;
 mod atomic_fs;
 mod comic_scanner;
 mod commands;
@@ -23,13 +23,13 @@ mod cover_cache;
 mod crash;
 mod credential_cipher;
 mod diagnostics;
+mod disk_cache;
 mod domain_health;
 mod download_manager;
 mod download_queue;
 mod download_scheduler;
 mod errors;
 mod events;
-mod export;
 mod extensions;
 mod image_data;
 mod jm_client;
@@ -92,23 +92,14 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             cancel_download_task,
             download_comic,
             download_all_favorites,
-            show_path_in_file_manager,
-            sync_favorite_folder,
             get_downloaded_comics,
             diagnose_library,
-            delete_downloaded_comic,
-            export_cbz,
-            export_merged_cbz,
             get_logs_dir_size,
             export_logs,
-            get_synced_comic,
-            get_synced_comic_in_favorite,
-            get_synced_comic_in_search,
-            get_synced_comic_in_weekly,
             list_directory_entries,
             validate_download_dir,
-            test_domain_latency,
             get_chapter_reader_data,
+            get_reader_image_error,
             set_network_metered,
             set_network_vpn,
             import_local_comics,
@@ -118,8 +109,6 @@ fn ipc_builder() -> tauri_specta::Builder<Wry> {
             DownloadSpeedEvent,
             DownloadTaskEvent,
             DownloadAllFavoritesEvent,
-            ExportCbzEvent,
-            LogEvent,
             BackgroundFailureEvent,
             crate::events::ConfigChangedEvent,
             crate::events::SessionChangedEvent,
@@ -176,10 +165,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 阅读器直接通过自定义协议取图，避免每页 base64 编码 + IPC 传输。
         // Android 上会被 wry 重写成 http://jmimg.localhost/<path>，CSP 需放行 https/http。
-        .register_uri_scheme_protocol(
+        .register_asynchronous_uri_scheme_protocol(
             commands::reader_commands::IMAGE_SCHEME,
-            |context, request| {
-                commands::reader_commands::serve_image(context.app_handle(), request)
+            |context, request, responder| {
+                let app = context.app_handle().clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(commands::reader_commands::serve_image(&app, request));
+                });
             },
         )
         .invoke_handler(builder.invoke_handler())
@@ -210,7 +202,7 @@ pub fn run() {
             });
             app.manage(config_storage);
             app.manage(config);
-            app.manage(crate::utils::DownloadedLibraryCache::new());
+            app.manage(crate::library_catalog::DownloadedLibraryCache::new());
             let startup_notices = crate::download_queue::StartupNotices::default();
             let (intent_store, notices) = crate::archive_intents::ArchiveIntentStore::load_for_app(
                 intent_store_path,
@@ -393,7 +385,7 @@ mod tests {
             );
             command_count += 1;
         }
-        assert!(command_count > 50, "只检查到 {command_count} 个命令");
+        assert!(command_count >= 45, "只检查到 {command_count} 个命令");
 
         let events = source
             .split("collect_events![")

@@ -17,6 +17,7 @@ const loading = ref(false)
 const infoLoading = ref(true)
 const infoUnavailable = ref(false)
 const loadError = ref<string | null>(null)
+const weeklyResultLibraryEpoch = ref(store.downloadedLibraryResetEpoch)
 let initialized = false
 let isMounted = false
 let requestGeneration = 0
@@ -112,6 +113,7 @@ async function getWeekly() {
   const generation = ++requestGeneration
   const epoch = store.sessionEpoch
   const observedRevision = store.favoriteRevision
+  const libraryResetEpoch = store.downloadedLibraryResetEpoch
   loading.value = true
   loadError.value = null
   try {
@@ -126,6 +128,7 @@ async function getWeekly() {
 
     store.getWeeklyResult = result.data
     store.weeklyResultEpoch = epoch
+    weeklyResultLibraryEpoch.value = libraryResetEpoch
     for (const comic of result.data.list) {
       if (comic.id === undefined) continue
       store.recordFavorite(comic.id, comic.is_favorite === true, epoch, observedRevision)
@@ -236,7 +239,8 @@ async function getWeekly() {
             :comic-author="comic.author ?? ''"
             :comic-category="comic.category ?? { id: null, title: null }"
             :comic-category-sub="comic.category_sub ?? { id: null, title: null }"
-            :comic-downloaded="comic.is_downloaded ?? false" />
+            :comic-downloaded="comic.is_downloaded ?? false"
+            :downloaded-epoch="weeklyResultLibraryEpoch" />
         </div>
       </div>
     </div>

@@ -1,12 +1,14 @@
-<script setup lang="tsx">
+<script setup lang="ts">
 import { ProgressData } from '../../../types.ts'
-import { ref, watchEffect, computed, onBeforeUnmount } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { commands, DownloadTaskState } from '../../../bindings.ts'
 import { ProgressProps, useDialog, useMessage } from 'naive-ui'
 import { getErrorMessage, formatCommandError } from '../../../utils/errors.ts'
 import { describeFailure } from '../../../utils/downloadProgress.ts'
 import { useStore } from '../../../store.ts'
 import { openDialogWithBack } from '../../../composables/useDialogBack.ts'
+import { useBackHandler } from '../../../composables/useAndroidBack.ts'
+import { useLongPress } from '../../../composables/useLongPress.ts'
 import {
   PhPause,
   PhChecks,
@@ -28,20 +30,50 @@ const pendingActions = ref(new Set<number>())
 const selectedIds = ref<Set<number>>(new Set())
 const selectionMode = ref(false)
 
+const stateOrder: Record<DownloadTaskState, number> = {
+  Downloading: 0,
+  Pending: 1,
+  Paused: 2,
+  Failed: 3,
+  Completed: 4,
+  Cancelled: 5,
+}
+
 const uncompletedProgresses = computed<[number, ProgressData][]>(() =>
   Array.from(store.progresses.entries())
     .filter(([, { state }]) => state !== 'Completed' && state !== 'Cancelled')
-    .sort((a, b) => b[1].totalImgCount - a[1].totalImgCount),
+    .sort(
+      (a, b) =>
+        (stateOrder[a[1].state] ?? 9) - (stateOrder[b[1].state] ?? 9) ||
+        (a[1].createdSeq ?? 0) - (b[1].createdSeq ?? 0) ||
+        a[0] - b[0],
+    ),
 )
 
-watchEffect(() => {
-  // 只保留未完成的章节id
-  const uncompletedIds = new Set(uncompletedProgresses.value.map(([chapterId]) => chapterId))
-  selectedIds.value = new Set([...selectedIds.value].filter((chapterId) => uncompletedIds.has(chapterId)))
-  if (uncompletedIds.size === 0) {
+watch(uncompletedProgresses, (list) => {
+  if (list.length === 0) {
+    if (selectedIds.value.size > 0) selectedIds.value.clear()
     selectionMode.value = false
+    return
   }
+  if (selectedIds.value.size === 0) return
+  const uncompletedIds = new Set(list.map(([chapterId]) => chapterId))
+  let changed = false
+  const next = new Set<number>()
+  for (const chapterId of selectedIds.value) {
+    if (uncompletedIds.has(chapterId)) next.add(chapterId)
+    else changed = true
+  }
+  if (changed) selectedIds.value = next
 })
+
+useBackHandler(() => {
+  if (!selectionMode.value || store.currentTabName !== 'downloaded' || store.downloadedSubTab !== 'transfers') {
+    return false
+  }
+  clearSelection()
+  return true
+}, 30)
 
 function toggleSelect(chapterId: number) {
   selectionMode.value = true
@@ -67,55 +99,18 @@ function clearSelection() {
   selectionMode.value = false
 }
 
-// 长按进入选择：手机上没有右键，长按是批量操作的入口。
-// 按住期间一旦移动就视为滚动，取消计时，避免滑动列表时误选。
-let pressTimer: ReturnType<typeof setTimeout> | undefined
-let pressStart: { x: number; y: number } | undefined
-let longPressed = false
-
-function clearPress() {
-  if (pressTimer !== undefined) {
-    clearTimeout(pressTimer)
-    pressTimer = undefined
-  }
-  pressStart = undefined
-}
-
-function startPress(event: PointerEvent, chapterId: number) {
-  if (event.button !== 0) return
-  // 失败卡片里的按钮和可复制文字不参与长按选择
-  if ((event.target as HTMLElement).closest('button')) return
-  clearPress()
-  longPressed = false
-  pressStart = { x: event.clientX, y: event.clientY }
-  pressTimer = setTimeout(() => {
-    pressTimer = undefined
-    longPressed = true
-    if (navigator.vibrate) navigator.vibrate(12)
+// 长按进入选择：手机上没有右键，长按是批量操作的入口；失败卡片里的按钮不参与长按选择。
+const { startPress, movePress, endPress, consumeLongPressClick } = useLongPress<number>({
+  shouldStart: (event) => !(event.target as HTMLElement | null)?.closest('button'),
+  onLongPress: (chapterId) => {
     selectionMode.value = true
     selectedIds.value.add(chapterId)
-  }, 480)
-}
-
-function movePress(event: PointerEvent) {
-  if (pressStart === undefined) return
-  if (Math.abs(event.clientX - pressStart.x) > 10 || Math.abs(event.clientY - pressStart.y) > 10) clearPress()
-}
-
-function endPress() {
-  clearPress()
-}
-
-onBeforeUnmount(clearPress)
+  },
+})
 
 function handleCardClick(event: MouseEvent, chapterId: number) {
   // 长按已经进入选择时，抬起后紧跟的 click 不应再取消刚选中的这一项
-  if (longPressed) {
-    longPressed = false
-    event.preventDefault()
-    event.stopPropagation()
-    return
-  }
+  if (consumeLongPressClick(event)) return
   if (!selectionMode.value) return
   toggleSelect(chapterId)
 }
@@ -154,24 +149,22 @@ async function removeFailedTask(chapterId: number) {
 
 const batchOperating = ref(false)
 
-async function resumeSelected() {
+type BatchActionResult = { status: 'ok' } | { status: 'error'; error: unknown }
+
+// 批量操作统一执行器：单个失败不影响其余项，action 返回 undefined 表示跳过，结束后统一提示失败数量
+async function runBatch<T>(
+  items: Iterable<T>,
+  action: (item: T) => Promise<BatchActionResult | undefined>,
+  failureMessage = (failed: number) => `${failed} 个任务操作失败，请重试`,
+) {
   if (batchOperating.value) return
   batchOperating.value = true
   let failed = 0
   try {
-    for (const chapterId of [...selectedIds.value]) {
-      const progressData = store.progresses.get(chapterId)
-      if (progressData === undefined) continue
-
-      const { state, comic } = progressData
-      if (state === 'Completed' || state === 'Downloading' || state === 'Pending') {
-        continue
-      }
+    for (const item of items) {
       try {
-        const result =
-          state === 'Cancelled' || state === 'Failed'
-            ? await commands.createDownloadTask(comic, chapterId, null)
-            : await commands.resumeDownloadTask(chapterId)
+        const result = await action(item)
+        if (result === undefined) continue
         if (result.status === 'error') {
           console.error(result.error)
           failed += 1
@@ -181,18 +174,32 @@ async function resumeSelected() {
         failed += 1
       }
     }
-    if (failed > 0) message.warning(`${failed} 个任务继续失败`)
+    if (failed > 0) message.warning(failureMessage(failed))
   } finally {
     batchOperating.value = false
   }
 }
 
+async function resumeSelected() {
+  await runBatch(
+    [...selectedIds.value],
+    async (chapterId) => {
+      const progressData = store.progresses.get(chapterId)
+      if (progressData === undefined) return undefined
+      const { state, comic } = progressData
+      if (state === 'Completed' || state === 'Downloading' || state === 'Pending') return undefined
+      return state === 'Cancelled' || state === 'Failed'
+        ? commands.createDownloadTask(comic, chapterId, null)
+        : commands.resumeDownloadTask(chapterId)
+    },
+    (failed) => `${failed} 个任务继续失败`,
+  )
+}
+
 async function pauseSelected() {
-  if (batchOperating.value) return
-  batchOperating.value = true
-  let failed = 0
-  try {
-    for (const chapterId of [...selectedIds.value]) {
+  await runBatch(
+    [...selectedIds.value],
+    async (chapterId) => {
       const progressData = store.progresses.get(chapterId)
       if (
         progressData === undefined ||
@@ -200,54 +207,30 @@ async function pauseSelected() {
         progressData.state === 'Completed' ||
         progressData.state === 'Failed'
       ) {
-        continue
+        return undefined
       }
-      try {
-        const result = await commands.pauseDownloadTask(chapterId)
-        if (result.status === 'error') {
-          console.error(result.error)
-          failed += 1
-        }
-      } catch (error) {
-        console.error(error)
-        failed += 1
-      }
-    }
-    if (failed > 0) message.warning(`${failed} 个任务暂停失败`)
-  } finally {
-    batchOperating.value = false
-  }
+      return commands.pauseDownloadTask(chapterId)
+    },
+    (failed) => `${failed} 个任务暂停失败`,
+  )
 }
 
 async function cancelSelected() {
-  if (batchOperating.value) return
-  batchOperating.value = true
-  let failed = 0
-  try {
-    for (const chapterId of [...selectedIds.value]) {
+  await runBatch(
+    [...selectedIds.value],
+    async (chapterId) => {
       const progressData = store.progresses.get(chapterId)
       if (
         progressData === undefined ||
         progressData.state === 'Cancelled' ||
         progressData.state === 'Completed'
       ) {
-        continue
+        return undefined
       }
-      try {
-        const result = await commands.cancelDownloadTask(chapterId)
-        if (result.status === 'error') {
-          console.error(result.error)
-          failed += 1
-        }
-      } catch (error) {
-        console.error(error)
-        failed += 1
-      }
-    }
-    if (failed > 0) message.warning(`${failed} 个任务取消失败`)
-  } finally {
-    batchOperating.value = false
-  }
+      return commands.cancelDownloadTask(chapterId)
+    },
+    (failed) => `${failed} 个任务取消失败`,
+  )
 }
 
 const hasActiveTasks = computed(() =>
@@ -262,67 +245,27 @@ const hasFailedTasks = computed(() =>
   uncompletedProgresses.value.some(([, { state }]) => state === 'Failed'),
 )
 
-// 批量操作：单个失败不影响其余项，结束后统一提示失败数量
-async function runBatch(
-  ids: number[],
-  action: (chapterId: number) => Promise<{ status: 'ok' } | { status: 'error'; error: unknown }>,
-) {
-  let failed = 0
-  for (const chapterId of ids) {
-    try {
-      const result = await action(chapterId)
-      if (result.status === 'error') failed += 1
-    } catch {
-      failed += 1
-    }
-  }
-  if (failed > 0) message.warning(`${failed} 个任务操作失败，请重试`)
-}
-
 async function pauseAll() {
-  if (batchOperating.value) return
-  batchOperating.value = true
-  try {
-    const active = uncompletedProgresses.value
-      .filter(([, { state }]) => state === 'Downloading' || state === 'Pending')
-      .map(([chapterId]) => chapterId)
-    await runBatch(active, (chapterId) => commands.pauseDownloadTask(chapterId))
-  } finally {
-    batchOperating.value = false
-  }
+  const active = uncompletedProgresses.value
+    .filter(([, { state }]) => state === 'Downloading' || state === 'Pending')
+    .map(([chapterId]) => chapterId)
+  await runBatch(active, (chapterId) => commands.pauseDownloadTask(chapterId))
 }
 
 async function resumeAll() {
-  if (batchOperating.value) return
-  batchOperating.value = true
-  try {
-    const paused = uncompletedProgresses.value
-      .filter(([, { state }]) => state === 'Paused')
-      .map(([chapterId]) => chapterId)
-    await runBatch(paused, (chapterId) => commands.resumeDownloadTask(chapterId))
-  } finally {
-    batchOperating.value = false
-  }
+  const paused = uncompletedProgresses.value
+    .filter(([, { state }]) => state === 'Paused')
+    .map(([chapterId]) => chapterId)
+  await runBatch(paused, (chapterId) => commands.resumeDownloadTask(chapterId))
 }
 
 async function retryAllFailed() {
-  if (batchOperating.value) return
-  batchOperating.value = true
-  try {
-    const failed = uncompletedProgresses.value.filter(([, { state }]) => state === 'Failed')
-    let failures = 0
-    for (const [chapterId, { comic }] of failed) {
-      try {
-        const result = await commands.createDownloadTask(comic, chapterId, null)
-        if (result.status === 'error') failures += 1
-      } catch {
-        failures += 1
-      }
-    }
-    if (failures > 0) message.warning(`${failures} 个任务重试失败`)
-  } finally {
-    batchOperating.value = false
-  }
+  const failed = uncompletedProgresses.value.filter(([, { state }]) => state === 'Failed')
+  await runBatch(
+    failed,
+    ([chapterId, { comic }]) => commands.createDownloadTask(comic, chapterId, null),
+    (count) => `${count} 个任务重试失败`,
+  )
 }
 
 async function cancelAll() {
@@ -337,12 +280,7 @@ async function cancelAll() {
     negativeText: '返回',
   })
   if (!confirmed) return
-  batchOperating.value = true
-  try {
-    await runBatch(ids, (chapterId) => commands.cancelDownloadTask(chapterId))
-  } finally {
-    batchOperating.value = false
-  }
+  await runBatch(ids, (chapterId) => commands.cancelDownloadTask(chapterId))
 }
 
 function stateToStatus(state: DownloadTaskState): ProgressProps['status'] {

@@ -51,6 +51,7 @@ const committedSort = ref<SearchSort>('Latest')
 const languageFilter = ref<SearchFilter>('all')
 // SearchSession 是普通对象（不依赖 Vue 响应式），每次取页/筛选后递增版本号触发重算
 const sessionRevision = ref(0)
+const sessionLibraryResetEpoch = ref(store.downloadedLibraryResetEpoch)
 let activeSession: SearchSession | null = null
 let searchGeneration = 0
 
@@ -271,6 +272,7 @@ async function startSearch(keyword: string, sort: SearchSort, page = 1) {
     filter: languageFilter.value,
     fetcher: (request) => fetchDual(keyword, sort, request),
   })
+  sessionLibraryResetEpoch.value = store.downloadedLibraryResetEpoch
   sessionRevision.value++
 
   await loadPage(page, { generation, epoch, observedRevision })
@@ -337,6 +339,7 @@ function clearSearch() {
   store.searchResult = undefined
   committedKeyword.value = ''
   activeSession = null
+  sessionLibraryResetEpoch.value = store.downloadedLibraryResetEpoch
   languageFilter.value = 'all'
   sessionRevision.value++
   view.value = 'weekly'
@@ -478,7 +481,7 @@ function goToPage(page: number) {
           </div>
 
           <template v-else>
-            <div v-if="searching && pageItems.length === 0" class="cover-grid is-loading">
+            <div v-if="searching && pageItems.length === 0" class="cover-grid">
               <div v-for="n in 6" :key="n" class="skeleton-card">
                 <div class="jm-skeleton skeleton-cover"></div>
                 <div class="jm-skeleton skeleton-line"></div>
@@ -497,7 +500,8 @@ function goToPage(page: number) {
                 :comic-author="comic.author"
                 :comic-category="comic.category"
                 :comic-category-sub="comic.categorySub"
-                :comic-downloaded="comic.isDownloaded" />
+                :comic-downloaded="comic.isDownloaded"
+                :downloaded-epoch="sessionLibraryResetEpoch" />
             </div>
 
             <div v-else-if="languageFilter !== 'all'" class="jm-empty">

@@ -1,4 +1,3 @@
-use crate::utils;
 use image::RgbImage;
 
 pub fn calculate_block_num(scramble_id: i64, id: i64, filename: &str) -> u32 {
@@ -9,7 +8,7 @@ pub fn calculate_block_num(scramble_id: i64, id: i64, filename: &str) -> u32 {
     } else {
         let x = if id < 421_926 { 10 } else { 8 };
         let s = format!("{id}{filename}");
-        let s = utils::md5_hex(&s);
+        let s = crate::jm_client::crypto::md5_hex(&s);
         let mut block_num = s.chars().last().unwrap() as u32;
         block_num %= x;
         block_num = block_num * 2 + 2;

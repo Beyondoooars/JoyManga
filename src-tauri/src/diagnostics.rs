@@ -31,6 +31,7 @@ pub struct DiagnosticsReport {
     pub queue: Vec<QueueTaskInfo>,
     pub archive_intents: Vec<ArchiveIntentInfo>,
     pub logs: Vec<LogFileInfo>,
+    pub recent_logs: Vec<String>,
     pub frontend_logs: Vec<String>,
     pub crashes: Vec<CrashInfo>,
     pub notes: Vec<String>,
@@ -69,7 +70,6 @@ pub struct ConfigInfo {
     pub username_saved: bool,
     pub password_saved: bool,
     pub download_dir: PathBuf,
-    pub export_dir: PathBuf,
     pub proxy_mode: ProxyMode,
     pub proxy_host: String,
     pub proxy_port: u16,
@@ -95,7 +95,6 @@ impl From<&Config> for ConfigInfo {
             username_saved: !config.username.is_empty(),
             password_saved: !config.password.is_empty(),
             download_dir: config.download_dir.clone(),
-            export_dir: config.export_dir.clone(),
             proxy_mode: config.proxy_mode.clone(),
             proxy_host: config.proxy_host.clone(),
             proxy_port: config.proxy_port,
@@ -210,6 +209,7 @@ pub fn build_report(
         notes.push(format!("归档意图文件：{}", store.path().display()));
     }
     let logs = collect_logs(app, &mut notes);
+    let recent_logs = collect_recent_logs();
     let crashes = collect_crashes(app, &mut notes);
     let frontend_logs = collect_frontend_logs(frontend_logs, &mut notes);
 
@@ -233,6 +233,7 @@ pub fn build_report(
         queue,
         archive_intents,
         logs,
+        recent_logs,
         frontend_logs,
         crashes,
         notes,
@@ -243,6 +244,7 @@ pub fn build_report(
     let bytes = serde_json::to_vec_pretty(&report)?;
     if bytes.len() > MAX_REPORT_BYTES {
         report.logs.clear();
+        report.recent_logs.clear();
         report.frontend_logs.clear();
         for crash in &mut report.crashes {
             crash.content.clear();
@@ -252,6 +254,14 @@ pub fn build_report(
             .push("报告超过 5MB，已省略日志与崩溃正文".to_string());
     }
     Ok(report)
+}
+
+fn collect_recent_logs() -> Vec<String> {
+    redact_recent_logs(crate::logger::recent_logs())
+}
+
+fn redact_recent_logs(lines: Vec<String>) -> Vec<String> {
+    lines.into_iter().map(|line| redact_text(&line)).collect()
 }
 
 fn collect_logs(app: &AppHandle, notes: &mut Vec<String>) -> Vec<LogFileInfo> {
@@ -592,5 +602,17 @@ mod tests {
         let index = floor_char_boundary(&text, 4);
         assert!(text.is_char_boundary(index));
         assert_eq!(&text[..index], "错");
+    }
+
+    #[test]
+    fn recent_logs_are_redacted_before_entering_report() {
+        let redacted = redact_recent_logs(vec![
+            "2026-11-19 INFO login username=alice password=secret".to_string(),
+            "2026-11-19 WARN GET https://cdn.example/a.jpg?token=xyz".to_string(),
+        ]);
+        assert_eq!(redacted.len(), 2);
+        assert!(!redacted[0].contains("alice"));
+        assert!(!redacted[0].contains("secret"));
+        assert!(!redacted[1].contains("token=xyz"));
     }
 }

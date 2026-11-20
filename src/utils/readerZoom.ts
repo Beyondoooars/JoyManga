@@ -27,26 +27,6 @@ export interface Size {
   height: number
 }
 
-/** 图片在给定容器内按适配模式铺开后的显示尺寸（不放大超过原始尺寸，original 除外）。 */
-export function displaySize(image: Size, container: Size, mode: FitMode): Size {
-  if (image.width <= 0 || image.height <= 0) return { width: 0, height: 0 }
-  const scaleX = container.width / image.width
-  const scaleY = container.height / image.height
-  switch (mode) {
-    case 'width':
-      return { width: container.width, height: image.height * scaleX }
-    case 'height':
-      return { width: image.width * scaleY, height: container.height }
-    case 'screen': {
-      // 完整显示且不裁剪：取较小的缩放比
-      const scale = Math.min(scaleX, scaleY)
-      return { width: image.width * scale, height: image.height * scale }
-    }
-    case 'original':
-      return { width: image.width, height: image.height }
-  }
-}
-
 export interface Point {
   x: number
   y: number
@@ -103,13 +83,44 @@ export function pinchTransform(
   container: Size,
 ): Transform {
   const scale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, start.scale * scaleRatio))
+  const effectiveRatio = start.scale > 0 ? scale / start.scale : 1
   const dx = anchor.x - container.width / 2
   const dy = anchor.y - container.height / 2
   return clampTransform({
     scale,
-    offsetX: start.offsetX - dx * (scaleRatio - 1),
-    offsetY: start.offsetY - dy * (scaleRatio - 1),
+    offsetX: start.offsetX * effectiveRatio - dx * (effectiveRatio - 1),
+    offsetY: start.offsetY * effectiveRatio - dy * (effectiveRatio - 1),
   }, container)
+}
+
+/** 放大状态下的单指拖动平移，边界始终被 clampTransform 夹紧。 */
+export function panTransform(
+  start: Transform,
+  deltaX: number,
+  deltaY: number,
+  container: Size,
+): Transform {
+  if (start.scale <= 1.01) return { ...IDENTITY_TRANSFORM }
+  return clampTransform({
+    scale: start.scale,
+    offsetX: start.offsetX + deltaX,
+    offsetY: start.offsetY + deltaY,
+  }, container)
+}
+
+/** 滚动模式下当前挂载图片的页码窗口（含首尾页，1-based）。 */
+export function computeScrollWindow(
+  currentPage: number,
+  totalPages: number,
+  radius = 8,
+): { start: number; end: number } {
+  if (totalPages <= 0) return { start: 1, end: 0 }
+  const center = Math.min(totalPages, Math.max(1, Math.trunc(currentPage) || 1))
+  const r = Math.max(0, Math.trunc(radius))
+  return {
+    start: Math.max(1, center - r),
+    end: Math.min(totalPages, center + r),
+  }
 }
 
 /** 翻页/换章时必须复位，否则新页面会带着上一页的放大状态。 */

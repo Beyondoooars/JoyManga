@@ -14,8 +14,8 @@ use crate::config::{Config, ConfigStorage};
 use crate::download_queue::{DownloadQueue, DownloadSettings, StoredDownload};
 use crate::errors::{CommandError, CommandResult};
 use crate::extensions::AppHandleExt;
+use crate::library_catalog::DownloadedLibraryCache;
 use crate::types::CbzMode;
-use crate::utils;
 
 const BACKUP_FORMAT_VERSION: u32 = 2;
 const MAX_BACKUP_BYTES: usize = 8 * 1024 * 1024;
@@ -48,17 +48,33 @@ pub fn get_config(app: AppHandle) -> Config {
 
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn save_config(app: AppHandle, config: Config, base_config: Config) -> CommandResult<Config> {
+pub async fn save_config(
+    app: AppHandle,
+    config: Config,
+    base_config: Config,
+) -> CommandResult<Config> {
+    tauri::async_runtime::spawn_blocking(move || save_config_blocking(&app, config, base_config))
+        .await
+        .map_err(|err| CommandError::from("保存配置任务失败", err))?
+}
+
+fn save_config_blocking(
+    app: &AppHandle,
+    config: Config,
+    base_config: Config,
+) -> CommandResult<Config> {
     let state = app.get_config();
     let (previous, next) = crate::network_state::with_download_policy(|| {
-        let mut current = state.write();
-        let previous = current.clone();
+        let write_guard = crate::config_updates::write_guard();
+        let previous = state.read().clone();
         let candidate =
-            crate::config_updates::merge_config_changes(&current, &base_config, &config)
+            crate::config_updates::merge_config_changes(&previous, &base_config, &config)
                 .map_err(|err| CommandError::from("设置存在冲突", err))?;
-        let next = crate::config_updates::commit_locked(&app, &mut current, candidate)
+        let next = crate::config_updates::commit(app, &write_guard, candidate)
             .map_err(|err| CommandError::from("保存配置失败", err))?;
+        // 释放配置写锁后再切换会话与下载队列，保持全局锁序：
+        // DOWNLOAD_NETWORK_LOCK → download_tasks → CONFIG_WRITE_LOCK → Config
+        drop(write_guard);
         if previous.get_api_domain() != next.get_api_domain() {
             app.get_jm_client().invalidate_session();
         }
@@ -78,14 +94,14 @@ pub fn save_config(app: AppHandle, config: Config, base_config: Config) -> Comma
         }
         Ok((previous, next))
     })?;
-    apply_config_effects(&app, &previous, &next);
-    crate::config_updates::publish(&app, &next);
+    apply_config_effects(app, &previous, &next);
+    crate::config_updates::publish(app, &next);
     Ok(next)
 }
 
 fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
     if previous.download_dir != next.download_dir {
-        if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
+        if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
             cache.invalidate();
         }
         // 日志与崩溃报告跟着书库走：位置变了要让日志目录重新解析并切到新书库。
@@ -120,45 +136,51 @@ fn apply_config_effects(app: &AppHandle, previous: &Config, next: &Config) {
 
 #[tauri::command(async)]
 #[specta::specta]
-pub fn initialize_android_storage(app: AppHandle, library_dir: String) -> CommandResult<Config> {
+pub async fn initialize_android_storage(
+    app: AppHandle,
+    library_dir: String,
+) -> CommandResult<Config> {
     #[cfg(target_os = "android")]
     {
-        // 先做词法规范化再判定：`/storage/…/Download/../Documents/Download/JoyManga`
-        // 这类路径不能因为字符串后缀通过校验。目录可能尚不存在，不能用 canonicalize
-        // （它会解析到挂载命名空间路径，导致存储下来的书库路径与桥接层不一致）。
-        let raw = PathBuf::from(&library_dir);
-        if !raw.is_absolute() {
-            return Err(CommandError::from(
-                "初始化书库失败",
-                anyhow!("应用书库路径无效"),
-            ));
-        }
-        let candidate = normalize_path(&raw);
-        let internal = normalize_path(&app.state::<ConfigStorage>().base_dir().join("library"));
-        let suffix = PathBuf::from("Android")
-            .join("data")
-            .join(&app.config().identifier)
-            .join("files")
-            .join("library");
-        if candidate != internal
-            && !candidate.ends_with(&suffix)
-            && !crate::config::is_public_library_dir(&candidate)
-        {
-            return Err(CommandError::from(
-                "初始化书库失败",
-                anyhow!("应用书库路径无效"),
-            ));
-        }
-        return crate::config_updates::update(&app, |current| {
-            let mut next = current.clone();
-            if !current.android_storage_initialized {
-                next.export_dir = candidate.clone();
-                next.download_dir = candidate;
-                next.android_storage_initialized = true;
+        return tauri::async_runtime::spawn_blocking(move || {
+            // 先做词法规范化再判定：`/storage/…/Download/../Documents/Download/JoyManga`
+            // 这类路径不能因为字符串后缀通过校验。目录可能尚不存在，不能用 canonicalize
+            // （它会解析到挂载命名空间路径，导致存储下来的书库路径与桥接层不一致）。
+            let raw = PathBuf::from(&library_dir);
+            if !raw.is_absolute() {
+                return Err(CommandError::from(
+                    "初始化书库失败",
+                    anyhow!("应用书库路径无效"),
+                ));
             }
-            Ok(next)
+            let candidate = normalize_path(&raw);
+            let internal = normalize_path(&app.state::<ConfigStorage>().base_dir().join("library"));
+            let suffix = PathBuf::from("Android")
+                .join("data")
+                .join(&app.config().identifier)
+                .join("files")
+                .join("library");
+            if candidate != internal
+                && !candidate.ends_with(&suffix)
+                && !crate::config::is_public_library_dir(&candidate)
+            {
+                return Err(CommandError::from(
+                    "初始化书库失败",
+                    anyhow!("应用书库路径无效"),
+                ));
+            }
+            crate::config_updates::update(&app, |current| {
+                let mut next = current.clone();
+                if !current.android_storage_initialized {
+                    next.download_dir = candidate;
+                    next.android_storage_initialized = true;
+                }
+                Ok(next)
+            })
+            .map_err(|err| CommandError::from("初始化书库失败", err))
         })
-        .map_err(|err| CommandError::from("初始化书库失败", err));
+        .await
+        .map_err(|err| CommandError::from("初始化书库任务失败", err))?;
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -175,23 +197,21 @@ pub fn get_api_domain_presets() -> Vec<crate::config::ApiDomainPreset> {
 
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn reset_app_state(app: AppHandle) -> CommandResult<Config> {
-    let storage = app.state::<ConfigStorage>();
-    let default_config = Config::default(storage.base_dir());
-    replace_config_and_queue(
-        &app,
-        default_config.clone(),
-        Vec::new(),
-        Some(IndexMap::new()),
-    )?;
+pub async fn reset_app_state(app: AppHandle) -> CommandResult<Config> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = app.state::<ConfigStorage>();
+        let default_config = Config::default(storage.base_dir());
+        replace_config_and_queue(&app, default_config, Vec::new(), Some(IndexMap::new()))?;
 
-    if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
-        cache.invalidate();
-    }
+        if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
+            cache.invalidate();
+        }
 
-    tracing::info!("应用已恢复出厂设置并重置任务队列");
-    Ok(get_config(app))
+        tracing::info!("应用已恢复出厂设置并重置任务队列");
+        Ok(get_config(app))
+    })
+    .await
+    .map_err(|err| CommandError::from("重置状态任务失败", err))?
 }
 
 #[derive(Serialize, specta::Type)]
@@ -294,9 +314,8 @@ fn replace_config_and_queue(
     let mut changes = None;
     manager
         .with_idle_downloads(|| {
-            let config_state = app.get_config();
-            let mut current = config_state.write();
-            let previous = current.clone();
+            let config_write_guard = crate::config_updates::write_guard();
+            let previous = app.get_config().read().clone();
             let previous_entries = manager.queue.entries();
             let storage = app.state::<ConfigStorage>();
             let queue_path = manager.queue.path();
@@ -324,7 +343,7 @@ fn replace_config_and_queue(
             };
             journal.save(&journal_path)?;
             let result = (|| -> anyhow::Result<Config> {
-                let next = crate::config_updates::commit_locked(app, &mut current, config)?;
+                let next = crate::config_updates::commit(app, &config_write_guard, config)?;
                 manager.queue.replace_entries(entries)?;
                 if let Some(intents) = intents {
                     app.state::<ArchiveIntentStore>().replace_entries(intents)?;
@@ -356,7 +375,7 @@ fn replace_config_and_queue(
                         rollback_errors.push(format!("回退下载队列失败：{rollback_error:#}"));
                     }
                     if let Err(rollback_error) =
-                        crate::config_updates::commit_locked(app, &mut current, previous)
+                        crate::config_updates::commit(app, &config_write_guard, previous)
                     {
                         rollback_errors.push(format!("回退配置失败：{rollback_error:#}"));
                     }
@@ -387,9 +406,17 @@ fn replace_config_and_queue(
 
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn backup_app_data(
+pub async fn backup_app_data(
     app: AppHandle,
+    reading_state: Option<serde_json::Value>,
+) -> CommandResult<String> {
+    tauri::async_runtime::spawn_blocking(move || backup_app_data_blocking(&app, reading_state))
+        .await
+        .map_err(|err| CommandError::from("导出备份任务失败", err))?
+}
+
+fn backup_app_data_blocking(
+    app: &AppHandle,
     reading_state: Option<serde_json::Value>,
 ) -> CommandResult<String> {
     validate_reading_state_section(&reading_state)
@@ -468,8 +495,16 @@ fn build_backup_data(
 
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn restore_app_data(app: AppHandle, backup_path: String) -> CommandResult<RestoreOutcome> {
+pub async fn restore_app_data(
+    app: AppHandle,
+    backup_path: String,
+) -> CommandResult<RestoreOutcome> {
+    tauri::async_runtime::spawn_blocking(move || restore_app_data_blocking(app, backup_path))
+        .await
+        .map_err(|err| CommandError::from("恢复备份任务失败", err))?
+}
+
+fn restore_app_data_blocking(app: AppHandle, backup_path: String) -> CommandResult<RestoreOutcome> {
     let path = PathBuf::from(&backup_path);
     if !path.is_file() {
         return Err(CommandError::from(
@@ -513,7 +548,7 @@ pub fn restore_app_data(app: AppHandle, backup_path: String) -> CommandResult<Re
         .restore_pending_after_commit()
         .map_err(|err| CommandError::from("恢复下载队列失败", err))?;
 
-    if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
+    if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
         cache.invalidate();
     }
 

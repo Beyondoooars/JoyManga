@@ -13,9 +13,10 @@ use reqwest_middleware::ClientWithMiddleware;
 use reqwest_retry::policies::ExponentialBackoff;
 use reqwest_retry::{Jitter, RetryTransientMiddleware};
 use serde_json::json;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
+use tauri_specta::Event;
 
-use crate::config::{ApiDomainMode, Config, ConfigStorage};
+use crate::config::{ApiDomainMode, Config};
 use crate::events::{FavoriteChangedEvent, SessionChangedEvent};
 use crate::extensions::AppHandleExt;
 use crate::responses::{
@@ -24,12 +25,14 @@ use crate::responses::{
     LoginRespData, SearchResp, SearchRespData, ToggleFavoriteRespData,
 };
 use crate::types::{DailyCheckInOutcome, DailyCheckInState, FavoriteSort, SearchSort};
-use crate::utils;
-use tauri_specta::Event;
 
-pub(crate) const APP_TOKEN_SECRET: &str = "18comicAPP";
-const APP_TOKEN_SECRET_2: &str = "18comicAPPContent";
-const APP_DATA_SECRET: &str = "185Hcomic3PAPP7R";
+pub(crate) mod crypto;
+mod domains;
+
+pub(crate) use crypto::APP_TOKEN_SECRET;
+use crypto::{api_token, decrypt_data};
+use domains::{load_cached_api_domains, preset_mode_for_domain};
+
 pub(crate) const APP_VERSION: &str = "2.0.13";
 /// 与官方 App 一致的图片请求头，降低被 CDN 拒绝的概率。
 pub(crate) const IMAGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -38,25 +41,9 @@ pub(crate) const IMAGE_ACCEPT: &str =
 /// 官方 App 的包名标识，CDN 据此放行；与本应用自身的包名无关，勿随品牌改名。
 pub(crate) const IMAGE_REQUESTED_WITH: &str = "com.JMComic3.app";
 pub(crate) const IMAGE_ACCEPT_LANGUAGE: &str = "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7";
-/// 动态更新移动端 API 域名的官方地址（返回 AES 加密的域名列表）
-const API_DOMAIN_UPDATE_URLS: [&str; 3] = [
-    "https://rup4a04-c01.tos-ap-southeast-1.bytepluses.com/newsvr-2025.txt",
-    "https://rup4a04-c02.tos-cn-hongkong.bytepluses.com/newsvr-2025.txt",
-    "https://rup4a04-c03.tos-cn-beijing.bytepluses.com.cn/newsvr-2025.txt",
-];
-/// 域名更新载荷的解密密钥（与官方实现一致）
-const API_DOMAIN_SERVER_SECRET: &str = "diosfjckwpqpdfjkvnqQjsik";
-/// 动态域名刷新节流间隔
-const API_DOMAIN_REFRESH_INTERVAL: Duration = Duration::from_secs(600);
-/// 域名列表保鲜间隔：运行中超过该间隔未刷新时，下一次请求会顺带触发后台刷新
-const API_DOMAIN_STALE_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 /// 一轮候选线路尝试的总时间预算。单个请求本身有超时，但没有总预算时
 /// "所有线路都卡到超时"会让用户干等 N 倍超时时间。
 const CANDIDATE_TOTAL_BUDGET: Duration = Duration::from_secs(45);
-/// 动态域名缓存文件名（与配置文件同目录，启动时先读取，刷新成功后覆盖）
-const API_DOMAINS_CACHE_FILE: &str = ".api-domains.json";
-/// 缓存中最多采纳的域名条目数量（防御损坏文件里的超长列表）
-const API_DOMAINS_CACHE_MAX_ENTRIES: usize = 16;
 const MAX_API_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IMAGE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
@@ -372,99 +359,6 @@ impl JmClient {
         });
     }
 
-    /// 从官方地址动态获取最新的移动端 API 域名列表（10 分钟内只刷新一次）。
-    /// 失败时保留已有列表并静默降级为内置预设。
-    pub async fn refresh_api_domains(&self) -> Vec<String> {
-        {
-            let mut last = self.domain_refresh_at.write();
-            let now = std::time::Instant::now();
-            if let Some(previous) = *last {
-                if now.duration_since(previous) < API_DOMAIN_REFRESH_INTERVAL {
-                    return self.updated_api_domains.read().clone();
-                }
-            }
-            *last = Some(now);
-        }
-
-        let builder = self.app.get_config().read().apply_proxy_best_effort(
-            timed_client_builder(Duration::from_secs(12)),
-            "JmClient域名更新",
-        );
-        let Ok(client) = builder.build() else {
-            return self.updated_api_domains.read().clone();
-        };
-
-        for url in API_DOMAIN_UPDATE_URLS {
-            match fetch_domain_list(&client, url).await {
-                Ok(domains) if !domains.is_empty() => {
-                    tracing::info!(?domains, "已获取最新的API域名列表");
-                    *self.updated_api_domains.write() = domains.clone();
-                    let updated_at_unix = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_or(0, |elapsed| elapsed.as_secs());
-                    *self.domain_list_updated_at.write() = Some(updated_at_unix);
-                    save_cached_api_domains(&self.app, &domains, updated_at_unix);
-                    return domains;
-                }
-                Ok(_) => {
-                    tracing::warn!(url, "域名更新载荷为空，尝试下一个地址");
-                }
-                Err(error) => {
-                    tracing::warn!(url, error = %error, "获取API域名更新失败，尝试下一个地址");
-                }
-            }
-        }
-        // 全部失败：回滚节流时间戳，网络恢复后的下一次请求会立即重试，而不是再等 10 分钟
-        *self.domain_refresh_at.write() = None;
-        self.updated_api_domains.read().clone()
-    }
-
-    /// 全部候选线路失败后调用：后台静默重新解析域名列表，供后续请求与自动重试使用。
-    /// 10 分钟节流内的重复调用只做快速检查，不产生额外网络请求。
-    fn spawn_domain_refresh_in_background(&self) {
-        let throttled = self
-            .domain_refresh_at
-            .read()
-            .is_some_and(|previous| previous.elapsed() < API_DOMAIN_REFRESH_INTERVAL);
-        if throttled {
-            return;
-        }
-        tracing::debug!("后台静默重新解析动态域名列表");
-        let client = self.clone();
-        tauri::async_runtime::spawn(async move {
-            client.refresh_api_domains().await;
-        });
-    }
-
-    /// 距上次刷新超过保鲜间隔（含从未刷新）时，触发一次后台静默刷新。
-    fn spawn_domain_refresh_if_stale(&self) {
-        let stale = self
-            .domain_refresh_at
-            .read()
-            .is_none_or(|previous| previous.elapsed() >= API_DOMAIN_STALE_REFRESH_INTERVAL);
-        if stale {
-            self.spawn_domain_refresh_in_background();
-        }
-    }
-
-    /// 动态域名池状态：缓存中的域名数量与最近一次成功更新的 Unix 秒时间戳。
-    /// 供设置页“检查连接”展示，不发起任何网络请求。
-    pub fn domain_pool_status(&self) -> (usize, Option<u64>) {
-        (
-            self.updated_api_domains.read().len(),
-            *self.domain_list_updated_at.read(),
-        )
-    }
-
-    /// 当前线路的健康摘要：连续失败次数与是否处于冷却。
-    /// 只读内存状态，供设置页诊断使用。
-    pub fn domain_health_status(&self, domain: &str) -> (u32, bool) {
-        (
-            self.domain_health.failure_count(domain),
-            self.domain_health.is_cooling_down(domain),
-        )
-    }
-
     /// 从 /setting 获取官方最新 APP 版本号并用于接口签名（失败静默）。
     pub async fn refresh_app_version(&self) {
         let result = self
@@ -578,17 +472,16 @@ impl JmClient {
 
     pub fn logout(&self) -> anyhow::Result<()> {
         let config = self.app.get_config();
-        let next = {
-            let mut current = config.write();
-            let mut next = current.clone();
-            next.username.clear();
-            next.password.clear();
-            next.auto_login = false;
-            // 即使持久化失败也先使会话失效，调用方会明确收到保存错误。
-            self.invalidate_session();
-            crate::config_updates::commit_locked(&self.app, &mut current, next)?
-        };
-        crate::config_updates::publish(&self.app, &next);
+        let write_guard = crate::config_updates::write_guard();
+        let mut next = config.read().clone();
+        next.username.clear();
+        next.password.clear();
+        next.auto_login = false;
+        // 即使持久化失败也先使会话失效，调用方会明确收到保存错误。
+        self.invalidate_session();
+        let saved = crate::config_updates::commit(&self.app, &write_guard, next)?;
+        drop(write_guard);
+        crate::config_updates::publish(&self.app, &saved);
         Ok(())
     }
 
@@ -599,56 +492,6 @@ impl JmClient {
     /// 当前接口签名使用的 APP 版本号（官方可动态升级），供连接诊断等功能复用。
     pub fn current_app_version(&self) -> String {
         self.app_version()
-    }
-
-    /// 当前请求的候选线路（按顺序尝试）：
-    /// 最近成功的线路 → 配置线路 → 动态获取的最新域名 → 内置预设。
-    /// 自定义线路不参与自动切换。
-    fn api_domain_candidates(&self) -> Vec<String> {
-        // 域名列表长时间未刷新时顺带触发后台保鲜；不会阻塞当前请求。
-        self.spawn_domain_refresh_if_stale();
-        let config = self.app.get_config();
-        let config = config.read();
-        let current = config.get_api_domain();
-        if config.api_domain_mode == ApiDomainMode::Custom {
-            return vec![current];
-        }
-        let mut list: Vec<String> = Vec::new();
-        if let Some(last) = self.last_success_domain.read().clone() {
-            push_unique(&mut list, &last);
-        }
-        // 配置线路已确认失效（停放页/拦截/连不上）时不要继续排在动态域名前面：
-        // 每条请求都先撞它一次，用户要多吃一次往返甚至一次 12 秒超时。
-        if !self.domain_health.is_failing(&current) {
-            push_unique(&mut list, &current);
-        }
-        for domain in self.updated_api_domains.read().iter() {
-            push_unique(&mut list, domain);
-        }
-        // 放在动态域名之后：实测失效的配置线路仍保留为兜底，但不再优先。
-        push_unique(&mut list, &current);
-        for mode in [
-            ApiDomainMode::Domain2,
-            ApiDomainMode::Domain3,
-            ApiDomainMode::Domain4,
-            ApiDomainMode::Domain1,
-            ApiDomainMode::Domain5,
-        ] {
-            if let Some(preset) = mode.preset_domain() {
-                push_unique(&mut list, preset);
-            }
-        }
-        // 健康度排序：冷却中的线路排到最后，其余快的优先。
-        // 首位（最近成功的线路 / 用户指定线路）保持不动，只重排其余候选。
-        let mut sorted_tail = list[1..].to_vec();
-        self.domain_health.sort_candidates(&mut sorted_tail);
-        list.truncate(1);
-        list.extend(sorted_tail);
-        // 候选上限。原先只留 4 条，而动态域名列表本身就有 4 条，加上配置线路后
-        // 被截断，官方刚下发的新线路反而试不到（旧线路全部过期时会一直失败）。
-        // 放宽到 8 条：读接口换线是顺序尝试，实际很少走满。
-        list.truncate(8);
-        list
     }
 
     /// 在指定线路上发送请求（只做传输层，不换线路、不记录成功线路）。
@@ -668,11 +511,7 @@ impl JmClient {
         api_domain: &str,
     ) -> anyhow::Result<(reqwest::Response, u64)> {
         let tokenparam = format!("{ts},{}", self.app_version());
-        let token = if path == ApiPath::GetScrambleId {
-            utils::md5_hex(&format!("{ts}{APP_TOKEN_SECRET_2}"))
-        } else {
-            utils::md5_hex(&format!("{ts}{APP_TOKEN_SECRET}"))
-        };
+        let token = api_token(ts, path == ApiPath::GetScrambleId);
         let (login_revision, avs) = {
             let session = self.session.read();
             (session.login_revision, session.token.clone())
@@ -971,7 +810,7 @@ impl JmClient {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let request = client
                 .post(format!("https://{candidate}/login"))
-                .header("token", utils::md5_hex(&format!("{ts}{APP_TOKEN_SECRET}")))
+                .header("token", api_token(ts, false))
                 .header("tokenparam", format!("{ts},{}", self.app_version()))
                 .header(
                     "user-agent",
@@ -1085,11 +924,12 @@ impl JmClient {
             return Err(self.cancelled_login_error(generation));
         }
         let (saved, epoch) = crate::network_state::with_current_epoch(network_epoch, || {
-            let mut current = config.write();
+            let write_guard = crate::config_updates::write_guard();
             let current_generation = self.auth_generation.load(Ordering::SeqCst);
             if generation != current_generation {
                 return Err(self.cancelled_login_error(generation));
             }
+            let current = config.read().clone();
             let network_unchanged = current.get_api_domain() == base.get_api_domain()
                 && current.proxy_mode == base.proxy_mode
                 && current.proxy_host == base.proxy_host
@@ -1100,14 +940,14 @@ impl JmClient {
             let mut next = current.clone();
             next.api_domain_mode = mode;
             let saved = if next.api_domain_mode != current.api_domain_mode {
-                crate::config_updates::commit_locked(&self.app, &mut current, next)?
+                crate::config_updates::commit(&self.app, &write_guard, next)?
             } else {
-                current.clone()
+                current
             };
             let token = profile.s.clone();
             profile.s.clear();
             profile.jar.clear();
-            profile.photo = absolute_profile_photo(&current.get_image_domain(), &profile.photo);
+            profile.photo = absolute_profile_photo(&saved.get_image_domain(), &profile.photo);
             let mut state = self.session.write();
             let same_user = state
                 .profile
@@ -1676,7 +1516,7 @@ async fn read_limited_image_body(http_resp: reqwest::Response) -> anyhow::Result
     read_limited_body(http_resp, MAX_IMAGE_RESPONSE_BYTES, "图片响应体").await
 }
 
-fn timed_client_builder(total_timeout: Duration) -> reqwest::ClientBuilder {
+pub(super) fn timed_client_builder(total_timeout: Duration) -> reqwest::ClientBuilder {
     crate::tls::client_builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(30))
@@ -1726,14 +1566,6 @@ pub fn create_img_client(app: &AppHandle) -> ClientWithMiddleware {
         .build()
 }
 
-fn decrypt_data(ts: u64, data: &str) -> anyhow::Result<String> {
-    let key = utils::md5_hex(&format!("{ts}{APP_DATA_SECRET}"));
-    let decrypted =
-        utils::aes256_ecb_decrypt_base64(key.as_bytes(), data).context("解密API响应失败")?;
-    let decrypted = String::from_utf8(decrypted).context("解密后的数据不是UTF-8")?;
-    Ok(decrypted)
-}
-
 /// 头像地址：接口通常只返回文件名（如 `u/xxx.jpg`），补全为图片域名下的完整地址；
 /// 已带协议或为空的返回值保持原样，避免拼出 `https://cdn/media/users/https://...`。
 fn absolute_profile_photo(image_domain: &str, photo: &str) -> String {
@@ -1743,131 +1575,6 @@ fn absolute_profile_photo(image_domain: &str, photo: &str) -> String {
     }
     let photo = photo.trim_start_matches('/');
     format!("https://{image_domain}/media/users/{photo}")
-}
-
-fn push_unique(list: &mut Vec<String>, domain: &str) {
-    let domain = domain.trim();
-    if !domain.is_empty() && !list.iter().any(|existing| existing == domain) {
-        list.push(domain.to_string());
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ApiDomainsCacheFile {
-    domains: Vec<String>,
-    #[serde(default)]
-    updated_at_unix: u64,
-}
-
-fn api_domains_cache_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    let storage = app.try_state::<ConfigStorage>()?;
-    Some(storage.config_path().with_file_name(API_DOMAINS_CACHE_FILE))
-}
-
-/// 读取本地缓存的动态域名；文件缺失或解析失败时静默返回空列表。
-fn load_cached_api_domains(app: &AppHandle) -> (Vec<String>, Option<u64>) {
-    let Some(path) = api_domains_cache_path(app) else {
-        return (Vec::new(), None);
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(contents) => parse_cached_domains(&contents),
-        Err(error) => {
-            tracing::debug!(error = %error, "读取动态域名缓存失败，忽略");
-            (Vec::new(), None)
-        }
-    }
-}
-
-/// 解析缓存文件内容：过滤异常条目、去重并限制数量；时间戳缺失视为未知。
-fn parse_cached_domains(contents: &str) -> (Vec<String>, Option<u64>) {
-    let Ok(cache) = serde_json::from_str::<ApiDomainsCacheFile>(contents) else {
-        return (Vec::new(), None);
-    };
-    let mut domains = Vec::new();
-    for domain in cache.domains.iter().take(API_DOMAINS_CACHE_MAX_ENTRIES) {
-        if is_plausible_domain(domain) {
-            push_unique(&mut domains, domain);
-        }
-    }
-    let updated_at = (cache.updated_at_unix > 0).then_some(cache.updated_at_unix);
-    (domains, updated_at)
-}
-
-pub(crate) fn is_plausible_domain(domain: &str) -> bool {
-    let domain = domain.trim();
-    !domain.is_empty()
-        && domain.len() <= 253
-        && domain.contains('.')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
-        && domain
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
-}
-
-/// 将最新域名列表写入本地缓存（失败仅记录日志，不影响使用）。
-fn save_cached_api_domains(app: &AppHandle, domains: &[String], updated_at_unix: u64) {
-    let Some(path) = api_domains_cache_path(app) else {
-        return;
-    };
-    let cache = ApiDomainsCacheFile {
-        domains: domains.to_vec(),
-        updated_at_unix,
-    };
-    let Ok(bytes) = serde_json::to_vec_pretty(&cache) else {
-        return;
-    };
-    if let Err(error) = crate::atomic_fs::write(&path, bytes) {
-        tracing::warn!(error = %error, "写入动态域名缓存失败");
-    }
-}
-
-fn preset_mode_for_domain(domain: &str) -> Option<ApiDomainMode> {
-    [
-        ApiDomainMode::Domain1,
-        ApiDomainMode::Domain2,
-        ApiDomainMode::Domain3,
-        ApiDomainMode::Domain4,
-        ApiDomainMode::Domain5,
-    ]
-    .into_iter()
-    .find(|mode| mode.preset_domain() == Some(domain))
-}
-
-/// 请求官方域名更新地址并解密：去掉开头非 ASCII 字符 → base64 解码 →
-/// AES-256-ECB 解密（key = md5(密钥)）→ JSON 中的 Server 字段。
-async fn fetch_domain_list(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<String>> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .context("请求域名更新地址失败")?;
-    anyhow::ensure!(resp.status().is_success(), "HTTP状态码`{}`", resp.status());
-    let text = resp.text().await.context("读取域名更新载荷失败")?;
-    let cleaned: String = text.chars().skip_while(|c| !c.is_ascii()).collect();
-    let cleaned = cleaned.trim();
-    anyhow::ensure!(!cleaned.is_empty(), "域名更新载荷为空");
-
-    let key = utils::md5_hex(API_DOMAIN_SERVER_SECRET);
-    let decrypted = utils::aes256_ecb_decrypt_base64(key.as_bytes(), cleaned)
-        .context("解密域名更新载荷失败")?;
-    let value: serde_json::Value =
-        serde_json::from_slice(&decrypted).context("解析域名更新载荷失败")?;
-    let domains = value
-        .get("Server")
-        .and_then(|servers| servers.as_array())
-        .map(|servers| {
-            servers
-                .iter()
-                .filter_map(|server| server.as_str())
-                .map(str::trim)
-                .filter(|server| is_plausible_domain(server))
-                .take(API_DOMAINS_CACHE_MAX_ENTRIES)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    Ok(domains)
 }
 
 fn is_valid_version(version: &str) -> bool {
@@ -1950,8 +1657,7 @@ async fn parse_encrypted_resp_with_revision<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::{
-        absolute_profile_photo, api_failure, checked_accumulated_len, is_plausible_domain,
-        is_route_unreachable,
+        absolute_profile_photo, api_failure, checked_accumulated_len, is_route_unreachable,
     };
 
     #[test]
@@ -1965,17 +1671,6 @@ mod tests {
             "https://other.example/x.jpg"
         );
         assert_eq!(absolute_profile_photo("img.example.com", ""), "");
-    }
-
-    #[test]
-    fn plausible_domain_rejects_url_components() {
-        assert!(is_plausible_domain("www.cdnhth.cc"));
-        assert!(is_plausible_domain(" cdn-msp2.example.com "));
-        assert!(!is_plausible_domain("example.com/path"));
-        assert!(!is_plausible_domain("user@example.com"));
-        assert!(!is_plausible_domain("example.com:8443"));
-        assert!(!is_plausible_domain(".example.com"));
-        assert!(!is_plausible_domain("localhost"));
     }
 
     #[test]
@@ -2125,25 +1820,6 @@ mod review_regression_tests {
     }
 
     #[test]
-    fn domain_update_payload_decodes_to_server_list() {
-        // 2026-10 从官方地址抓取的真实载荷（含开头 BOM 与封装），
-        // 验证「去非 ASCII 前缀 → base64 → AES-256-ECB → Server 字段」链路。
-        let payload = "\u{feff}X+bnzYIcwF6C7Rd3T7njPDNH08zsH9zyqCrrjCr7qcnHb1LsmIZGIHtrNVR/GiraHE6OuhvrxEzwciVvhdU0I9OYcmWTxF1K7fLfcwkn7kMQg2DZ2qpE7dKGkqKCmQijaSUOswxL1/p9pSVe/vRYEzbB5pfcAB6Yz/zVVIendBJK629QiqQndRXM9bijtZuYJtKw3YBAA26a+fy06dNszfw9v/4R8akVaSTWLOJc0nJy+9vm2t2W997vcqFL91iklKuKVEZHTtdpaLTgWExXaLjtIz2zlVZfy3jYrzKZ7x+LL7o02c6WB4HV69s1VqCJYl+3l3RNwDjJ0iRNnG9p/caZL/y6sT8i78Wc38WZhOAxkDsOFiGNpvS3eojKA0wGhpTtWsuUrXgSZ7ilEPttJvOhrJGGRJJ7Ux4HgzDYO1A=";
-        let cleaned: String = payload.chars().skip_while(|c| !c.is_ascii()).collect();
-        let key = utils::md5_hex(API_DOMAIN_SERVER_SECRET);
-        let decrypted = utils::aes256_ecb_decrypt_base64(key.as_bytes(), cleaned.trim()).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&decrypted).unwrap();
-        let servers: Vec<&str> = value["Server"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|server| server.as_str())
-            .collect();
-        assert!(!servers.is_empty());
-        assert!(servers.iter().all(|server| server.contains('.')));
-    }
-
-    #[test]
     fn version_helpers_validate_and_compare_versions() {
         assert!(is_valid_version("2.1.7"));
         assert!(is_valid_version("2.0.13.1"));
@@ -2183,52 +1859,5 @@ mod review_regression_tests {
         assert_eq!(request_login_revision(&error), Some(1));
         let newer_error = with_request_login_revision::<()>(Err(anyhow!("未登录")), 2).unwrap_err();
         assert_eq!(request_login_revision(&newer_error), Some(2));
-    }
-
-    #[test]
-    fn candidate_list_keeps_order_dedups_and_caps_length() {
-        let mut list: Vec<String> = Vec::new();
-        push_unique(&mut list, "a.example");
-        push_unique(&mut list, "b.example");
-        push_unique(&mut list, "a.example");
-        push_unique(&mut list, "  ");
-        assert_eq!(list, vec!["a.example", "b.example"]);
-    }
-}
-
-#[cfg(test)]
-mod api_domain_cache_tests {
-    use super::{parse_cached_domains, API_DOMAINS_CACHE_MAX_ENTRIES};
-
-    #[test]
-    fn cached_domains_parse_filters_invalid_entries_and_deduplicates() {
-        let raw = r#"{"domains":["a.example.com","bad domain","nodot","a.example.com","  ok.example.net  "],"updated_at_unix":1700000000}"#;
-        let (domains, updated_at) = parse_cached_domains(raw);
-        assert_eq!(domains, vec!["a.example.com", "ok.example.net"]);
-        assert_eq!(updated_at, Some(1700000000));
-    }
-
-    #[test]
-    fn cached_domains_parse_rejects_invalid_payloads() {
-        assert!(parse_cached_domains("not json").0.is_empty());
-        assert!(parse_cached_domains(r#"{"domains":["a.example.com"]}"#)
-            .1
-            .is_none());
-        assert!(
-            parse_cached_domains(r#"{"domains":["a.example.com"],"updated_at_unix":0}"#)
-                .1
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn cached_domains_parse_caps_entry_count() {
-        let domains: Vec<String> = (0..API_DOMAINS_CACHE_MAX_ENTRIES + 4)
-            .map(|index| format!("d{index}.example.com"))
-            .collect();
-        let raw = serde_json::json!({ "domains": domains, "updated_at_unix": 1 }).to_string();
-        let (parsed, updated_at) = parse_cached_domains(&raw);
-        assert_eq!(parsed.len(), API_DOMAINS_CACHE_MAX_ENTRIES);
-        assert_eq!(updated_at, Some(1));
     }
 }

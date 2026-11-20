@@ -285,6 +285,9 @@ fn failure_kind(error: &anyhow::Error) -> FailureKind {
             };
         }
         if cause.downcast_ref::<image::ImageError>().is_some()
+            || cause
+                .downcast_ref::<crate::image_data::ImageDataError>()
+                .is_some()
             || cause.downcast_ref::<serde_json::Error>().is_some()
         {
             return FailureKind::Parse;

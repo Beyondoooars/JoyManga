@@ -79,6 +79,21 @@ test('auto login stops when the user has already logged in manually', async () =
   assert.equal(calls, 1)
 })
 
+test('auto login skips stale ok result when stopped while request was in flight', async () => {
+  let stopped = false
+  const outcome = await runAutoLogin({
+    username: 'alice',
+    password: 'secret',
+    login: async () => {
+      stopped = true
+      return { status: 'ok', data: { uid: 1 } }
+    },
+    shouldStop: () => stopped,
+  })
+
+  assert.equal(outcome.status, 'skipped')
+})
+
 test('auto login stays silent when a cancellation came from manual login', async () => {
   let loggedIn = false
   const outcome = await runAutoLogin({

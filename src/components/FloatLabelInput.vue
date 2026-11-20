@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { InputInst, InputProps } from 'naive-ui'
 
-const props = withDefaults(
+withDefaults(
   defineProps<{
     label: string
     size?: InputProps['size']
@@ -38,19 +38,6 @@ function onBlur(e: FocusEvent) {
   emit('blur', e)
 }
 
-const translateY = computed(() => {
-  if (props.size === 'tiny') {
-    return 'translate-y-[-90%]'
-  } else if (props.size === 'small') {
-    return 'translate-y-[-120%]'
-  } else if (props.size === 'medium') {
-    return 'translate-y-[-140%]'
-  } else if (props.size === 'large') {
-    return 'translate-y-[-160%]'
-  }
-  return ''
-})
-
 defineExpose({ NInputRef })
 </script>
 
@@ -70,8 +57,9 @@ defineExpose({ NInputRef })
       <n-el
         tag="span"
         :class="[
-          'float-label bg-transparent px-1 transition-all duration-200 ease-in-out',
-          floating ? `text-0.75rem ${translateY}` : '',
+          'float-label',
+          size ? `size-${size}` : '',
+          { 'is-floating': floating },
         ]">
         {{ label }}
       </n-el>
@@ -81,9 +69,31 @@ defineExpose({ NInputRef })
 
 <style scoped>
 .float-label {
+  padding-inline: 0.25rem;
   background: transparent;
   color: var(--jm-text-3);
   pointer-events: none;
+  transition: all 200ms ease-in-out;
+}
+
+.float-label.is-floating {
+  font-size: 0.75rem;
+}
+
+.float-label.is-floating.size-tiny {
+  transform: translateY(-90%);
+}
+
+.float-label.is-floating.size-small {
+  transform: translateY(-120%);
+}
+
+.float-label.is-floating.size-medium {
+  transform: translateY(-140%);
+}
+
+.float-label.is-floating.size-large {
+  transform: translateY(-160%);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -93,15 +103,20 @@ defineExpose({ NInputRef })
 }
 
 :deep(.n-input-wrapper) {
-  @apply overflow-visible flex items-center;
+  display: flex;
+  align-items: center;
+  overflow: visible;
 }
 
 :deep(.n-input__prefix) {
-  @apply absolute leading-none z-2;
+  position: absolute;
+  z-index: 2;
+  line-height: 1;
 }
 
 :deep(.n-input__input-el) {
-  @apply relative z-3;
+  position: relative;
+  z-index: 3;
 }
 
 :deep(.n-input--focus) .float-label,

@@ -1,17 +1,16 @@
-use std::{io::Write, sync::OnceLock, time::Duration};
+use std::{collections::VecDeque, io::Write, sync::OnceLock, time::Duration};
 
 use anyhow::Context;
 use notify::{RecommendedWatcher, Watcher};
 use tauri::{AppHandle, Manager};
-use tauri_specta::Event;
 use tracing::{Level, Subscriber};
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{RollingFileAppender, Rotation},
 };
 use tracing_subscriber::{
-    filter::{filter_fn, FilterExt, LevelFilter, Targets},
-    fmt::{layer, time::LocalTime},
+    filter::{LevelFilter, Targets},
+    fmt::{layer, time::LocalTime, MakeWriter},
     layer::SubscriberExt,
     registry::LookupSpan,
     util::SubscriberInitExt,
@@ -20,33 +19,114 @@ use tracing_subscriber::{
 
 use crate::{
     config::ConfigStorage,
-    events::LogEvent,
     extensions::{AnyhowErrorToStringChain, AppHandleExt},
     types::LogLevel,
 };
 
-struct LogEventWriter {
-    app: AppHandle,
+const RECENT_LOG_MAX_LINES: usize = 500;
+const RECENT_LOG_MAX_BYTES: usize = 256 * 1024;
+const RECENT_LOG_LINE_MAX_CHARS: usize = 4_000;
+
+#[derive(Default)]
+struct RecentLogsBuffer {
+    lines: VecDeque<String>,
+    total_bytes: usize,
 }
 
-impl Write for LogEventWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let log_string = String::from_utf8_lossy(buf);
-        match serde_json::from_str::<LogEvent>(&log_string) {
-            Ok(log_event) => {
-                let _ = log_event.emit(&self.app);
+impl RecentLogsBuffer {
+    fn push(&mut self, raw: &str) {
+        for line in raw.lines() {
+            let trimmed = line.trim_end_matches('\r');
+            if trimmed.is_empty() {
+                continue;
             }
-            Err(err) => {
-                let log_string = log_string.to_string();
-                let err_msg = err.to_string();
-                tracing::error!(log_string, err_msg, "将日志字符串解析为LogEvent失败");
+            let entry = truncate_chars(trimmed, RECENT_LOG_LINE_MAX_CHARS);
+            self.total_bytes += entry.len();
+            self.lines.push_back(entry);
+            while self.lines.len() > RECENT_LOG_MAX_LINES
+                || (self.total_bytes > RECENT_LOG_MAX_BYTES && self.lines.len() > 1)
+            {
+                if let Some(removed) = self.lines.pop_front() {
+                    self.total_bytes = self.total_bytes.saturating_sub(removed.len());
+                }
             }
         }
+    }
+
+    fn snapshot(&self) -> Vec<String> {
+        self.lines.iter().cloned().collect()
+    }
+
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.total_bytes = 0;
+    }
+}
+
+fn truncate_chars(input: &str, max_chars: usize) -> String {
+    match input.char_indices().nth(max_chars) {
+        Some((idx, _)) => format!("{}...(truncated)", &input[..idx]),
+        None => input.to_string(),
+    }
+}
+
+static RECENT_LOGS: OnceLock<parking_lot::Mutex<RecentLogsBuffer>> = OnceLock::new();
+
+fn recent_logs_cell() -> &'static parking_lot::Mutex<RecentLogsBuffer> {
+    RECENT_LOGS.get_or_init(|| parking_lot::Mutex::new(RecentLogsBuffer::default()))
+}
+
+/// 读取最近写入内存环形缓冲的后端日志（已按行切分与截断）。
+pub fn recent_logs() -> Vec<String> {
+    RECENT_LOGS
+        .get()
+        .map(|cell| cell.lock().snapshot())
+        .unwrap_or_default()
+}
+
+/// 清空内存近期日志缓冲（用户清理日志时一并清空）。
+pub fn clear_recent_logs() {
+    if let Some(cell) = RECENT_LOGS.get() {
+        cell.lock().clear();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RecentLogMakeWriter;
+
+struct RecentLogWriter {
+    buf: Vec<u8>,
+}
+
+impl Write for RecentLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(buf);
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            let text = String::from_utf8_lossy(&self.buf);
+            recent_logs_cell().lock().push(&text);
+            self.buf.clear();
+        }
         Ok(())
+    }
+}
+
+impl Drop for RecentLogWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl<'a> MakeWriter<'a> for RecentLogMakeWriter {
+    type Writer = RecentLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RecentLogWriter {
+            buf: Vec::with_capacity(256),
+        }
     }
 }
 
@@ -99,30 +179,32 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
     // 输出到文件
     let (file_layer, guard) = create_file_layer(app, level)?;
     let (reloadable_file_layer, reload_handle) = tracing_subscriber::reload::Layer::new(file_layer);
-    // 输出到控制台
+    // 输出到控制台（显式限级，避免 Off/Info 下仍格式化 TRACE）
+    let console_level = if cfg!(debug_assertions) {
+        LevelFilter::DEBUG
+    } else {
+        LevelFilter::WARN
+    };
     let console_layer = layer()
         .with_writer(std::io::stdout)
         .with_timer(LocalTime::rfc_3339())
         .with_file(true)
-        .with_line_number(true);
-    // 发送到前端
-    let log_event_writer = std::sync::Mutex::new(LogEventWriter { app: app.clone() });
-    let log_event_layer = layer()
-        .with_writer(log_event_writer)
+        .with_line_number(true)
+        .with_filter(console_level);
+    // 内存近期日志环形缓冲（供诊断包在文件日志关闭或日志目录不可写时兜底）
+    let recent_layer = layer()
+        .with_writer(RecentLogMakeWriter)
         .with_timer(LocalTime::rfc_3339())
+        .with_ansi(false)
         .with_file(true)
         .with_line_number(true)
-        .json()
-        // 过滤掉来自这个文件的日志(LogEvent解析失败的日志)，避免无限递归
-        .with_filter(target_filter.clone().and(filter_fn(|metadata| {
-            metadata.module_path() != Some(lib_module_path)
-        })));
+        .with_filter(LevelFilter::INFO);
 
     Registry::default()
         .with(target_filter)
         .with(reloadable_file_layer)
         .with(console_layer)
-        .with(log_event_layer)
+        .with(recent_layer)
         .init();
 
     GUARD.get_or_init(|| parking_lot::Mutex::new(guard));
@@ -488,11 +570,11 @@ pub fn reset_logs_dir() {
 fn resolve_logs_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
     let library_dir = app.get_config().read().download_dir.clone();
     let preferred = crate::commands::system_commands::diagnostic_logs_dir(&library_dir);
-    if is_dir_writable(&preferred) {
+    if crate::utils::probe_directory_writable(&preferred) {
         return Ok(preferred);
     }
     let fallback = app.state::<ConfigStorage>().logs_dir().to_path_buf();
-    if is_dir_writable(&fallback) {
+    if crate::utils::probe_directory_writable(&fallback) {
         return Ok(fallback);
     }
     Err(anyhow::anyhow!(
@@ -500,24 +582,6 @@ fn resolve_logs_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
         preferred.display(),
         fallback.display()
     ))
-}
-
-/// 目录存在且确实可写；不存在时尝试创建一次。
-///
-/// 只做 `create_dir_all` 不够：书库在未授权「所有文件访问」时目录可能已存在，
-/// 但写入会被系统拒绝，滚动日志会静默停止。这里真写一个探针文件确认。
-fn is_dir_writable(dir: &std::path::Path) -> bool {
-    if std::fs::create_dir_all(dir).is_err() {
-        return false;
-    }
-    let probe = dir.join(format!(".write-probe-{}", uuid::Uuid::new_v4()));
-    match std::fs::write(&probe, b"1") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 #[cfg(test)]
@@ -571,5 +635,32 @@ mod tests {
         assert!(log3.exists(), "最新日志文件应被保留");
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn recent_logs_buffer_bounds_lines_bytes_and_utf8() {
+        let mut buffer = RecentLogsBuffer::default();
+        for idx in 0..(RECENT_LOG_MAX_LINES + 50) {
+            buffer.push(&format!("line-{idx}\n"));
+        }
+        assert_eq!(buffer.snapshot().len(), RECENT_LOG_MAX_LINES);
+        assert_eq!(buffer.snapshot().first().unwrap(), "line-50");
+
+        let huge = "汉".repeat(RECENT_LOG_LINE_MAX_CHARS + 20);
+        buffer.push(&huge);
+        let last = buffer.snapshot().pop().unwrap();
+        assert!(last.ends_with("...(truncated)"));
+        assert!(last.chars().count() <= RECENT_LOG_LINE_MAX_CHARS + 16);
+
+        // 超过总字节上限时逐条淘汰旧日志，仅保留最新内容
+        let wide_line = "a".repeat(3_500);
+        for _ in 0..100 {
+            buffer.push(&wide_line);
+        }
+        assert!(buffer.total_bytes <= RECENT_LOG_MAX_BYTES);
+
+        buffer.clear();
+        assert!(buffer.snapshot().is_empty());
+        assert_eq!(buffer.total_bytes, 0);
     }
 }

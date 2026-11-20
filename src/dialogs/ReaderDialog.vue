@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import { commands, type ChapterReaderData, type ChapterNavInfo, type ReadingDirection, type ReadingMode } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { getErrorMessage } from '../utils/errors.ts'
 import { imageUrlFor } from '../utils/imageCache.ts'
-import { bookmarkId, type ReadingProgress } from '../utils/readingState.ts'
+import { bookmarkId, type ReadingBookmark, type ReadingProgress } from '../utils/readingState.ts'
 import {
   PhX,
   PhCaretLeft,
@@ -24,23 +24,13 @@ import {
   setVolumeKeyPaging,
 } from '../utils/androidStorage.ts'
 import {
-  currentPageFromViewport,
-  isTapGesture,
-  pageActionForHorizontalGesture,
   pageActionForTapZone,
   pageActionForKey,
   type PageAction,
 } from '../utils/readerNav.ts'
-import {
-  FIT_MODE_LABELS,
-  IDENTITY_TRANSFORM,
-  nextFitMode,
-  pinchTransform,
-  resetForPageChange,
-  toggleZoom,
-  type FitMode,
-  type Transform,
-} from '../utils/readerZoom.ts'
+import { FIT_MODE_LABELS } from '../utils/readerZoom.ts'
+import { useReaderScroll } from '../composables/useReaderScroll.ts'
+import { useReaderTransform } from '../composables/useReaderTransform.ts'
 
 const store = useStore()
 
@@ -63,6 +53,10 @@ function toggleHud() {
 }
 
 useBackHandler(() => {
+  if (bookmarksShowing.value) {
+    bookmarksShowing.value = false
+    return true
+  }
   store.closeReader()
   return true
 }, 100)
@@ -79,16 +73,70 @@ const bookmarksShowing = ref(false)
 let chapterGeneration = 0
 let lastLoadAttempt: { comicId: number; chapterId: number; page: number } | undefined
 
-const fitMode = ref<FitMode>('width')
-const zoom = ref<Transform>({ ...IDENTITY_TRANSFORM })
-const viewerBody = ref<HTMLElement | null>(null)
 const currentPage = ref(1)
 
 // 阅读排版：单页翻页 / 上下滚动。偏好来自设置，可在阅读器头部临时切换。
 const readingMode = ref<ReadingMode>(store.config?.readingMode ?? 'Paginated')
-const scrollViewer = ref<HTMLElement | null>(null)
-// 滚动模式下当前可见页，用于进度保存与页码显示；由 IntersectionObserver 维护。
-let scrollObserver: IntersectionObserver | undefined
+/// 阅读方向与翻页决策集中在 utils/readerNav.ts，这里只做状态绑定。
+const readingDirection = computed<ReadingDirection>(() => store.config?.readingDirection ?? 'RightToLeft')
+
+const scrollViewer = useTemplateRef<HTMLElement>('scrollViewer')
+const viewerBody = useTemplateRef<HTMLElement>('viewerBody')
+
+const {
+  scrollPageStyles,
+  isScrollPageMounted,
+  enterScrollMode,
+  leaveScrollMode,
+  observeScrollPages,
+  scrollToPage,
+  cancelScrollSettle,
+  onScrollPageImageLoad,
+  onScrollPageImageError,
+  onScrollTouchStart,
+  onScrollTouchEnd,
+  onScrollTouchCancel,
+  handleScrollViewerClick,
+  scrollByViewport,
+  resetScrollState,
+} = useReaderScroll({
+  scrollViewer,
+  chapterData,
+  currentPage,
+  onPageChange: preloadCurrentRange,
+  onToggleHud: toggleHud,
+  onMarkImageError: markImageError,
+  onBoundaryChapter: (direction) => {
+    const target = direction === 1 ? chapterData.value?.nextChapter : chapterData.value?.prevChapter
+    if (!target) return false
+    goToChapter(target)
+    return true
+  },
+})
+
+const {
+  fitMode,
+  zoom,
+  isInteracting,
+  swipeOffsetX,
+  isSwipingAnim,
+  justSwiped,
+  resetZoom,
+  cycleFitMode,
+  onViewerDoubleClick,
+  resetGestureState,
+  onTouchStart,
+  onTouchMove,
+  onTouchEnd,
+  onTouchCancel,
+  handleViewerBodyClick,
+} = useReaderTransform({
+  viewerBody,
+  currentPage,
+  readingDirection,
+  onPageAction: runPageAction,
+  onToggleHud: toggleHud,
+})
 
 // 设置页改动阅读方式后立刻同步（阅读器可能还开着）
 watch(
@@ -108,195 +156,6 @@ function toggleReadingMode() {
   resetZoom()
   if (readingMode.value === 'Scroll') enterScrollMode()
   else leaveScrollMode()
-}
-
-/** 切到滚动：等模板渲染出容器后建立观察器，并把当前页滚进视野，避免从第一页重新开始 */
-function enterScrollMode() {
-  void nextTick(() => {
-    observeScrollPages()
-    scrollToPage(currentPage.value)
-  })
-}
-
-function leaveScrollMode() {
-  stopScrollSettle(false)
-  scrollObserver?.disconnect()
-  scrollObserver = undefined
-  // 按当前布局补算一次当前页，切回单页时正好落在正在读的那一页
-  const container = scrollViewer.value
-  if (container) syncCurrentPageFromLayout(container)
-}
-
-/**
- * 滚动模式：把指定页对齐到视口顶部。
- *
- * 页高在渲染当帧就由 `pageSizes` 定下来（见模板的 `aspect-ratio`），图片解码
- * 不会再改变布局，所以尺寸齐全时滚一次就到位。
- *
- * 尺寸未知的页（旧书库、导入的归档）没有预留高度，上方某一页解码后会把目标页
- * 顶下去：只滚一次会停在错误的位置，观察器随即把「当前页」改小、进度被写坏。
- * 所以定位后有一小段有界的纠偏期：上方有图加载就重新贴回顶部，直到上方每页都有
- * 确定高度或超时；期间观察器不更新当前页，用户一动手就结束。
- */
-const SCROLL_SETTLE_TIMEOUT_MS = 10_000
-/** 纠偏中的目标页；非 null 时观察器静音、图片加载会重新贴顶 */
-let settleTarget: number | null = null
-let settleDeadline = 0
-let settleTimer: ReturnType<typeof setTimeout> | undefined
-
-function scrollToPage(page: number) {
-  const container = scrollViewer.value
-  if (!container) return
-  const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`)
-  if (!target) return
-  // 上一次定位的纠偏还没结束（连点页码、滑块拖动）时以这次的为准
-  stopScrollSettle(false)
-  // 不能用 offsetTop：它的参照是 offsetParent（这里是定位的 reader-body），
-  // 不是滚动容器；两者一旦有内边距或偏移就会滚错位置。
-  const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
-  container.scrollTo({ top, behavior: 'auto' })
-  // 上方每页高度都已确定时滚一次就到位，不必开纠偏（也就不会短暂静音观察器）
-  if (!pagesAboveHaveHeight(container, page)) beginScrollSettle(page)
-}
-
-function beginScrollSettle(page: number) {
-  settleTarget = page
-  settleDeadline = Date.now() + SCROLL_SETTLE_TIMEOUT_MS
-  if (settleTimer !== undefined) clearTimeout(settleTimer)
-  // 兜底：图片已进入解码缓存时不会再触发 load，靠定时器结束纠偏
-  settleTimer = setTimeout(() => stopScrollSettle(true), SCROLL_SETTLE_TIMEOUT_MS)
-  requestAnimationFrame(pinScrollTarget)
-}
-
-/** 结束纠偏；resync 为 true 时按真实布局补算一次当前页（纠偏期间观察器静音） */
-function stopScrollSettle(resync: boolean) {
-  if (settleTarget === null) return
-  settleTarget = null
-  if (settleTimer !== undefined) {
-    clearTimeout(settleTimer)
-    settleTimer = undefined
-  }
-  if (!resync) return
-  const container = scrollViewer.value
-  if (container) syncCurrentPageFromLayout(container)
-}
-
-/** 目标页之上是否每页都有确定高度：只有未预留高度的页才需要等图片解码 */
-function pagesAboveHaveHeight(container: HTMLElement, page: number): boolean {
-  for (const el of container.querySelectorAll<HTMLElement>('[data-page]:not(.page-sized)')) {
-    if (Number(el.dataset.page) >= page) continue
-    // 读取失败的页换成了骨架/错误提示，高度不会再变，不阻塞纠偏
-    if (el.querySelector('.image-error')) continue
-    const img = el.querySelector('img')
-    if (!img || !img.complete || img.naturalHeight === 0) return false
-  }
-  return true
-}
-
-function pinScrollTarget() {
-  const container = scrollViewer.value
-  const page = settleTarget
-  if (!container || page === null) return
-  const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`)
-  if (!target) {
-    stopScrollSettle(false)
-    return
-  }
-  const top = target.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop
-  // 末尾不足一屏时目标页到不了顶部，按实际可滚范围比较，否则会一直判为「没贴住」
-  const maxTop = Math.max(0, container.scrollHeight - container.clientHeight)
-  const desired = Math.min(Math.max(top, 0), maxTop)
-  if (Math.abs(container.scrollTop - desired) > 1) container.scrollTo({ top: desired, behavior: 'auto' })
-  if (pagesAboveHaveHeight(container, page) || Date.now() >= settleDeadline) stopScrollSettle(true)
-}
-
-/** 滚动模式里某页图片解码完成：它可能把下方的目标页顶下去 */
-function onScrollPageImageLoad(page: number) {
-  if (settleTarget === null || page >= settleTarget) return
-  pinScrollTarget()
-}
-
-/**
- * 用户自己动手滚动：纠偏立即让位，观察器恢复跟随。
- *
- * 这里不按当前布局补算当前页——布局可能仍是「目标页被顶下去」的样子，
- * 补算会把用户还没读到的上一页写进进度。交给恢复后的观察器，它只报
- * 用户真正滚动后可见的页。
- */
-function cancelScrollSettle() {
-  stopScrollSettle(false)
-}
-
-/**
- * 滚动模式下每页的占位样式：宽度铺满容器，高度由 `pageSizes` 的宽高比定死。
- *
- * 用 CSS `aspect-ratio` 而不是给容器算像素高度：宽度由布局决定（窗口旋转、
- * 分屏都会变），比例不变时高度会自动跟上，不需要监听 resize。
- * 尺寸未知的页得到 `undefined`，退回按图片自身尺寸排版。
- *
- * 一次算成数组而不是在模板里按需算：`v-for` 里每页都会被读两次
- * （style 与 class），整章几百页时逐次计算纯属浪费。
- */
-const scrollPageStyles = computed<Array<Record<string, string> | undefined>>(() => {
-  const sizes = chapterData.value?.pageSizes ?? []
-  return sizes.map((size) => {
-    if (!size || size.width <= 0 || size.height <= 0) return undefined
-    return { aspectRatio: `${size.width} / ${size.height}` }
-  })
-})
-
-/** 滚动容器是否已到底（末尾不足一屏时，最后一页永远贴不到顶部） */
-function scrollContainerAtEnd(container: HTMLElement): boolean {
-  return container.scrollHeight > container.clientHeight
-    && container.scrollTop >= container.scrollHeight - container.clientHeight - 2
-}
-
-/** 用一份可见页列表更新当前页；号码没变就什么都不做 */
-function applyScrollCurrentPage(container: HTMLElement, visible: Array<{ page: number; top: number }>) {
-  const page = currentPageFromViewport(visible, scrollContainerAtEnd(container))
-  if (page !== null && page !== currentPage.value) {
-    currentPage.value = page
-    preloadCurrentRange()
-  }
-}
-
-/** 按几何位置取可见页，规则与 IntersectionObserver 的回调一致 */
-function syncCurrentPageFromLayout(container: HTMLElement) {
-  const containerRect = container.getBoundingClientRect()
-  const visible: Array<{ page: number; top: number }> = []
-  for (const el of container.querySelectorAll<HTMLElement>('[data-page]')) {
-    const rect = el.getBoundingClientRect()
-    const overlap = Math.min(rect.bottom, containerRect.bottom) - Math.max(rect.top, containerRect.top)
-    // 阈值与观察器的 0.1 对齐：只露一条边不算这一页可见
-    if (rect.height <= 0 || overlap / rect.height < 0.1) continue
-    visible.push({ page: Number(el.dataset.page), top: rect.top - containerRect.top })
-  }
-  applyScrollCurrentPage(container, visible)
-}
-
-/** 滚动模式：监听各页可见比例，把「最靠上的可见页」作为当前页 */
-function observeScrollPages() {
-  scrollObserver?.disconnect()
-  const container = scrollViewer.value
-  if (!container) return
-  const pages = container.querySelectorAll<HTMLElement>('[data-page]')
-  scrollObserver = new IntersectionObserver(
-    (entries) => {
-      // 程序化定位尚未沉降时布局还在变，此时的可见页不代表用户读到哪
-      if (settleTarget !== null) return
-      const containerTop = container.getBoundingClientRect().top
-      const visible = entries
-        .filter((entry) => entry.isIntersecting)
-        .map((entry) => ({
-          page: Number((entry.target as HTMLElement).dataset.page),
-          top: entry.boundingClientRect.top - containerTop,
-        }))
-        .filter((item) => Number.isFinite(item.page))
-      applyScrollCurrentPage(container, visible)
-    },
-    { root: container, threshold: [0.1, 0.5] },
-  )
-  pages.forEach((page) => scrollObserver?.observe(page))
 }
 
 const currentImagePath = computed(() => {
@@ -360,7 +219,21 @@ const imageRetryToken = ref<Map<string, number>>(new Map())
 
 function markImageError(filePath: string) {
   if (!chapterData.value?.imagePaths.includes(filePath)) return
+  const generation = chapterGeneration
+  const retryToken = imageRetryToken.value.get(filePath) ?? 0
   imageErrors.value.set(filePath, '图片无法解码，文件可能已损坏')
+  void commands
+    .getReaderImageError(filePath)
+    .then((detail) => {
+      if (!detail) return
+      if (generation !== chapterGeneration) return
+      if ((imageRetryToken.value.get(filePath) ?? 0) !== retryToken) return
+      if (!imageErrors.value.has(filePath)) return
+      imageErrors.value.set(filePath, detail)
+    })
+    .catch((err) => {
+      console.error('读取图片错误详情失败', err)
+    })
 }
 
 function retryImage(filePath: string) {
@@ -368,8 +241,9 @@ function retryImage(filePath: string) {
   imageRetryToken.value.set(filePath, (imageRetryToken.value.get(filePath) ?? 0) + 1)
 }
 
-/** 相邻页由浏览器在空闲时预取，翻页时通常已经在缓存里。 */
+/** 相邻页由浏览器在空闲时预取，翻页时通常已经在缓存里（仅单页模式启用，避免与滚动窗口竞争）。 */
 function preloadCurrentRange() {
+  if (readingMode.value !== 'Paginated') return
   const chapter = chapterData.value
   if (!chapter) return
   const paths = chapter.imagePaths
@@ -388,8 +262,11 @@ async function loadChapter(comicId: number, chapterId: number, page = 1) {
   const generation = ++chapterGeneration
   loading.value = true
   error.value = null
-  // 换章时上一章的纠偏目标已不存在，别让它把新章节滚到旧位置
-  stopScrollSettle(false)
+  // 换章时上一章的纠偏目标、观察器与手势状态已失效，统一清理
+  resetScrollState(true)
+  bookmarksShowing.value = false
+  resetZoom()
+  resetGestureState()
   currentPage.value = 1
   imageErrors.value.clear()
   imageRetryToken.value.clear()
@@ -442,36 +319,22 @@ function goToPage(page: number) {
   if (readingMode.value === 'Scroll') scrollToPage(currentPage.value)
 }
 
+function jumpToBookmark(bookmark: ReadingBookmark) {
+  bookmarksShowing.value = false
+  if (
+    chapterData.value &&
+    chapterData.value.comicId === bookmark.comicId &&
+    chapterData.value.chapterId === bookmark.chapterId
+  ) {
+    goToPage(bookmark.page)
+    return
+  }
+  store.openReader(bookmark.comicId, bookmark.chapterId, bookmark.comicTitle, bookmark.page)
+}
+
 function onSliderUpdate(page: number) {
   goToPage(page)
 }
-
-/// 换页或换章都必须复位缩放，否则新页面会带着上一页的放大位置
-function resetZoom() {
-  zoom.value = resetForPageChange()
-}
-
-function cycleFitMode() {
-  fitMode.value = nextFitMode(fitMode.value)
-  resetZoom()
-}
-
-function containerSize(): { width: number; height: number } {
-  const element = viewerBody.value
-  return { width: element?.clientWidth ?? window.innerWidth, height: element?.clientHeight ?? window.innerHeight }
-}
-
-/// 双击：未放大则放大到 2x 并把触点居中，已放大则复位
-function onViewerDoubleClick(event: MouseEvent) {
-  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  zoom.value = toggleZoom(
-    zoom.value,
-    { x: event.clientX - rect.left, y: event.clientY - rect.top },
-    { width: rect.width, height: rect.height },
-  )
-}
-
-watch(currentPage, resetZoom)
 
 function prevPage() {
   if (currentPage.value > 1) {
@@ -490,197 +353,13 @@ function nextPage() {
   }
 }
 
-// 触摸手势控制（左右滑动翻页）
-let touchStartX = 0
-let touchStartY = 0
-let touchStartTime = 0
-let isTouching = false
-let isHorizontalSwiping = false
-let justSwiped = false
-const swipeOffsetX = ref(0)
-const isSwipingAnim = ref(false)
-
-let pinchStartDistance = 0
-let pinchStartZoom: Transform = { ...IDENTITY_TRANSFORM }
-let pinchAnchor = { x: 0, y: 0 }
-
-/// 两指间距，用于计算缩放比例
-function touchDistance(touches: TouchList): number {
-  const [a, b] = [touches[0], touches[1]]
-  return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
-}
-
-function onTouchStart(e: TouchEvent) {
-  if (e.touches.length === 2) {
-    // 双指：进入缩放模式，取消单指滑动状态
-    isTouching = false
-    isHorizontalSwiping = false
-    pinchStartDistance = touchDistance(e.touches)
-    pinchStartZoom = { ...zoom.value }
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    pinchAnchor = {
-      x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
-      y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top,
-    }
-    return
-  }
-  if (e.touches.length !== 1) {
-    isTouching = false
-    isHorizontalSwiping = false
-    swipeOffsetX.value = 0
-    return
-  }
-  const t = e.touches[0]
-  touchStartX = t.clientX
-  touchStartY = t.clientY
-  touchStartTime = Date.now()
-  isTouching = true
-  isHorizontalSwiping = false
-  isSwipingAnim.value = false
-  swipeOffsetX.value = 0
-}
-
-function onTouchMove(e: TouchEvent) {
-  if (e.touches.length === 2 && pinchStartDistance > 0) {
-    const ratio = touchDistance(e.touches) / pinchStartDistance
-    zoom.value = pinchTransform(pinchStartZoom, pinchAnchor, ratio, containerSize())
-    return
-  }
-  if (!isTouching || e.touches.length !== 1) return
-  const t = e.touches[0]
-  const dx = t.clientX - touchStartX
-  const dy = t.clientY - touchStartY
-  const absDx = Math.abs(dx)
-  const absDy = Math.abs(dy)
-
-  if (!isHorizontalSwiping) {
-    if (absDx > 10 && absDx > absDy * 1.2) {
-      isHorizontalSwiping = true
-    } else if (absDy > 10) {
-      isTouching = false // 纵向滚动，取消横向手势
-      return
-    }
-  }
-
-  if (isHorizontalSwiping) {
-    swipeOffsetX.value = dx * 0.45
-  }
-}
-
-function onTouchEnd(e: TouchEvent) {
-  if (!isTouching) {
-    resetSwipeState()
-    return
-  }
-
-  const dt = Math.max(1, Date.now() - touchStartTime)
-  const touch = e.changedTouches[0]
-  const dx = touch ? touch.clientX - touchStartX : 0
-  const dy = touch ? touch.clientY - touchStartY : 0
-  const absDx = Math.abs(dx)
-  const absDy = Math.abs(dy)
-  const velocity = dx / dt
-
-  pinchStartDistance = 0
-  // 放大状态下横向拖动用于平移查看，不触发翻页
-  if (zoom.value.scale > 1.01) {
-    resetSwipeState()
-    return
-  }
-  if (isHorizontalSwiping || (absDx > 40 && absDx > absDy * 1.2 && dt < 600)) {
-    justSwiped = true
-    if (justSwipedResetTimer !== undefined) clearTimeout(justSwipedResetTimer)
-    justSwipedResetTimer = setTimeout(() => {
-      justSwiped = false
-      justSwipedResetTimer = undefined
-    }, 250)
-
-    if (dx < -40 || velocity < -0.3) {
-      runPageAction(pageActionForHorizontalGesture(readingDirection.value, 'left'))
-    } else if (dx > 40 || velocity > 0.3) {
-      runPageAction(pageActionForHorizontalGesture(readingDirection.value, 'right'))
-    }
-  }
-
-  resetSwipeState()
-}
-
-function onTouchCancel() {
-  pinchStartDistance = 0
-  resetSwipeState()
-}
-
-let justSwipedResetTimer: ReturnType<typeof setTimeout> | undefined
-let swipeResetTimer: ReturnType<typeof setTimeout> | undefined
-
-function resetSwipeState() {
-  isTouching = false
-  isHorizontalSwiping = false
-  isSwipingAnim.value = true
-  swipeOffsetX.value = 0
-  if (swipeResetTimer !== undefined) clearTimeout(swipeResetTimer)
-  swipeResetTimer = setTimeout(() => {
-    isSwipingAnim.value = false
-    swipeResetTimer = undefined
-  }, 220)
-}
-
-function handleViewerBodyClick() {
-  if (justSwiped) return
-  toggleHud()
-}
-
-/**
- * 滚动模式的轻点判定。`click` 在手指轻微移动后照样会派发，直接用它切 HUD
- * 会频繁误触，所以触摸设备上按触点位移判定，合成 click 一律忽略。
- */
-let scrollTouchStart: { x: number; y: number; time: number } | null = null
-let lastScrollTouchTime = 0
-
-function onScrollTouchStart(e: TouchEvent) {
-  // 手指按下就视为用户接管滚动，程序化定位不再回拉
-  cancelScrollSettle()
-  lastScrollTouchTime = Date.now()
-  // 落在按钮上的触摸交给按钮自己处理（如「重新读取」）：click 上的 .stop 拦不住
-  // touch 事件，这里必须主动排除，否则点按钮会顺带把 HUD 也切了。
-  if (e.touches.length !== 1 || (e.target instanceof Element && e.target.closest('button, a, input, select, textarea, [role="button"]'))) {
-    scrollTouchStart = null
-    return
-  }
-  const touch = e.touches[0]
-  scrollTouchStart = { x: touch.clientX, y: touch.clientY, time: Date.now() }
-}
-
-function onScrollTouchEnd(e: TouchEvent) {
-  // 合成 click 紧跟在 touchend 之后，用结束时刻计时才能覆盖长时间的拖动
-  lastScrollTouchTime = Date.now()
-  const start = scrollTouchStart
-  scrollTouchStart = null
-  const touch = e.changedTouches[0]
-  if (!start || !touch) return
-  if (isTapGesture(start, { x: touch.clientX, y: touch.clientY, time: Date.now() })) toggleHud()
-}
-
-function onScrollTouchCancel() {
-  lastScrollTouchTime = Date.now()
-  scrollTouchStart = null
-}
-
-function handleScrollViewerClick() {
-  // 触摸设备会紧跟 touchend 派发合成 click；HUD 已在 onScrollTouchEnd 里判定过
-  if (Date.now() - lastScrollTouchTime < 700) return
-  toggleHud()
-}
-
 function goToChapter(nav: ChapterNavInfo) {
   if (!chapterData.value) return
   store.openReader(chapterData.value.comicId, nav.chapterId, chapterData.value.comicTitle)
 }
 
-/// 阅读方向与翻页决策集中在 utils/readerNav.ts，这里只做状态绑定。
-const readingDirection = computed<ReadingDirection>(() => store.config?.readingDirection ?? 'RightToLeft')
-
 let keepScreenOnWatch: (() => void) | undefined
+let volumeKeyWatch: (() => void) | undefined
 let unsubscribeVolumeKeys: (() => void) | undefined
 
 function runPageAction(action: PageAction): void {
@@ -693,26 +372,6 @@ function runPageAction(action: PageAction): void {
   else prevPage()
 }
 
-/** 滚动模式：按容器高度的 85% 滚动，留一点重叠便于接续阅读 */
-function scrollByViewport(direction: 1 | -1) {
-  const container = scrollViewer.value
-  if (!container) return
-  // 用户主动翻屏（键盘/音量键）：与手势一样结束纠偏，否则会被贴回目标页
-  cancelScrollSettle()
-  const atTop = container.scrollTop <= 0
-  const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2
-  // 已经到底还继续「下一页」时进入下一章，与单页模式的行为一致
-  if (direction === 1 && atBottom && chapterData.value?.nextChapter) {
-    goToChapter(chapterData.value.nextChapter)
-    return
-  }
-  if (direction === -1 && atTop && chapterData.value?.prevChapter) {
-    goToChapter(chapterData.value.prevChapter)
-    return
-  }
-  container.scrollBy({ top: direction * container.clientHeight * 0.85, behavior: 'smooth' })
-}
-
 function tapLeft(): void {
   runPageAction(pageActionForTapZone('left'))
 }
@@ -722,10 +381,6 @@ function tapRight(): void {
 }
 
 function handleKeyDown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    store.closeReader()
-    return
-  }
   const action = pageActionForKey(e.key)
   if (!action) return
   // 空格/PageDown/PageUp 会滚动页面，必须阻止默认行为
@@ -741,6 +396,10 @@ watch(
     } else {
       flushProgress()
       chapterGeneration++
+      resetScrollState(true)
+      bookmarksShowing.value = false
+      resetZoom()
+      resetGestureState()
       imageErrors.value.clear()
       imageRetryToken.value.clear()
       chapterData.value = null
@@ -757,9 +416,13 @@ onMounted(() => {
     ([keepScreenOn, reading]) => setKeepScreenOn(keepScreenOn && reading),
     { immediate: true },
   )
+  volumeKeyWatch = watch(
+    () => [store.config?.volumeKeyPaging ?? false, Boolean(store.activeReaderTarget)] as const,
+    ([enabled, reading]) => setVolumeKeyPaging(enabled && reading),
+    { immediate: true },
+  )
   // 阅读器一打开就进入沉浸式；退出时必须恢复系统栏，否则状态栏会一直消失
   applyFullscreen()
-  setVolumeKeyPaging(store.config?.volumeKeyPaging ?? false)
   unsubscribeVolumeKeys = onVolumeKeyPage((action) => runPageAction(action))
 })
 
@@ -767,25 +430,17 @@ onUnmounted(() => {
   flushProgress()
   keepScreenOnWatch?.()
   keepScreenOnWatch = undefined
+  volumeKeyWatch?.()
+  volumeKeyWatch = undefined
   setKeepScreenOn(false)
   // 退出阅读器恢复系统栏
   setImmersiveMode(false)
-  stopScrollSettle(false)
-  scrollObserver?.disconnect()
-  scrollObserver = undefined
+  resetScrollState(true)
+  resetGestureState()
   setVolumeKeyPaging(false)
   unsubscribeVolumeKeys?.()
   unsubscribeVolumeKeys = undefined
   chapterGeneration++
-  // 触摸/手势计时器可能在组件销毁后仍触发，先清掉
-  if (swipeResetTimer !== undefined) {
-    clearTimeout(swipeResetTimer)
-    swipeResetTimer = undefined
-  }
-  if (justSwipedResetTimer !== undefined) {
-    clearTimeout(justSwipedResetTimer)
-    justSwipedResetTimer = undefined
-  }
   window.removeEventListener('keydown', handleKeyDown)
   imageErrors.value.clear()
   imageRetryToken.value.clear()
@@ -796,13 +451,13 @@ onUnmounted(() => {
 <template>
   <div class="reader-backdrop" @click="store.closeReader">
     <div
-      class="reader-window maximized is-mobile"
+      class="reader-window maximized"
       @click.stop>
       <!-- Window Header -->
       <header
         v-show="hudVisible"
-        class="reader-header mobile-header">
-        <div class="header-title no-drag">
+        class="reader-header">
+        <div class="header-title">
           <span class="comic-name" :title="chapterData?.comicTitle || store.activeReaderTarget?.comicTitle">
             {{ chapterData?.comicTitle || store.activeReaderTarget?.comicTitle || '漫画阅读器' }}
           </span>
@@ -811,7 +466,7 @@ onUnmounted(() => {
           </span>
         </div>
 
-        <div class="header-actions no-drag">
+        <div class="header-actions">
           <button type="button" :class="['action-btn', { active: currentIsBookmarked }]"
             :title="currentIsBookmarked ? '移除当前页书签' : '添加当前页书签'" @click="toggleCurrentBookmark">
             <PhBookmarkSimple :size="18" :weight="currentIsBookmarked ? 'fill' : 'regular'" />
@@ -847,7 +502,7 @@ onUnmounted(() => {
           <button
             type="button"
             class="action-btn close-btn"
-            title="关闭 (Esc)"
+            title="关闭"
             @click="store.closeReader">
             <PhX :size="18" />
           </button>
@@ -860,20 +515,20 @@ onUnmounted(() => {
         <div class="bookmark-heading">本书书签 <span>{{ comicBookmarks.length }} 个</span></div>
         <p v-if="!comicBookmarks.length">点击顶部书签按钮保存当前页。</p>
         <div v-for="bookmark in comicBookmarks" :key="bookmark.id" class="bookmark-row">
-          <button @click="store.openReader(bookmark.comicId, bookmark.chapterId, bookmark.comicTitle, bookmark.page)">
+          <button type="button" @click="jumpToBookmark(bookmark)">
             {{ bookmark.chapterTitle }} · 第 {{ bookmark.page }} 页
           </button>
-          <button title="删除书签" @click="store.removeReadingBookmark(bookmark.id)"><PhX :size="14" /></button>
+          <button type="button" title="删除书签" @click="store.removeReadingBookmark(bookmark.id)"><PhX :size="14" /></button>
         </div>
       </aside>
       <main class="reader-body">
         <div v-if="loading" class="reader-loading">
           <n-spin size="large" />
-          <span class="mt-3 text-gray-400">正在载入章节内容...</span>
+          <span class="reader-loading-text">正在载入章节内容...</span>
         </div>
 
         <div v-else-if="error" class="reader-error">
-          <p class="text-red-400 mb-3">{{ error }}</p>
+          <p class="reader-error-text">{{ error }}</p>
           <n-button
             size="small"
             type="primary"
@@ -906,14 +561,16 @@ onUnmounted(() => {
                 <n-button size="small" @click.stop="retryImage(path)">重新读取</n-button>
               </div>
               <img
-                v-else
+                v-else-if="isScrollPageMounted(index + 1)"
                 :src="imageSrc(path)"
                 :alt="`第 ${index + 1} 页`"
                 class="reader-img"
-                loading="lazy"
-                @load="onScrollPageImageLoad(index + 1)"
-                @error="markImageError(path)"
+                @load="onScrollPageImageLoad(index + 1, $event)"
+                @error="onScrollPageImageError(index + 1, path)"
                 :draggable="false" />
+              <div v-else class="scroll-page-placeholder" aria-hidden="true">
+                <span>第 {{ index + 1 }} 页</span>
+              </div>
             </div>
           </div>
 
@@ -926,7 +583,7 @@ onUnmounted(() => {
             @touchmove="onTouchMove"
             @touchend="onTouchEnd"
             @touchcancel="onTouchCancel">
-            <div class="click-zone click-prev" @click="!justSwiped && tapLeft()" title="上一页 (← / A)">
+            <div v-show="zoom.scale <= 1.01" class="click-zone click-prev" @click="!justSwiped && tapLeft()" title="上一页 (← / A)">
               <PhCaretLeft :size="38" class="zone-icon" />
             </div>
 
@@ -937,7 +594,7 @@ onUnmounted(() => {
               @click="handleViewerBodyClick">
               <div
                 class="page-frame"
-                :class="`fit-${fitMode}`"
+                :class="[`fit-${fitMode}`, { 'is-interacting': isInteracting }]"
                 :style="zoom.scale !== 1
                   ? { transform: `translate(${zoom.offsetX}px, ${zoom.offsetY}px) scale(${zoom.scale})` }
                   : undefined"
@@ -961,7 +618,7 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="click-zone click-next" @click="!justSwiped && tapRight()" title="下一页 (→ / D / 空格)">
+            <div v-show="zoom.scale <= 1.01" class="click-zone click-next" @click="!justSwiped && tapRight()" title="下一页 (→ / D / 空格)">
               <PhCaretRight :size="38" class="zone-icon" />
             </div>
           </div>
@@ -971,7 +628,7 @@ onUnmounted(() => {
       <!-- Window Footer -->
       <footer
         v-show="hudVisible"
-        class="reader-footer mobile-footer">
+        class="reader-footer">
         <div class="footer-controls">
           <div class="page-slider-area" v-if="chapterData && chapterData.totalImages > 0">
             <n-slider
@@ -1040,7 +697,6 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: 0 14px;
-  cursor: move;
 }
 
 .header-title {
@@ -1126,6 +782,16 @@ onUnmounted(() => {
   height: 100%;
 }
 
+.reader-loading-text {
+  margin-top: 0.75rem;
+  color: #9ca3af;
+}
+
+.reader-error-text {
+  margin-bottom: 0.75rem;
+  color: #f87171;
+}
+
 /* Image states */
 .reader-img {
   max-width: 100%;
@@ -1208,9 +874,20 @@ onUnmounted(() => {
  * 后续页面顶偏——布局稳定才是这套机制的意义。
  */
 .scroll-page.page-sized .reader-img,
-.scroll-page.page-sized .image-skeleton {
+.scroll-page.page-sized .image-skeleton,
+.scroll-page.page-sized .scroll-page-placeholder {
   height: 100%;
   object-fit: contain;
+}
+
+.scroll-page-placeholder {
+  width: 100%;
+  min-height: 75vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #61666d;
+  font-size: 13px;
 }
 
 /* Paginated Viewer */
@@ -1266,7 +943,7 @@ onUnmounted(() => {
   justify-content: center;
   padding: 10px;
   gap: 8px;
-  touch-action: pan-y;
+  touch-action: none;
   user-select: none;
 }
 
@@ -1284,6 +961,10 @@ onUnmounted(() => {
 .page-frame {
   transition: transform 140ms ease-out;
   will-change: transform;
+}
+
+.page-frame.is-interacting {
+  transition: none;
 }
 
 .page-frame .reader-img {

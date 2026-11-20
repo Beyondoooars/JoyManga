@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import FavoriteButton from '../components/FavoriteButton.vue'
-import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
+import { computed, ref, watch, watchEffect } from 'vue'
 import { ChapterInfo, commands, DownloadTaskState } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import { PhArrowClockwise, PhArrowLeft, PhBookOpen, PhDownloadSimple, PhFolderOpen } from '@phosphor-icons/vue'
-import IconButton from '../components/IconButton.vue'
 import { useMessage } from 'naive-ui'
 import { getErrorMessage, formatCommandError } from '../utils/errors.ts'
+import { copyPathWithToast } from '../utils/clipboard.ts'
 import { failureKindLabels } from '../utils/downloadProgress.ts'
 import { useBackHandler } from '../composables/useAndroidBack.ts'
 
@@ -26,65 +26,18 @@ useBackHandler(() => {
   return true
 }, 20)
 
-function onKeyDown(e: KeyboardEvent) {
-  if (e.key === 'Escape') {
-    handleBack()
-  }
-}
-
-// 本页在 KeepAlive 中缓存：失活时必须摘掉全局键盘监听，否则返回其他页后 Esc 仍被吞掉
-onMounted(() => {
-  window.addEventListener('keydown', onKeyDown)
-})
-
-onActivated(() => {
-  // 首次挂载与每次重新激活都会调用；先移除再添加，保证只注册一次
-  window.removeEventListener('keydown', onKeyDown)
-  window.addEventListener('keydown', onKeyDown)
-})
-
-onDeactivated(() => {
-  window.removeEventListener('keydown', onKeyDown)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('keydown', onKeyDown)
-})
-
 /** 虚拟列表行高：与 `.chapter-item` 的 height 保持一致 */
 const CHAPTER_ROW_HEIGHT = 40
 
-const dropdownX = ref<number>(0)
-const dropdownY = ref<number>(0)
-const showDropdown = ref<boolean>(false)
 const checkedIds = ref<number[]>([])
 const downloadingSelected = ref(false)
 const refreshing = ref(false)
 
-const dropdownOptions = computed(() => [
-  {
-    label: '全选',
-    key: 'check all',
-    props: {
-      onClick: () => {
-        store.pickedComic?.chapterInfos
-          ?.filter((c) => c.isDownloaded !== true && !checkedIds.value.includes(c.chapterId))
-          .forEach((c) => checkedIds.value.push(c.chapterId))
-        showDropdown.value = false
-      },
-    },
-  },
-  {
-    label: '取消全选',
-    key: 'uncheck all',
-    props: {
-      onClick: () => {
-        checkedIds.value.length = 0
-        showDropdown.value = false
-      },
-    },
-  },
-])
+const comicDownloaded = computed(() =>
+  store.pickedComic
+    ? store.isComicDownloaded(store.pickedComic.id, store.pickedComic.isDownloaded, store.pickedComicLibraryEpoch)
+    : false,
+)
 
 const hasDownloadedChapter = computed(() => {
   return store.pickedComic?.chapterInfos.some((c) => c.isDownloaded) ?? false
@@ -112,14 +65,13 @@ function openFirstDownloadedChapterReader() {
   }
 }
 
-function handleChapterDoubleClick(chapterId: number, isDownloaded: boolean | null | undefined) {
-  if (isDownloaded && store.pickedComic) {
-    if (store.isArchiving(store.pickedComic.id)) {
-      message.warning('正在整合 CBZ，完成后即可阅读')
-      return
-    }
-    store.openReader(store.pickedComic.id, chapterId, store.pickedComic.name)
+function openChapterReader(chapterId: number) {
+  if (!store.pickedComic) return
+  if (store.isArchiving(store.pickedComic.id)) {
+    message.warning('正在整合 CBZ，完成后即可阅读')
+    return
   }
+  store.openReader(store.pickedComic.id, chapterId, store.pickedComic.name)
 }
 
 type State = DownloadTaskState | 'Idle'
@@ -196,18 +148,7 @@ function toggleSelectAllUndownloaded() {
   }
 }
 
-async function onContextMenu(e: MouseEvent) {
-  e.preventDefault()
-  showDropdown.value = false
-  await nextTick()
-  showDropdown.value = true
-  dropdownX.value = e.clientX
-  dropdownY.value = e.clientY
-}
-
-const pendingChapterIds = ref<number[]>([])
-
-function downloadChapters() {
+async function downloadChapters() {
   const comic = store.pickedComic
   if (comic === undefined || downloadingSelected.value) {
     return
@@ -220,17 +161,6 @@ function downloadChapters() {
   if (chapterIdsToDownload.length === 0) {
     return
   }
-  pendingChapterIds.value = chapterIdsToDownload
-  void runDownloadChapters()
-}
-
-async function runDownloadChapters() {
-  const comic = store.pickedComic
-  if (comic === undefined || downloadingSelected.value) {
-    return
-  }
-  const chapterIdsToDownload = pendingChapterIds.value
-  pendingChapterIds.value = []
   downloadingSelected.value = true
   let failedCount = 0
   let submittedCount = 0
@@ -281,9 +211,7 @@ async function refreshChapters() {
   // TODO: 如果pickedComic已下载，则更新元数据
 }
 
-const isAndroid = /Android/i.test(navigator.userAgent)
-
-async function showComicDownloadDirInFileManager() {
+async function copyComicDownloadDir() {
   if (store.pickedComic === undefined) {
     return
   }
@@ -294,21 +222,7 @@ async function showComicDownloadDirInFileManager() {
     return
   }
 
-  if (!isAndroid) {
-    const result = await commands.showPathInFileManager(comicDownloadDir)
-    if (result.status === 'ok') return
-  }
-
-  try {
-    await navigator.clipboard.writeText(comicDownloadDir)
-    message.success('已复制下载目录到剪贴板')
-  } catch {
-    const result = await commands.showPathInFileManager(comicDownloadDir)
-    if (result.status === 'error') {
-      console.error(result.error)
-      message.error(formatCommandError(result.error))
-    }
-  }
+  await copyPathWithToast(comicDownloadDir, message, '已复制下载目录到剪贴板')
 }
 
 function isDownloading(state: State) {
@@ -320,15 +234,15 @@ function isDownloading(state: State) {
   <div class="chapter-pane-container">
     <div v-if="store.pickedComic === undefined" class="empty-chapter">
       <n-empty description="未选择漫画" />
-      <n-button class="mt-4" type="primary" @click="handleBack">返回发现</n-button>
+      <n-button class="empty-back-btn" type="primary" @click="handleBack">返回发现</n-button>
     </div>
 
     <template v-else>
-      <!-- 悬浮返回按键：彻底移除冗余实体顶栏，轻量通透 -->
+      <!-- 悬浮轻量返回按键：替代实体顶栏，轻量通透 -->
       <button
         type="button"
         class="hero-floating-back"
-        title="返回列表 (Esc)"
+        title="返回列表"
         aria-label="返回列表"
         @click="handleBack">
         <PhArrowLeft :size="20" weight="bold" />
@@ -344,11 +258,6 @@ function isDownloading(state: State) {
         <div class="comic-meta-info">
           <div class="comic-name-row">
             <h2 class="comic-meta-name">{{ store.pickedComic.name }}</h2>
-            <FavoriteButton
-              class="hero-fav-btn"
-              :comic-id="store.pickedComic.id"
-              :initial-state="store.pickedComic.is_favorite"
-              :initial-epoch="store.pickedComicFavoriteEpoch" />
           </div>
           <div class="comic-id-text">JM{{ store.pickedComic.id }}</div>
 
@@ -390,26 +299,6 @@ function isDownloading(state: State) {
               整合失败 · {{ failureKindLabels[archiveFailure.kind] }}
             </n-tag>
           </div>
-
-          <div class="meta-actions">
-            <button
-              v-if="hasDownloadedChapter"
-              type="button"
-              class="jm-btn is-primary meta-action"
-              :disabled="store.isArchiving(store.pickedComic.id)"
-              @click="openFirstDownloadedChapterReader">
-              <PhBookOpen :size="17" weight="bold" />
-              开始阅读
-            </button>
-            <button
-              type="button"
-              class="jm-btn is-download meta-action"
-              :disabled="checkedIds.length === 0 || downloadingSelected"
-              @click="downloadChapters">
-              <PhDownloadSimple :size="17" weight="bold" />
-              {{ downloadingSelected ? '正在加入…' : `下载勾选 ${checkedIds.length > 0 ? `(${checkedIds.length})` : ''}` }}
-            </button>
-          </div>
         </div>
       </section>
 
@@ -427,7 +316,7 @@ function isDownloading(state: State) {
           </div>
         </header>
 
-        <div class="selection-container custom-scrollbar" @contextmenu="onContextMenu">
+        <div class="selection-container">
           <n-checkbox-group v-model:value="checkedIds" class="chapter-checkbox-group">
             <n-virtual-list
               class="chapter-list"
@@ -435,18 +324,25 @@ function isDownloading(state: State) {
               :item-size="CHAPTER_ROW_HEIGHT"
               key-field="chapterId">
               <template #default="{ item }">
+                <button
+                  v-if="item.isDownloaded"
+                  type="button"
+                  class="chapter-item chapter-read-btn downloaded"
+                  :disabled="store.isArchiving(store.pickedComic.id)"
+                  @click="openChapterReader(item.chapterId)">
+                  <span class="chapter-name">{{ item.chapterTitle }}</span>
+                  <span class="chapter-state is-done">已下载</span>
+                </button>
                 <n-checkbox
+                  v-else
                   class="chapter-item"
                   :value="item.chapterId"
-                  :disabled="item.isDownloaded === true || isDownloading(item.state)"
+                  :disabled="isDownloading(item.state)"
                   :class="{
-                    downloaded: item.isDownloaded,
-                    downloading: !item.isDownloaded && isDownloading(item.state),
-                  }"
-                  @dblclick="handleChapterDoubleClick(item.chapterId, item.isDownloaded)">
+                    downloading: isDownloading(item.state),
+                  }">
                   <span class="chapter-name">{{ item.chapterTitle }}</span>
-                  <span v-if="item.isDownloaded" class="chapter-state is-done">已下载</span>
-                  <span v-else-if="isDownloading(item.state)" class="chapter-state is-active">{{ item.state === 'Downloading' ? '下载中' : item.state === 'Paused' ? '已暂停' : '排队中' }}</span>
+                  <span v-if="isDownloading(item.state)" class="chapter-state is-active">{{ item.state === 'Downloading' ? '下载中' : item.state === 'Paused' ? '已暂停' : '排队中' }}</span>
                   <span v-else-if="item.state === 'Failed'" class="chapter-state is-failed">失败</span>
                 </n-checkbox>
               </template>
@@ -463,16 +359,18 @@ function isDownloading(state: State) {
             :comic-id="store.pickedComic.id"
             :initial-state="store.pickedComic.is_favorite"
             :initial-epoch="store.pickedComicFavoriteEpoch" />
-          <IconButton title="刷新章节" aria-label="刷新章节" :disabled="refreshing" @click="refreshChapters">
+          <button type="button" class="jm-icon-btn" title="刷新章节" aria-label="刷新章节" :disabled="refreshing" @click="refreshChapters">
             <PhArrowClockwise :size="19" :class="{ 'jm-spin': refreshing }" />
-          </IconButton>
-          <IconButton
-            v-if="store.pickedComic.isDownloaded"
-            title="打开下载目录"
-            aria-label="打开下载目录"
-            @click="showComicDownloadDirInFileManager">
+          </button>
+          <button
+            v-if="comicDownloaded && store.pickedComic.comicDownloadDir"
+            type="button"
+            class="jm-icon-btn"
+            title="复制下载目录"
+            aria-label="复制下载目录"
+            @click="copyComicDownloadDir">
             <PhFolderOpen :size="19" />
-          </IconButton>
+          </button>
         </div>
 
         <button
@@ -502,15 +400,6 @@ function isDownloading(state: State) {
           <span>选择章节下载</span>
         </button>
       </nav>
-
-      <n-dropdown
-        placement="bottom-start"
-        trigger="manual"
-        :x="dropdownX"
-        :y="dropdownY"
-        :options="dropdownOptions"
-        :show="showDropdown"
-        :on-clickoutside="() => (showDropdown = false)" />
     </template>
   </div>
 </template>
@@ -532,6 +421,10 @@ function isDownloading(state: State) {
   justify-content: center;
   gap: 14px;
   background: var(--jm-surface);
+}
+
+.empty-back-btn {
+  margin-top: 16px;
 }
 
 /* 悬浮轻量返回按键：替代实体顶栏，轻量通透 */
@@ -571,10 +464,6 @@ function isDownloading(state: State) {
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
-}
-
-.hero-fav-btn {
-  flex-shrink: 0;
 }
 
 .comic-id-text {
@@ -736,59 +625,6 @@ function isDownloading(state: State) {
   margin-left: 2px;
 }
 
-.meta-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: auto;
-}
-
-/* 开始阅读 = 主操作（粉），下载 = 信息/传输（蓝） */
-.meta-action {
-  display: inline-flex;
-  height: 38px;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  border: 0;
-  border-radius: var(--jm-r-md);
-  font-size: var(--jm-fs-sm);
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background-color 160ms ease,
-    transform 120ms ease;
-}
-
-.meta-action:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-.meta-action.is-primary {
-  color: #fff;
-  background: var(--jm-brand);
-  box-shadow: 0 3px 12px rgba(251, 114, 153, 0.3);
-}
-
-.meta-action.is-primary:disabled {
-  color: var(--jm-text-4);
-  background: var(--jm-sunken);
-  box-shadow: none;
-  cursor: default;
-}
-
-.meta-action.is-download {
-  color: var(--jm-accent);
-  background: var(--jm-accent-soft);
-}
-
-.meta-action.is-download:disabled {
-  color: var(--jm-text-4);
-  background: var(--jm-sunken);
-  cursor: default;
-}
-
 /* 章节列表 */
 .chapters-section {
   display: flex;
@@ -885,12 +721,20 @@ function isDownloading(state: State) {
 }
 
 /* 已下载用蓝色（信息/内容），避免与「选中」的粉色混淆 */
-.selection-container .downloaded {
-  background-color: var(--jm-accent-soft) !important;
-  cursor: pointer;
+.chapter-read-btn {
+  width: 100%;
+  background: transparent;
+  text-align: left;
+  font: inherit;
 }
 
-.selection-container .downloaded :deep(.n-checkbox__label) {
+.chapter-read-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.selection-container .downloaded {
+  background-color: var(--jm-accent-soft) !important;
   cursor: pointer;
 }
 
@@ -947,65 +791,6 @@ function isDownloading(state: State) {
 
 :deep(.n-checkbox-box-wrapper) {
   flex: 0 0 auto;
-}
-
-/* 整理方式弹窗 */
-.cbz-mode-options {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.cbz-mode-option {
-  padding: 12px 14px;
-  text-align: left;
-  border: 1px solid var(--jm-line);
-  border-radius: var(--jm-r-md);
-  background: var(--jm-surface);
-  cursor: pointer;
-  transition:
-    border-color 160ms ease,
-    background-color 160ms ease;
-}
-
-.cbz-mode-option:hover {
-  border-color: rgba(251, 114, 153, 0.4);
-}
-
-.cbz-mode-option.active {
-  border-color: var(--jm-brand);
-  background: var(--jm-brand-soft);
-  box-shadow: 0 2px 10px rgba(251, 114, 153, 0.12);
-}
-
-.cbz-mode-title {
-  color: var(--jm-text);
-  font-size: var(--jm-fs-sm);
-  font-weight: 700;
-}
-
-.cbz-mode-desc {
-  margin-top: 4px;
-  color: var(--jm-text-3);
-  font-size: var(--jm-fs-xs);
-  line-height: 1.5;
-}
-
-.cbz-mode-remember {
-  margin-top: 12px;
-}
-
-.cbz-mode-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-@media (pointer: coarse) {
-  .back-circle {
-    width: 44px;
-    height: 44px;
-  }
 }
 
 @media (max-width: 640px) {

@@ -486,10 +486,12 @@ impl DownloadManager {
     }
 
     pub fn pause_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {
-        let tasks = self.download_tasks.read();
-        let Some(task) = tasks.get(&chapter_id) else {
-            return Err(anyhow!("未找到章节ID为`{chapter_id}`的下载任务"));
-        };
+        let task = self
+            .download_tasks
+            .read()
+            .get(&chapter_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("未找到章节ID为`{chapter_id}`的下载任务"))?;
         task.change_state(
             DownloadTaskState::Paused,
             &[DownloadTaskState::Pending, DownloadTaskState::Downloading],
@@ -532,8 +534,8 @@ impl DownloadManager {
     }
 
     pub fn cancel_download_task(&self, chapter_id: i64) -> anyhow::Result<()> {
-        let tasks = self.download_tasks.read();
-        if let Some(task) = tasks.get(&chapter_id) {
+        let task = self.download_tasks.read().get(&chapter_id).cloned();
+        if let Some(task) = task {
             task.change_state(
                 DownloadTaskState::Cancelled,
                 &[
@@ -613,30 +615,6 @@ mod regression_tests {
         assert_eq!(buffer_limit(1), 2);
         assert_eq!(buffer_limit(8), 16);
         assert_eq!(buffer_limit(0), 2);
-    }
-
-    #[test]
-    fn flat_download_does_not_overwrite_another_comics_root_metadata() {
-        let root = std::env::temp_dir().join(format!("jm-flat-meta-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("元数据.json");
-        let original = serde_json::to_vec(&Comic {
-            id: 1,
-            ..Comic::default()
-        })
-        .unwrap();
-        std::fs::write(&path, &original).unwrap();
-        let comic = Comic {
-            id: 2,
-            comic_download_dir: Some(root.clone()),
-            ..Comic::default()
-        };
-        let settings = DownloadSettings {
-            download_dir: root.clone(),
-        };
-        super::download_task::save_download_metadata(&comic, &settings).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

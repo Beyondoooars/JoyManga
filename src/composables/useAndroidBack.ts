@@ -1,4 +1,5 @@
 import { onActivated, onDeactivated, onMounted, onUnmounted } from 'vue'
+import { isAndroid } from './useIsMobile.ts'
 
 export type BackHandler = () => boolean
 
@@ -58,7 +59,7 @@ function initGlobalBackListeners() {
   window.addEventListener('jm-android-back', () => { handleBackAction() })
 
   // Seed history state so Android popstate can fire
-  if (/Android/i.test(navigator.userAgent) && !window.JmAndroid) window.history.pushState(null, '', window.location.href)
+  if (isAndroid && !window.JmAndroid) window.history.pushState(null, '', window.location.href)
 }
 
 export function registerBackHandler(handler: BackHandler, priority = 10): () => void {
@@ -102,7 +103,7 @@ export function useBackHandler(handler: BackHandler, priority = 10) {
 export const useAndroidBack = useBackHandler
 
 export function handleRootBackExit(showExitToast: (msg: string) => void): boolean {
-  if (!/Android/i.test(navigator.userAgent)) return false
+  if (!isAndroid) return false
   const now = Date.now()
   if (now - lastBackPressTime < 2000) {
     lastBackPressTime = 0

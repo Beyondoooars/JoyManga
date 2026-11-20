@@ -36,9 +36,20 @@ const loggingIn = ref(false)
 const loggingOut = ref(false)
 // 会话失效或用户主动重新登录时，改显示登录表单
 const showLoginForm = ref(false)
+watch(
+  () => store.reloginRequested,
+  (requested) => {
+    if (!requested) return
+    showLoginForm.value = true
+    store.clearReloginRequest()
+  },
+  { immediate: true },
+)
 let disposed = false
+let loginGeneration = 0
 onBeforeUnmount(() => {
   disposed = true
+  loginGeneration++
   store.manualLoginInProgress = false
   if (loggingIn.value) void commands.cancelLogin().catch(console.error)
 })
@@ -47,6 +58,7 @@ onBeforeUnmount(() => {
 // 失活即取消（与旧弹窗关闭时行为一致）；返回本页后再点一次即可。
 let cancelledByLeave = false
 onDeactivated(() => {
+  loginGeneration++
   store.manualLoginInProgress = false
   if (loggingIn.value) {
     loggingIn.value = false
@@ -82,13 +94,19 @@ async function onLogin() {
     return
   }
 
+  const generation = ++loginGeneration
   loggingIn.value = true
   store.manualLoginInProgress = true
   cancelledByLeave = false
   try {
     const result = await commands.login(cleanUsername, cleanPassword)
     // 用户已离开本页（登录被取消）时不要静默落到后台完成并改写配置
-    if (disposed || cancelledByLeave || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch))
+    if (
+      disposed
+      || cancelledByLeave
+      || generation !== loginGeneration
+      || (result.status === 'ok' && result.data.sessionEpoch < store.sessionEpoch)
+    )
       return
     if (result.status === 'error') {
       console.error(result.error)
@@ -110,11 +128,15 @@ async function onLogin() {
       store.config.autoLogin = false
     }
   } catch (error) {
-    console.error(error)
-    message.error(`登录失败：${getErrorMessage(error)}`)
+    if (generation === loginGeneration && !disposed) {
+      console.error(error)
+      message.error(`登录失败：${getErrorMessage(error)}`)
+    }
   } finally {
-    loggingIn.value = false
-    store.manualLoginInProgress = false
+    if (generation === loginGeneration) {
+      loggingIn.value = false
+      store.manualLoginInProgress = false
+    }
   }
 }
 
@@ -135,6 +157,7 @@ async function handleLogout() {
     })
     if (result.status === 'error') message.error(result.error.err_message)
     else {
+      showLoginForm.value = false
       username.value = ''
       password.value = ''
       remember.value = false
@@ -148,7 +171,11 @@ async function handleLogout() {
 }
 
 async function cancelLogin() {
-  await commands.cancelLogin()
+  try {
+    await commands.cancelLogin()
+  } catch (error) {
+    message.error(`取消登录失败：${getErrorMessage(error)}`)
+  }
 }
 
 function openSettings() {
@@ -157,6 +184,11 @@ function openSettings() {
 
 async function clearUsernameAndPasswordInConfig() {
   if (store.config === undefined) return
+  const previous = {
+    username: store.config.username,
+    password: store.config.password,
+    autoLogin: store.config.autoLogin,
+  }
   store.config.username = ''
   store.config.password = ''
   store.config.autoLogin = false
@@ -164,6 +196,9 @@ async function clearUsernameAndPasswordInConfig() {
     await store.saveConfigNow()
     message.success('已清除配置文件中的记住密码')
   } catch (error) {
+    store.config.username = previous.username
+    store.config.password = previous.password
+    store.config.autoLogin = previous.autoLogin
     message.error(`清除记住密码未能保存：${getErrorMessage(error)}`)
   }
 }

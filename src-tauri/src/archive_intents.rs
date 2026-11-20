@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context};
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -30,6 +30,12 @@ struct IntentFile {
     entries: IndexMap<i64, CbzMode>,
 }
 
+fn trim_ids(ids: &mut IndexSet<i64>) {
+    while ids.len() > MAX_INTENTS {
+        ids.shift_remove_index(0);
+    }
+}
+
 fn trim_entries(entries: &mut IndexMap<i64, CbzMode>) {
     while entries.len() > MAX_INTENTS {
         entries.shift_remove_index(0);
@@ -37,6 +43,10 @@ fn trim_entries(entries: &mut IndexMap<i64, CbzMode>) {
     for mode in entries.values_mut() {
         *mode = CbzMode::Merge;
     }
+}
+
+fn to_entries_map(ids: &IndexSet<i64>) -> IndexMap<i64, CbzMode> {
+    ids.iter().map(|id| (*id, CbzMode::Merge)).collect()
 }
 
 fn parse_intent_value(value: serde_json::Value) -> anyhow::Result<IndexMap<i64, CbzMode>> {
@@ -86,14 +96,14 @@ pub(crate) fn restore_intents_file(
     }
 }
 
-/// 记录每本漫画期望的 CBZ 归档方式（下载完成后的自动整合行为）。
+/// 记录每本漫画期望的 CBZ 归档意图（下载完成后的自动整本合并）。
 ///
-/// 与下载队列相互独立：队列负责任务级恢复，这里只负责「这本漫画下载完后怎么整理」。
+/// 与下载队列相互独立：队列负责任务级恢复，这里只负责「这本漫画下载完后是否需要整理」。
 /// 整合成功后移除对应记录；移除保存失败时保留内存状态并通知后台错误。
 pub struct ArchiveIntentStore {
     path: PathBuf,
     app: Option<AppHandle>,
-    state: Mutex<IndexMap<i64, CbzMode>>,
+    state: Mutex<IndexSet<i64>>,
 }
 
 impl ArchiveIntentStore {
@@ -111,14 +121,14 @@ impl ArchiveIntentStore {
         if let Some(notice) = state_recovery::recover_file_backup(&path)? {
             notices.push(notice);
         }
-        let mut entries = IndexMap::new();
+        let mut ids = IndexSet::new();
         if path.exists() {
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     let problem = match serde_json::from_slice::<IntentFile>(&bytes) {
-                        Ok(mut file) if file.version == 1 => {
-                            trim_entries(&mut file.entries);
-                            entries = file.entries;
+                        Ok(file) if file.version == 1 => {
+                            ids = file.entries.into_keys().collect();
+                            trim_ids(&mut ids);
                             None
                         }
                         Ok(file) => Some(format!(
@@ -148,14 +158,17 @@ impl ArchiveIntentStore {
             Self {
                 path,
                 app,
-                state: Mutex::new(entries),
+                state: Mutex::new(ids),
             },
             notices,
         ))
     }
 
     pub fn get(&self, comic_id: i64) -> Option<CbzMode> {
-        self.state.lock().get(&comic_id).copied()
+        self.state
+            .lock()
+            .contains(&comic_id)
+            .then_some(CbzMode::Merge)
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -164,14 +177,15 @@ impl ArchiveIntentStore {
 
     /// 供备份读取当前意图的稳定快照。
     pub fn export_entries(&self) -> IndexMap<i64, CbzMode> {
-        self.state.lock().clone()
+        to_entries_map(&self.state.lock())
     }
 
     /// 整批替换：先成功落盘，再替换内存；失败时内存保持原样。
-    pub fn replace_entries(&self, mut entries: IndexMap<i64, CbzMode>) -> anyhow::Result<()> {
-        trim_entries(&mut entries);
-        write_intents_file(&self.path, &entries)?;
-        *self.state.lock() = entries;
+    pub fn replace_entries(&self, entries: IndexMap<i64, CbzMode>) -> anyhow::Result<()> {
+        let mut ids: IndexSet<i64> = entries.into_keys().collect();
+        trim_ids(&mut ids);
+        write_intents_file(&self.path, &to_entries_map(&ids))?;
+        *self.state.lock() = ids;
         Ok(())
     }
 
@@ -180,8 +194,10 @@ impl ArchiveIntentStore {
         match value {
             Some(value) => {
                 let entries = parse_intent_value(value)?;
-                write_intents_file(&self.path, &entries)?;
-                *self.state.lock() = entries;
+                let mut ids: IndexSet<i64> = entries.into_keys().collect();
+                trim_ids(&mut ids);
+                write_intents_file(&self.path, &to_entries_map(&ids))?;
+                *self.state.lock() = ids;
             }
             None => {
                 remove_intents_file(&self.path)?;
@@ -206,7 +222,7 @@ impl ArchiveIntentStore {
         self.state
             .lock()
             .iter()
-            .map(|(comic_id, mode)| (*comic_id, *mode))
+            .map(|comic_id| (*comic_id, CbzMode::Merge))
             .collect()
     }
 
@@ -214,40 +230,36 @@ impl ArchiveIntentStore {
     pub fn remove(&self, comic_id: i64) {
         let mut state = self.state.lock();
         let previous = state.clone();
-        if state.shift_remove(&comic_id).is_some() {
+        if state.shift_remove(&comic_id) {
             let _ = self.save_or_restore(state, previous);
         }
     }
 
-    pub fn set(&self, comic_id: i64, mode: CbzMode) -> anyhow::Result<()> {
+    pub fn set(&self, comic_id: i64, _mode: CbzMode) -> anyhow::Result<()> {
         let mut state = self.state.lock();
         let previous = state.clone();
         state.shift_remove(&comic_id);
-        state.insert(comic_id, mode);
-        while state.len() > MAX_INTENTS {
-            state.shift_remove_index(0);
-        }
+        state.insert(comic_id);
+        trim_ids(&mut state);
         self.save_or_restore(state, previous)
     }
 
-    /// 返回本次是否新增；已有用户设置保持不变。
-    pub fn set_if_absent(&self, comic_id: i64, mode: CbzMode) -> anyhow::Result<bool> {
+    /// 返回本次是否新增；已有意图保持不变。
+    pub fn set_if_absent(&self, comic_id: i64, _mode: CbzMode) -> anyhow::Result<bool> {
         let mut state = self.state.lock();
-        if state.contains_key(&comic_id) {
+        if state.contains(&comic_id) {
             return Ok(false);
         }
         let previous = state.clone();
-        state.insert(comic_id, mode);
-        while state.len() > MAX_INTENTS {
-            state.shift_remove_index(0);
-        }
+        state.insert(comic_id);
+        trim_ids(&mut state);
         self.save_or_restore(state, previous).map(|()| true)
     }
 
     fn save_or_restore(
         &self,
-        mut state: parking_lot::MutexGuard<'_, IndexMap<i64, CbzMode>>,
-        previous: IndexMap<i64, CbzMode>,
+        mut state: parking_lot::MutexGuard<'_, IndexSet<i64>>,
+        previous: IndexSet<i64>,
     ) -> anyhow::Result<()> {
         let result = self.save(&state);
         let app = self.app.clone();
@@ -267,8 +279,8 @@ impl ArchiveIntentStore {
         }
     }
 
-    fn save(&self, state: &IndexMap<i64, CbzMode>) -> anyhow::Result<()> {
-        write_intents_file(&self.path, state)
+    fn save(&self, state: &IndexSet<i64>) -> anyhow::Result<()> {
+        write_intents_file(&self.path, &to_entries_map(state))
     }
 }
 
@@ -284,8 +296,8 @@ mod tests {
         {
             let store = ArchiveIntentStore::load(path.clone()).unwrap();
             store.set(101, CbzMode::Merge).unwrap();
-            store.set(102, CbzMode::PerChapter).unwrap();
-            store.set(101, CbzMode::PerChapter).unwrap();
+            store.set(102, CbzMode::Merge).unwrap();
+            store.set(101, CbzMode::Merge).unwrap();
         }
         let reloaded = ArchiveIntentStore::load(path.clone()).unwrap();
         assert_eq!(reloaded.get(101), Some(CbzMode::Merge));
@@ -307,7 +319,7 @@ mod tests {
             &path,
             serde_json::to_vec(&serde_json::json!({
                 "version": 1,
-                "entries": {"102": CbzMode::PerChapter},
+                "entries": {"102": "perChapter"},
             }))
             .unwrap(),
         )

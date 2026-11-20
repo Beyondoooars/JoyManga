@@ -132,12 +132,8 @@ impl ComicInSearch {
     }
 
     pub fn update_fields(&mut self, id_to_dir_map: &HashMap<i64, PathBuf>) {
-        self.comic_download_dir = PathBuf::new();
-        self.is_downloaded = false;
-        if let Some(comic_download_dir) = id_to_dir_map.get(&self.id) {
-            self.comic_download_dir = comic_download_dir.clone();
-            self.is_downloaded = true;
-        }
+        (self.is_downloaded, self.comic_download_dir) =
+            super::resolve_download_status(self.id, id_to_dir_map);
     }
 }
 

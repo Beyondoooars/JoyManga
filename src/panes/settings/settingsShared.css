@@ -1,0 +1,145 @@
+/* 分组卡片：同组设置共享一块白底，靠间距分组而不是靠分隔线 */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 12px;
+  padding: 4px;
+  border: 1px solid var(--jm-line);
+  border-radius: var(--jm-r-lg);
+  background: var(--jm-surface);
+}
+
+.nav-row {
+  display: flex;
+  width: 100%;
+  min-height: 56px;
+  align-items: center;
+  gap: 11px;
+  padding: 10px 12px;
+  color: var(--jm-text);
+  border: 0;
+  border-radius: var(--jm-r-md);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.nav-row:hover,
+.nav-row:active {
+  background: var(--jm-sunken);
+}
+
+.nav-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.nav-row.inner {
+  padding-left: 12px;
+}
+
+.nav-row > svg {
+  flex-shrink: 0;
+  color: var(--jm-text-4);
+}
+
+.nav-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.nav-copy strong {
+  color: var(--jm-text);
+  font-size: var(--jm-fs-body);
+  font-weight: 650;
+}
+
+.nav-copy span {
+  overflow: hidden;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chevron {
+  flex: 0 0 auto;
+  transition: transform 160ms ease;
+}
+
+.chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.field {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.field-label {
+  color: var(--jm-text-2);
+  font-size: var(--jm-fs-sm);
+  font-weight: 600;
+}
+
+.field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 8px 10px;
+}
+
+.row {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  color: var(--jm-text);
+  font-size: var(--jm-fs-body);
+}
+
+.row-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.row-copy strong {
+  font-size: var(--jm-fs-body);
+  font-weight: 600;
+}
+
+.row-copy span {
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+}
+
+.row-value {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+  line-height: 1.5;
+  text-align: right;
+  text-overflow: ellipsis;
+}
+
+.note {
+  margin: 4px 12px 8px;
+  color: var(--jm-text-3);
+  font-size: var(--jm-fs-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}

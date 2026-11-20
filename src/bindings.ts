@@ -77,9 +77,6 @@ export const commands = {
     typedError<null, CommandError>(__TAURI_INVOKE('download_comic', { aid, cbzMode })),
   downloadAllFavorites: (folderId: number | null) =>
     typedError<null, CommandError>(__TAURI_INVOKE('download_all_favorites', { folderId })),
-  showPathInFileManager: (path: string) =>
-    typedError<null, CommandError>(__TAURI_INVOKE('show_path_in_file_manager', { path })),
-  syncFavoriteFolder: () => typedError<null, CommandError>(__TAURI_INVOKE('sync_favorite_folder')),
   getDownloadedComics: () => __TAURI_INVOKE<Comic[]>('get_downloaded_comics'),
   /**
    *  检查本地书库当前是否真的读到了内容，供书库页在「空列表」时给出原因。
@@ -90,28 +87,20 @@ export const commands = {
    *  这两种情况此前都只呈现为「暂无漫画」，用户无从判断。
    */
   diagnoseLibrary: () => __TAURI_INVOKE<LibraryDiagnosis | null>('diagnose_library'),
-  deleteDownloadedComic: (comic: Comic) =>
-    typedError<null, CommandError>(__TAURI_INVOKE('delete_downloaded_comic', { comic })),
-  exportCbz: (comic: Comic) => typedError<null, CommandError>(__TAURI_INVOKE('export_cbz', { comic })),
-  exportMergedCbz: (comic: Comic) => typedError<null, CommandError>(__TAURI_INVOKE('export_merged_cbz', { comic })),
   getLogsDirSize: () => typedError<number, CommandError>(__TAURI_INVOKE('get_logs_dir_size')),
   exportLogs: (frontendLogs: string[] | null) =>
     typedError<ExportLogsResult, CommandError>(__TAURI_INVOKE('export_logs', { frontendLogs })),
-  getSyncedComic: (comic: Comic) => typedError<Comic, CommandError>(__TAURI_INVOKE('get_synced_comic', { comic })),
-  getSyncedComicInFavorite: (comic: ComicInFavorite) =>
-    typedError<ComicInFavorite, CommandError>(__TAURI_INVOKE('get_synced_comic_in_favorite', { comic })),
-  getSyncedComicInSearch: (comic: ComicInSearch) =>
-    typedError<ComicInSearch, CommandError>(__TAURI_INVOKE('get_synced_comic_in_search', { comic })),
-  getSyncedComicInWeekly: (comic: ComicInWeekly) =>
-    typedError<ComicInWeekly, CommandError>(__TAURI_INVOKE('get_synced_comic_in_weekly', { comic })),
   listDirectoryEntries: (path: string) =>
     typedError<DirectoryEntry[], CommandError>(__TAURI_INVOKE('list_directory_entries', { path })),
   validateDownloadDir: (path: string) =>
     typedError<ValidatedDownloadDir, CommandError>(__TAURI_INVOKE('validate_download_dir', { path })),
-  testDomainLatency: (domain: string) =>
-    typedError<number, CommandError>(__TAURI_INVOKE('test_domain_latency', { domain })),
   getChapterReaderData: (comicId: number, chapterId: number) =>
     typedError<ChapterReaderData, CommandError>(__TAURI_INVOKE('get_chapter_reader_data', { comicId, chapterId })),
+  /**
+   *  查询最近一次 `jmimg://` 读取失败的可读原因，供阅读器在 `<img>` `@error` 时区分
+   *  「图片尺寸或体积超限」与「文件损坏」。纯内存查询，不重新读取磁盘。
+   */
+  getReaderImageError: (filePath: string) => __TAURI_INVOKE<string | null>('get_reader_image_error', { filePath }),
   /**
    *  Android 侧把当前网络是否计费推给后端。
    *  前端在启动时与网络变化时各调一次，后端据此判断"仅 Wi-Fi 下载"。
@@ -144,9 +133,7 @@ export const events = {
   ),
   downloadSpeedEvent: makeEvent<DownloadSpeedEvent, DownloadSpeedEvent>('download-speed-event'),
   downloadTaskEvent: makeEvent<DownloadTaskEvent, DownloadTaskEvent>('download-task-event'),
-  exportCbzEvent: makeEvent<ExportCbzEvent, ExportCbzEvent>('export-cbz-event'),
   favoriteChangedEvent: makeEvent<FavoriteChangedEvent, FavoriteChangedEvent>('favorite-changed-event'),
-  logEvent: makeEvent<LogEvent, LogEvent>('log-event'),
   sessionChangedEvent: makeEvent<SessionChangedEvent, SessionChangedEvent>('session-changed-event'),
 }
 
@@ -196,11 +183,11 @@ export type CategorySubRespData = {
   title: string | null
 }
 
-/**  下载完成后的 CBZ 归档方式。 */
+/**  下载完成后的 CBZ 归档方式（永久收敛为整本自动合并）。 */
 export type CbzMode =
   /**  合并为该漫画已下载的全部话，产出单个以本子名命名的 CBZ（默认）。 */
   | 'merge'
-  /**  逐话保留：每话一个 CBZ，以「本子名 - 序号 - 话名」命名。 */
+  /**  合并为该漫画已下载的全部话，产出单个以本子名命名的 CBZ（默认）。 */
   | 'perChapter'
 
 export type ChapterInfo = {
@@ -379,7 +366,6 @@ export type Config = {
   username: string
   password: string
   downloadDir: string
-  exportDir: string
   proxyMode: ProxyMode
   proxyHost: string
   proxyPort: number
@@ -531,36 +517,6 @@ export type DownloadTaskSnapshot = {
 
 export type DownloadTaskState = 'Pending' | 'Downloading' | 'Paused' | 'Cancelled' | 'Completed' | 'Failed'
 
-export type ExportCbzEvent =
-  | {
-      event: 'Start'
-      data: {
-        uuid: string
-        comicTitle: string
-        total: number
-      }
-    }
-  | {
-      event: 'Progress'
-      data: {
-        uuid: string
-        current: number
-      }
-    }
-  | {
-      event: 'Error'
-      data: {
-        uuid: string
-      }
-    }
-  | {
-      event: 'End'
-      data: {
-        uuid: string
-        chapterExportDir: string
-      }
-    }
-
 export type ExportLogsResult = {
   success: boolean
   filePath: string
@@ -693,21 +649,12 @@ export type LibraryDiagnosis = {
   skipped: string[]
 }
 
-export type LogEvent = {
-  timestamp: string
-  level: LogLevel
-  fields: { [key in string]: Value }
-  target: string
-  filename: string
-  line_number: number
-}
-
 /**
  *  日志等级。
  *
- *  `Trace`~`Error` 的 serde 字符串与 tracing JSON 输出的 `level` 字段一致，
- *  既用于 `LogEvent` 的等级反序列化，也用于设置页的文件日志收集等级；
- *  `Off` 只在收集等级场景出现（表示不落盘），默认收集 `Info` 及以上。
+ *  `Trace`~`Error` 的 serde 字符串与 tracing 日志级别一致，
+ *  用于设置页的文件日志收集等级；
+ *  `Off` 表示不写入文件日志（仅保留近期内存轻量缓冲），默认收集 `Info` 及以上。
  */
 export type LogLevel =
   | 'TRACE'
@@ -715,7 +662,7 @@ export type LogLevel =
   | 'INFO'
   | 'WARN'
   | 'ERROR'
-  /**  不写入文件日志（仍输出到前端事件层）。仅用于设置页的收集等级。 */
+  /**  不写入文件日志（仍保留内存近期轻量缓冲）。仅用于设置页的收集等级。 */
   | 'OFF'
 
 export type LoginRespData = {

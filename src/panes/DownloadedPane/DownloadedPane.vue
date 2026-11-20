@@ -1,6 +1,6 @@
-<script setup lang="tsx">
+<script setup lang="ts">
 import { type Comic, type LibraryDiagnosis, commands } from '../../bindings.ts'
-import { computed, onActivated, onDeactivated, onMounted, onScopeDispose, ref, watch, watchEffect } from 'vue'
+import { computed, h, onActivated, onDeactivated, onMounted, onScopeDispose, ref, watch, watchEffect } from 'vue'
 import DownloadedComicCard from './components/DownloadedComicCard.vue'
 import { useStore } from '../../store.ts'
 import { NCheckbox, useDialog, useMessage } from 'naive-ui'
@@ -21,6 +21,7 @@ import { isAndroid } from '../../composables/useIsMobile.ts'
 import { filterLibrary } from '../../utils/librarySearch.ts'
 import { libraryApi } from '../../libraryApi.ts'
 import { openDialogWithBack } from '../../composables/useDialogBack.ts'
+import { useBackHandler } from '../../composables/useAndroidBack.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -107,6 +108,31 @@ function toggleCheck(comic: Comic) {
 function clearSelection() {
   checkedIds.value.clear()
 }
+
+useBackHandler(() => {
+  if (!libraryActive || store.currentTabName !== 'downloaded' || store.downloadedSubTab !== 'library') {
+    return false
+  }
+  if (filterSheetOpen.value) {
+    filterSheetOpen.value = false
+    return true
+  }
+  if (selectionMode.value) {
+    clearSelection()
+    return true
+  }
+  return false
+}, 25)
+
+watch(
+  () => store.downloadedSubTab,
+  (subTab) => {
+    if (subTab !== 'library') {
+      filterSheetOpen.value = false
+      clearSelection()
+    }
+  },
+)
 
 async function importComics(directory = false) {
   if (importing.value) return
@@ -301,15 +327,21 @@ function confirmDeleteComics(selected: Comic[]) {
   const deleteFiles = ref(false)
   void openDialogWithBack(dialog, {
     title: `删除 ${comics.length} 本漫画`,
-    content: () => (
-      <div>
-        <p>仅删除库存记录，阅读进度与书签会同步清理。</p>
-        <NCheckbox checked={deleteFiles.value} onUpdate:checked={(value: boolean) => { deleteFiles.value = value }}>
-          同时删除本地文件
-        </NCheckbox>
-        {deleteFiles.value && <p style="color: #DE3B3B">本地文件删除后无法恢复</p>}
-      </div>
-    ),
+    content: () =>
+      h('div', [
+        h('p', '仅删除库存记录，阅读进度与书签会同步清理。'),
+        h(
+          NCheckbox,
+          {
+            checked: deleteFiles.value,
+            'onUpdate:checked': (value: boolean) => {
+              deleteFiles.value = value
+            },
+          },
+          { default: () => '同时删除本地文件' },
+        ),
+        deleteFiles.value ? h('p', { style: 'color: #DE3B3B' }, '本地文件删除后无法恢复') : null,
+      ]),
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -319,6 +351,7 @@ function confirmDeleteComics(selected: Comic[]) {
       for (const comic of comics) {
         try {
           await libraryApi.removeComic(comic.id, deleteFiles.value)
+          store.markComicRemoved(comic.id)
           if (store.activeReaderTarget?.comicId === comic.id) store.closeReader()
           store.forgetComicReadingState(comic.id)
         } catch (error) {
@@ -500,7 +533,7 @@ const pendingCount = computed(() => {
 
       <div class="jm-scroll library-scroll">
         <!-- 空状态（带诊断） -->
-        <div v-if="loading && currentPageComics.length === 0" class="library-grid is-loading">
+        <div v-if="loading && currentPageComics.length === 0" class="library-grid">
           <div v-for="n in 6" :key="n" class="skeleton-card">
             <div class="jm-skeleton skeleton-cover"></div>
             <div class="jm-skeleton skeleton-line"></div>
@@ -794,11 +827,6 @@ const pendingCount = computed(() => {
   background: var(--jm-surface);
 }
 
-.search-ico {
-  flex: 0 0 auto;
-  color: var(--jm-text-3);
-}
-
 .search-input {
   min-width: 0;
   flex: 1;
@@ -959,18 +987,6 @@ const pendingCount = computed(() => {
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-}
-
-.sel-icon.is-brand {
-  color: var(--jm-brand);
-  border-color: rgba(251, 114, 153, 0.3);
-  background: var(--jm-brand-soft);
-}
-
-.sel-icon.is-accent {
-  color: var(--jm-accent);
-  border-color: rgba(0, 174, 236, 0.26);
-  background: var(--jm-accent-soft);
 }
 
 .sel-icon.is-danger {

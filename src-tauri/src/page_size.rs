@@ -267,60 +267,39 @@ pub fn resolve_archive_sizes<R: Read + Seek>(
 pub(crate) mod sizes_cache {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::OnceLock;
 
-    use parking_lot::RwLock;
     use serde::{Deserialize, Serialize};
 
+    use crate::disk_cache::DiskCache;
     use crate::types::PageSize;
-
-    static CACHE_DIR: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 
     /// 缓存文件上限（个）。每个文件约 55 字节/页，2000 个足够覆盖重度书库。
     const MAX_ENTRIES: usize = 2000;
-    /// 每写这么多次才扫一遍目录做清理（见 `write` 的持锁说明）。
+    /// 每写这么多次才扫一遍目录做清理，避免调用方持锁期间频繁扫目录。
     const PRUNE_EVERY: u32 = 64;
-    static WRITE_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-    fn slot() -> &'static RwLock<Option<PathBuf>> {
-        CACHE_DIR.get_or_init(|| RwLock::new(None))
-    }
+    // 这里不能用 atomic_fs::write：它会拿 REPLACE_LOCKS，而阅读器打开章节时可能正持有
+    // 外层替换锁，parking_lot Mutex 不可重入，同分片会死锁；普通写入即可，读失败按未命中处理。
+    static CACHE: DiskCache = DiskCache::new(MAX_ENTRIES, PRUNE_EVERY, "json", false);
 
     /// 设置缓存目录。传 `None` 或空路径可关闭缓存（测试与无配置场景）。
     pub fn set_dir(dir: Option<PathBuf>) {
-        *slot().write() = dir.filter(|path| !path.as_os_str().is_empty());
+        CACHE.set_dir(dir);
     }
 
     /// 当前缓存目录（清理缓存时整目录移除用）。
     pub fn dir() -> Option<PathBuf> {
-        slot().read().clone()
+        CACHE.dir()
     }
 
     /// 来源文件的指纹：修改时间 + 长度。取不到元数据时返回 None（不缓存）。
     pub fn source_stamp(path: &Path) -> Option<(u64, u64)> {
-        let metadata = std::fs::metadata(path).ok()?;
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_nanos() as u64);
-        Some((mtime, metadata.len()))
+        crate::disk_cache::source_stamp(path)
     }
 
-    /// FNV-1a：只用于生成缓存文件名，不承担安全职责（同 cover_cache）。
-    fn fingerprint(path: &Path, stamp: (u64, u64)) -> u64 {
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in path.to_string_lossy().as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        for value in [stamp.0, stamp.1] {
-            for byte in value.to_le_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-        hash
+    /// 纳入像素上限使放宽上限后旧的超限 `None` 缓存条目自动失效重建。
+    fn extra_salt() -> [u64; 1] {
+        [crate::image_data::MAX_IMAGE_PIXELS]
     }
 
     #[derive(Serialize, Deserialize)]
@@ -329,16 +308,11 @@ pub(crate) mod sizes_cache {
         pages: BTreeMap<String, Option<PageSize>>,
     }
 
-    fn cache_path(dir: &Path, path: &Path, stamp: (u64, u64)) -> PathBuf {
-        dir.join(format!("{:016x}.json", fingerprint(path, stamp)))
-    }
-
     pub fn read(path: &Path, stamp: (u64, u64)) -> Option<BTreeMap<String, Option<PageSize>>> {
-        let dir = slot().read().clone()?;
-        let bytes = std::fs::read(cache_path(&dir, path, stamp)).ok()?;
+        let (cache_path, bytes) = CACHE.read_raw(path, stamp, &extra_salt())?;
         let file: CacheFile = serde_json::from_slice(&bytes).ok()?;
         // 命中后轻触 mtime，让 prune 的「按最近使用」语义成立（同 cover_cache）
-        touch(&cache_path(&dir, path, stamp));
+        DiskCache::touch(&cache_path);
         // 缓存文件也可能被外部改坏；越界值与 pages.json 一样按未命中处理
         Some(
             file.pages
@@ -349,66 +323,16 @@ pub(crate) mod sizes_cache {
     }
 
     pub fn write(source: &Path, stamp: (u64, u64), pages: &BTreeMap<String, Option<PageSize>>) {
-        let Some(dir) = slot().read().clone() else {
+        if CACHE.dir().is_none() {
             return;
-        };
+        }
         let file = CacheFile {
             pages: pages.clone(),
         };
         let Ok(json) = serde_json::to_vec(&file) else {
             return;
         };
-        if std::fs::create_dir_all(&dir).is_ok() {
-            // 这里不能用 atomic_fs::write：它要拿 REPLACE_LOCK，而调用方（阅读器
-            // 打开章节）正持有那把锁，parking_lot 的 Mutex 不可重入，会直接死锁。
-            // 缓存本身可随时重建，写失败或写了一半都只影响下一次的命中率
-            //（读侧解析失败按未命中处理），普通写入足够。
-            let _ = std::fs::write(cache_path(&dir, source, stamp), &json);
-            // 调用方可能正持有替换锁，少做整目录扫描：每写若干次才清理一次，
-            // 最多多留几十个文件
-            if WRITE_COUNT
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .is_multiple_of(PRUNE_EVERY)
-            {
-                prune(&dir, MAX_ENTRIES);
-            }
-        }
-    }
-
-    /// 命中后轻触 mtime，让 prune 的「按最近使用」语义成立（同 cover_cache）。
-    fn touch(path: &Path) {
-        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
-            let _ = file.set_modified(std::time::SystemTime::now());
-        }
-    }
-    /// 只保留最近使用的 `keep` 个缓存文件。
-    fn prune(cache_dir: &Path, keep: usize) {
-        let Ok(entries) = std::fs::read_dir(cache_dir) else {
-            return;
-        };
-        let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-            })
-            .filter_map(|entry| {
-                let modified = entry.metadata().ok()?.modified().ok()?;
-                Some((entry.path(), modified))
-            })
-            .collect();
-
-        if files.len() <= keep {
-            return;
-        }
-        files.sort_by_key(|(_, modified)| *modified);
-        let excess = files.len() - keep;
-        for (path, _) in files.into_iter().take(excess) {
-            let _ = std::fs::remove_file(path);
-        }
+        CACHE.write_raw(source, stamp, &extra_salt(), &json);
     }
 }
 

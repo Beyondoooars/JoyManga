@@ -10,22 +10,24 @@ use crate::extensions::AppHandleExt;
 /// 前端在启动时与网络变化时各调一次，后端据此判断"仅 Wi-Fi 下载"。
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResult<()> {
-    let download_manager = app.get_download_manager();
-    let mut paused = 0;
-    crate::network_state::set_metered_and(metered, || {
-        if app.get_config().read().download_only_wifi {
-            paused = download_manager.pause_active_tasks_for_metered_network();
+pub async fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResult<()> {
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        let download_manager = app.get_download_manager();
+        let mut paused = 0;
+        crate::network_state::set_metered_and(metered, || {
+            if app.get_config().read().download_only_wifi {
+                paused = download_manager.pause_active_tasks_for_metered_network();
+            }
+        });
+        tracing::debug!(metered, "网络计费状态已更新");
+        if paused > 0 {
+            tracing::info!(
+                paused,
+                "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务"
+            );
         }
-    });
-    tracing::debug!(metered, "网络计费状态已更新");
-    if paused > 0 {
-        tracing::info!(
-            paused,
-            "已切换至计费网络且开启仅 Wi-Fi 下载，自动暂停在途下载任务"
-        );
-    }
+    })
+    .await;
     Ok(())
 }
 
@@ -37,17 +39,19 @@ pub fn set_network_metered(app: tauri::AppHandle, metered: bool) -> CommandResul
 /// 但旧连接池与线路健康状态同样不能跨网络复用。
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn set_network_vpn(
+pub async fn set_network_vpn(
     app: tauri::AppHandle,
     active: bool,
     network_key: Option<String>,
 ) -> CommandResult<()> {
-    if crate::network_state::set_network_snapshot(active, network_key.as_deref()) {
-        // 不记录 network_key 具体值：它可能包含系统网络标识。
-        tracing::info!(active, "网络路径已变化，重建 HTTP 客户端并取消在途登录");
-        app.get_jm_client().cancel_login_for_network_change();
-        app.get_jm_client().reload_client_for_network_change(true);
-    }
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        if crate::network_state::set_network_snapshot(active, network_key.as_deref()) {
+            // 不记录 network_key 具体值：它可能包含系统网络标识。
+            tracing::info!(active, "网络路径已变化，重建 HTTP 客户端并取消在途登录");
+            app.get_jm_client().cancel_login_for_network_change();
+            app.get_jm_client().reload_client_for_network_change(true);
+        }
+    })
+    .await;
     Ok(())
 }

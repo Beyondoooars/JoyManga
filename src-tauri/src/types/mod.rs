@@ -37,6 +37,16 @@ pub use search_sort::*;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+pub(super) fn resolve_download_status(
+    id: i64,
+    id_to_dir_map: &std::collections::HashMap<i64, std::path::PathBuf>,
+) -> (bool, std::path::PathBuf) {
+    match id_to_dir_map.get(&id) {
+        Some(dir) => (true, dir.clone()),
+        None => (false, std::path::PathBuf::new()),
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct Category {
     pub id: Option<String>,

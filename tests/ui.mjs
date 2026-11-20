@@ -3,8 +3,28 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from '../src/App.vue'
 import { useStore } from '../src/store.ts'
-import 'virtual:uno.css'
 import '../src/styles.css'
+
+// 离线夹具不联网请求 GitHub Release API，避免触发 CSP connect-src 报错。
+const originalFetch = window.fetch.bind(window)
+window.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input?.url ?? ''
+  if (url.startsWith('https://api.github.com/repos/Beyondoooars/JoyManga/releases/latest')) {
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          tag_name: 'v0.3.18',
+          name: 'v0.3.18',
+          body: '',
+          html_url: 'https://github.com/Beyondoooars/JoyManga/releases/tag/v0.3.18',
+          assets: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+  }
+  return originalFetch(input, init)
+}
 
 // 在线封面由 Service Worker 就地生成（见 tests/mock-sw.js）：测试页没有真实图床，
 // 不拦截的话发现页/收藏页的封面墙只会显示占位图标，无法核对版面。
@@ -12,11 +32,15 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/tests/mock-sw.js').catch((error) => console.error('封面 mock 注册失败', error))
 }
 
-const config = {
+const defaultConfig = {
+  revision: 1,
+  schemaVersion: 1,
+  apiDomainMigrationPending: false,
+  autoLogin: false,
+  androidStorageInitialized: true,
   username: '',
   password: '',
   downloadDir: 'D:/模拟下载',
-  exportDir: 'D:/模拟导出',
   proxyMode: 'NoProxy',
   proxyHost: '127.0.0.1',
   proxyPort: 7890,
@@ -26,7 +50,15 @@ const config = {
   customApiDomain: 'fixture.invalid',
   imageDomainMode: 'Custom',
   customImageDomain: 'fixture.invalid',
+  defaultCbzMode: 'merge',
+  readingDirection: 'RightToLeft',
+  readingMode: 'Paginated',
+  keepScreenOn: true,
+  volumeKeyPaging: false,
+  downloadOnlyWifi: false,
+  logLevel: 'INFO',
 }
+const config = structuredClone(defaultConfig)
 try {
   Object.assign(config, JSON.parse(sessionStorage.getItem('jm-ui-fixture-config') ?? '{}'))
 } catch {
@@ -171,25 +203,67 @@ const listeners = new Map()
 // 与 ui.html 中的 Tauri 事件表同构：event -> eventId -> { handlerId }，供 unregisterListener 清理。
 const eventListeners = (window.__TAURI_EVENT_LISTENERS__ ??= Object.create(null))
 let listenerId = 0
-function emitTask(snapshot) {
-  for (const listener of Object.values(eventListeners['download-task-event'] ?? {})) {
+function emitEvent(eventName, payload) {
+  for (const listener of Object.values(eventListeners[eventName] ?? {})) {
     if (window.__TAURI_INTERNALS__.callbacks.has(listener.handlerId)) {
       window.__TAURI_INTERNALS__.runCallback(listener.handlerId, {
-        event: 'download-task-event',
+        event: eventName,
         id: 0,
-        payload: { event: 'Create', data: snapshot },
+        payload,
       })
     }
   }
 }
+const networkState = { vpn: false, metered: false, networkKey: 'wifi:mock' }
 // 控制台可调用 __uiFixtureSetNetwork({ vpn: true }) 模拟原生推送的 VPN/计费网络事件。
 window.__uiFixtureSetNetwork = ({ vpn, metered, networkKey } = {}) => {
+  if (typeof networkKey === 'string') networkState.networkKey = networkKey
   if (typeof metered === 'boolean') {
+    networkState.metered = metered
     window.dispatchEvent(new CustomEvent('jm-network-metered', { detail: metered }))
   }
   if (typeof vpn === 'boolean') {
-    const detail = typeof networkKey === 'string' ? { active: vpn, networkKey } : vpn
-    window.dispatchEvent(new CustomEvent('jm-network-vpn', { detail }))
+    networkState.vpn = vpn
+    window.dispatchEvent(new CustomEvent('jm-network-vpn', { detail: { active: vpn, networkKey: networkState.networkKey } }))
+  }
+}
+if (!window.JmAndroid) {
+  window.JmAndroid = {
+    libraryPath: () => config.downloadDir,
+    pickDocuments: (requestId, mode) => {
+      const paths =
+        mode === 'directory'
+          ? [config.downloadDir]
+          : mode === 'backup'
+            ? ['D:/模拟原文件/joymanga-backup.json']
+            : ['D:/模拟原文件/旅行.cbz']
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('jm-mobile-result', { detail: { requestId, paths } }))
+      }, 0)
+    },
+    discardImports: () => {},
+    exportDocuments: (requestId) => {
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('jm-mobile-result', { detail: { requestId, exported: 1 } }))
+      }, 0)
+    },
+    downloadStatus: () => {},
+    exitApp: () => {},
+    setKeepScreenOn: () => {},
+    setImmersiveMode: () => {},
+    setVolumeKeyPaging: () => {},
+    downloadsPath: () => config.downloadDir,
+    hasAllFilesAccess: () => true,
+    supportsPublicStorage: () => true,
+    canWritePublicDownloads: () => true,
+    isVpnActive: () => networkState.vpn,
+    isMetered: () => networkState.metered,
+    networkKey: () => networkState.networkKey,
+    networkSnapshot: () => JSON.stringify({ active: networkState.vpn, metered: networkState.metered, networkKey: networkState.networkKey }),
+    requestAllFilesAccess: () => {},
+    downloadAndInstallApk: () => {},
+    updateDownloadState: () => {},
+    notifyOpenFileReady: () => {},
   }
 }
 window.__uiFixtureInvoke = async (command, args) => {
@@ -212,8 +286,14 @@ window.__uiFixtureInvoke = async (command, args) => {
     }
     return removed
   }
-  if (command === 'plugin:app|version') return '0.2.1'
+  if (command === 'plugin:app|version') return '0.3.18'
   if (command === 'get_config') return structuredClone(config)
+  if (command === 'initialize_android_storage') {
+    config.downloadDir = args.libraryDir
+    config.androidStorageInitialized = true
+    sessionStorage.setItem('jm-ui-fixture-config', JSON.stringify(config))
+    return structuredClone(config)
+  }
   if (command === 'get_startup_notices') return []
   // 目录切换只在内存中返回规范路径，不创建或读写真实目录。
   if (command === 'list_directory_entries') return []
@@ -224,8 +304,12 @@ window.__uiFixtureInvoke = async (command, args) => {
   // 「我的」与签到卡需要这些数据才能渲染出已登录形态
   if (command === 'get_daily_check_in') return fixtureCheckIn
   if (command === 'daily_check_in') return { justSigned: false, message: '今日已签到', state: fixtureCheckIn }
-  if (command === 'logout') return null
-  if (command === 'get_api_domain_presets') return [{ mode: 'Official', label: '官方', domain: 'api.fixture.invalid' }]
+  if (command === 'cancel_login' || command === 'logout') return null
+  if (command === 'get_api_domain_presets')
+    return [
+      { mode: 'Domain1', label: '线路 1', domain: 'api.fixture.invalid' },
+      { mode: 'Domain2', label: '线路 2', domain: 'api2.fixture.invalid' },
+    ]
   if (command === 'get_image_domain_presets')
     return [
       { mode: 'Domain1', label: '官方', domain: 'img.fixture.invalid' },
@@ -233,8 +317,29 @@ window.__uiFixtureInvoke = async (command, args) => {
     ]
   // 这些命令在 bindings 里被包成 Result，IPC 返回值就是 data 本身
   if (command === 'get_api_domain_status') return { label: '域名', state: 'Passed', elapsedMs: 12, message: '线路正常' }
+  if (command === 'check_network')
+    return {
+      api: { label: '接口线路', state: 'Passed', elapsedMs: 18, message: '接口连通正常（模拟）' },
+      image: { label: '图片线路', state: 'Passed', elapsedMs: 24, message: '图片下载正常（模拟）' },
+      domain: { label: '域名解析', state: 'Passed', elapsedMs: 9, message: '域名状态正常（模拟）' },
+    }
+  if (command === 'set_network_metered' || command === 'set_network_vpn' || command === 'cancel_image_speed_test')
+    return null
   if (command === 'get_logs_dir_size') return 0
-  if (command === 'get_logs_dir_size') return 0
+  if (command === 'clear_logs' || command === 'clear_cache') return null
+  if (command === 'backup_app_data') return `${config.downloadDir}/joymanga-backup-mock.json`
+  if (command === 'restore_app_data') return { config: structuredClone(config), readingState: null }
+  if (command === 'reset_app_state') {
+    Object.assign(config, structuredClone(defaultConfig), { revision: ++revision })
+    sessionStorage.setItem('jm-ui-fixture-config', JSON.stringify(config))
+    return structuredClone(config)
+  }
+  if (command === 'export_logs')
+    return {
+      success: true,
+      filePath: `${config.downloadDir}/logs/joymanga-diag-mock.zip`,
+      message: '诊断包已导出（模拟）',
+    }
   if (command === 'test_image_download_speed')
     return {
       sampleRequests: 4,
@@ -268,6 +373,7 @@ window.__uiFixtureInvoke = async (command, args) => {
   if (command === 'get_download_tasks') return structuredClone(tasks)
   if (command === 'save_config') {
     Object.assign(config, structuredClone(args.config))
+    config.revision = (config.revision ?? 0) + 1
     sessionStorage.setItem('jm-ui-fixture-config', JSON.stringify(config))
     // 真实命令返回保存后的配置；前端 applyConfig 依赖它同步权威版本。
     return structuredClone(config)
@@ -306,7 +412,6 @@ window.__uiFixtureInvoke = async (command, args) => {
     sessionStorage.setItem('jm-ui-fixture-removed', JSON.stringify([...removedComics]))
     return null
   }
-  if (command === 'export_cbz' || command === 'export_merged_cbz') return null
   if (command === 'login') return { profile: fixtureProfile, sessionEpoch: 2, switchedApiDomainMode: null }
   // 简繁双变体搜索：原文命中全部条目，繁体变体只命中奇数条目（用于核对去重与语言筛选）。
   if (command === 'search_dual') {
@@ -385,6 +490,21 @@ window.__uiFixtureInvoke = async (command, args) => {
         },
       ],
     }
+  if (command === 'get_comic') {
+    const found = comics.find((comic) => comic.id === args.aid)
+    return structuredClone(found ?? { ...comics[0], id: args.aid, name: `模拟漫画 ${args.aid}` })
+  }
+  if (command === 'set_favorite_comic') {
+    const comic = comics.find((item) => item.id === args.comicId)
+    if (comic) comic.is_favorite = Boolean(args.desired)
+    const eventPayload = {
+      comicId: args.comicId,
+      isFavorite: Boolean(args.desired),
+      sessionEpoch: args.sessionEpoch,
+    }
+    emitEvent('favorite-changed-event', eventPayload)
+    return eventPayload
+  }
   if (command === 'get_chapter_reader_data')
     return {
       comicId: args.comicId,
@@ -392,12 +512,12 @@ window.__uiFixtureInvoke = async (command, args) => {
       comicTitle: comics.find((comic) => comic.id === args.comicId)?.name ?? '模拟漫画',
       chapterTitle: '第一章',
       imagePaths: ['fixture-page-1', 'fixture-page-2', 'fixture-page-3', 'fixture-page-4', 'fixture-page-5'],
+      pageSizes: Array.from({ length: 5 }, () => ({ width: 720, height: 1080 })),
       totalImages: 5,
       prevChapter: null,
       nextChapter: null,
     }
-  if (command === 'plugin:dialog|open')
-    return args.options?.directory ? 'D:/模拟原文件/图片漫画' : ['D:/模拟原文件/旅行.cbz']
+  if (command === 'get_reader_image_error') return null
   if (command === 'import_local_comics') {
     removedComics.delete(-100)
     comics.unshift({
@@ -409,10 +529,48 @@ window.__uiFixtureInvoke = async (command, args) => {
     })
     return { imported: 1, skipped: 0, errors: [] }
   }
-  if (
-    ['create_download_task', 'pause_download_task', 'resume_download_task', 'cancel_download_task'].includes(command)
-  ) {
-    const task = tasks.find((task) => task.chapterInfo.chapterId === args.chapterId)
+  if (command === 'download_comic' || command === 'download_all_favorites' || command === 'promote_comic_archive')
+    return null
+  if (command === 'create_download_task') {
+    let task = tasks.find((item) => item.chapterInfo.chapterId === args.chapterId)
+    if (task) {
+      task.state = 'Pending'
+      task.errorMessage = null
+      task.stage = 'queued'
+      task.failure = null
+      task.attempts = 1
+      task.imageFailures = []
+      task.revision = ++revision
+    } else {
+      const sourceComic = args.comic ?? comics.find((item) => item.chapterInfos.some((c) => c.chapterId === args.chapterId)) ?? comics[0]
+      const chapterInfo = sourceComic.chapterInfos?.find((c) => c.chapterId === args.chapterId) ?? {
+        chapterId: args.chapterId,
+        chapterTitle: '第一章',
+        order: 1,
+        isDownloaded: false,
+        chapterDownloadDir: null,
+      }
+      task = {
+        taskId: `task-${args.chapterId}`,
+        revision: ++revision,
+        state: 'Pending',
+        comic: structuredClone(sourceComic),
+        chapterInfo: structuredClone(chapterInfo),
+        downloadedImgCount: 0,
+        totalImgCount: 5,
+        stage: 'queued',
+        attempts: 1,
+        failure: null,
+        imageFailures: [],
+        errorMessage: null,
+      }
+      tasks.push(task)
+    }
+    emitEvent('download-task-event', { event: 'Create', data: structuredClone(task) })
+    return null
+  }
+  if (['pause_download_task', 'resume_download_task', 'cancel_download_task'].includes(command)) {
+    const task = tasks.find((item) => item.chapterInfo.chapterId === args.chapterId)
     if (!task) throw new Error('模拟任务不存在')
     task.state =
       command === 'cancel_download_task' ? 'Cancelled' : command === 'pause_download_task' ? 'Paused' : 'Pending'
@@ -422,7 +580,21 @@ window.__uiFixtureInvoke = async (command, args) => {
     task.attempts = 1
     task.imageFailures = []
     task.revision = ++revision
-    emitTask(structuredClone(task))
+    emitEvent('download-task-event', {
+      event: 'Update',
+      data: {
+        chapterId: task.chapterInfo.chapterId,
+        revision: task.revision,
+        state: task.state,
+        stage: task.stage,
+        downloadedImgCount: task.downloadedImgCount,
+        totalImgCount: task.totalImgCount,
+        failure: task.failure,
+        attempts: task.attempts,
+        imageFailures: structuredClone(task.imageFailures),
+        errorMessage: task.errorMessage,
+      },
+    })
     return null
   }
   throw new Error(`测试页面未模拟此操作：${command}`)

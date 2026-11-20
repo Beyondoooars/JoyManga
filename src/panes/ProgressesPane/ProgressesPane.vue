@@ -23,7 +23,11 @@ const tabs = computed(() => [
 const taskLoadError = computed(() => store.taskLoadError)
 const loadingTasks = computed(() => store.loadingTasks)
 async function loadTaskSnapshots() {
-  await store.reloadTasks()
+  try {
+    await store.reloadTasks()
+  } catch (error) {
+    message.error(String(error))
+  }
 }
 onMounted(() => {
   void store.initDownloadListener().catch((error) => message.error(String(error)))

@@ -4,7 +4,6 @@ use anyhow::{anyhow, ensure, Context};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_opener::OpenerExt;
 
 use crate::config::ConfigStorage;
 use crate::diagnostics;
@@ -13,76 +12,25 @@ use crate::extensions::AppHandleExt;
 use crate::logger;
 use crate::utils;
 
-#[allow(clippy::needless_pass_by_value)]
-fn reveal_path_in_file_manager(app: &AppHandle, path: &Path, err_title: &str) -> CommandResult<()> {
-    let path_str = path.to_string_lossy();
-    let _ = app.opener().open_path(path_str.as_ref(), None::<&str>);
-    let _ = err_title;
-    Ok(())
-}
-
-fn validate_reveal_path(app: &AppHandle, path: &Path) -> anyhow::Result<()> {
-    // 先校验再打开：不能对前端传入的任意路径执行 create_dir_all，
-    // 否则可以借该命令在任意可写位置创建目录树。
-    // 目录尚不存在（例如首次使用、导出目录未创建）时，校验最近的已存在祖先。
-    let target = std::fs::canonicalize(path).or_else(|_| {
-        path.ancestors()
-            .skip(1)
-            .find_map(|ancestor| std::fs::canonicalize(ancestor).ok())
-            .context(format!("要打开的路径`{}`不存在", path.display()))
-    })?;
-    let config = app.get_config();
-    let config = config.read();
-    let mut allowed_roots = vec![app.path().app_data_dir()?];
-    allowed_roots.push(config.download_dir.clone());
-    allowed_roots.push(config.export_dir.clone());
-    drop(config);
-    if let Some(storage) = app.try_state::<ConfigStorage>() {
-        allowed_roots.push(storage.base_dir().to_path_buf());
-    }
-
-    for root in &allowed_roots {
-        let _ = std::fs::create_dir_all(root);
-    }
-
-    let allowed = allowed_roots.into_iter().any(|root| {
-        std::fs::canonicalize(root).is_ok_and(|canonical_root| target.starts_with(canonical_root))
-    });
-    if !allowed {
-        return Err(anyhow!(
-            "路径`{}`不在应用数据、下载或导出目录内",
-            target.display()
-        ));
-    }
-    // 校验通过后再创建目录（仅当目标不存在时）
-    if !path.exists() {
-        std::fs::create_dir_all(path).context(format!("创建目录`{}`失败", path.display()))?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::needless_pass_by_value)]
 #[tauri::command(async)]
 #[specta::specta]
-pub fn show_path_in_file_manager(app: AppHandle, path: &str) -> CommandResult<()> {
-    validate_reveal_path(&app, Path::new(path))
-        .map_err(|err| CommandError::from("拒绝打开不受管理的路径", err))?;
-    reveal_path_in_file_manager(&app, Path::new(path), "在文件管理器中打开失败")
+pub async fn clear_logs(app: AppHandle) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || clear_logs_blocking(&app))
+        .await
+        .map_err(|err| CommandError::from("清理日志任务失败", err))?
 }
 
-#[tauri::command(async)]
-#[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn clear_logs(app: AppHandle) -> CommandResult<()> {
+fn clear_logs_blocking(app: &AppHandle) -> CommandResult<()> {
     // 两处都要清：应用数据目录里的滚动日志，以及用户导出到书库 logs 的诊断日志。
     // 导出后诊断日志就搬到了书库，只清前者会让「清理日志」看起来没生效。
     let mut failures = 0;
-    for logs_dir in all_logs_dirs(&app) {
+    for logs_dir in all_logs_dirs(app) {
         if logs_dir.exists() {
             // 只删除本应用管理的日志，用户放进日志目录的其他文件保持原样
             failures += logger::clear_managed_logs(&logs_dir);
         }
     }
+    logger::clear_recent_logs();
     if failures > 0 {
         return Err(CommandError::from(
             "清理日志失败",
@@ -115,8 +63,13 @@ fn all_logs_dirs(app: &AppHandle) -> Vec<PathBuf> {
 
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn clear_cache(app: AppHandle) -> CommandResult<()> {
+pub async fn clear_cache(app: AppHandle) -> CommandResult<()> {
+    tauri::async_runtime::spawn_blocking(move || clear_cache_blocking(&app))
+        .await
+        .map_err(|err| CommandError::from("清理缓存任务失败", err))?
+}
+
+fn clear_cache_blocking(app: &AppHandle) -> CommandResult<()> {
     let storage = app.state::<ConfigStorage>();
     let cache_dir = storage.webview_data_dir();
     clear_webview_caches(cache_dir).map_err(|err| CommandError::from("清理缓存失败", err))?;
@@ -127,7 +80,7 @@ pub fn clear_cache(app: AppHandle) -> CommandResult<()> {
     if let Some(sizes_dir) = crate::page_size::sizes_cache::dir() {
         let _ = std::fs::remove_dir_all(&sizes_dir);
     }
-    if let Some(cache) = app.try_state::<utils::DownloadedLibraryCache>() {
+    if let Some(cache) = app.try_state::<crate::library_catalog::DownloadedLibraryCache>() {
         cache.invalidate();
     }
     tracing::info!("已清空应用缓存");
@@ -174,26 +127,29 @@ fn clear_webview_caches(root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::needless_pass_by_value)]
 #[tauri::command(async)]
 #[specta::specta]
-pub fn get_logs_dir_size(app: AppHandle) -> CommandResult<u64> {
-    // 与「清理日志」覆盖同一组目录，否则导出到书库的日志不会计入占用
-    let logs_dir_size = all_logs_dirs(&app)
-        .into_iter()
-        .filter(|dir| dir.exists())
-        .flat_map(|dir| {
-            walkdir::WalkDir::new(dir)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-                .filter_map(|entry| entry.metadata().ok())
-                .map(|metadata| metadata.len())
-                .collect::<Vec<_>>()
-        })
-        .sum::<u64>();
-    tracing::debug!("获取日志目录大小成功");
-    Ok(logs_dir_size)
+pub async fn get_logs_dir_size(app: AppHandle) -> CommandResult<u64> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 与「清理日志」覆盖同一组目录，否则导出到书库的日志不会计入占用
+        let logs_dir_size = all_logs_dirs(&app)
+            .into_iter()
+            .filter(|dir| dir.exists())
+            .flat_map(|dir| {
+                walkdir::WalkDir::new(dir)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|entry| entry.file_type().is_file())
+                    .filter_map(|entry| entry.metadata().ok())
+                    .map(|metadata| metadata.len())
+                    .collect::<Vec<_>>()
+            })
+            .sum::<u64>();
+        tracing::debug!("获取日志目录大小成功");
+        Ok(logs_dir_size)
+    })
+    .await
+    .map_err(|err| CommandError::from("获取日志目录大小任务失败", err))?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -215,9 +171,17 @@ pub(crate) fn diagnostic_logs_dir(library_dir: &Path) -> PathBuf {
 
 #[tauri::command(async)]
 #[specta::specta]
-#[allow(clippy::needless_pass_by_value)]
-pub fn export_logs(
+pub async fn export_logs(
     app: AppHandle,
+    frontend_logs: Option<Vec<String>>,
+) -> CommandResult<ExportLogsResult> {
+    tauri::async_runtime::spawn_blocking(move || export_logs_blocking(&app, frontend_logs))
+        .await
+        .map_err(|err| CommandError::from("导出诊断包任务失败", err))?
+}
+
+fn export_logs_blocking(
+    app: &AppHandle,
     frontend_logs: Option<Vec<String>>,
 ) -> CommandResult<ExportLogsResult> {
     let config = app.get_config().read().clone();
@@ -234,7 +198,7 @@ pub fn export_logs(
     let log_file_name = format!("{}{timestamp}.json", crate::logger::DIAGNOSTIC_JSON_PREFIX);
     let target_file_path = target_dir.join(log_file_name);
 
-    let report = diagnostics::build_report(&app, frontend_logs)
+    let report = diagnostics::build_report(app, frontend_logs)
         .context("组装诊断包失败")
         .map_err(|err| CommandError::from("导出诊断包失败", err))?;
     let bytes = serde_json::to_vec_pretty(&report)

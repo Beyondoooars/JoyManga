@@ -20,23 +20,18 @@ test('acknowledging a persisted config does not create an automatic save loop', 
   assert.equal(hasConfigChanges(mergeServerConfig(local, base, server), server), false)
 })
 
-test('library and export remain unified while an unsaved library edit survives a server event', () => {
-  const base = { revision: 1, downloadDir: 'old-library', exportDir: 'old-library' }
+test('an unsaved library edit survives a server event', () => {
+  const base = { revision: 1, downloadDir: 'old-library' }
   const local = { ...base, downloadDir: 'new-library' }
   const server = { ...base, revision: 2, apiDomainMode: 'Domain3' }
   const merged = mergeServerConfig(local, base, server)
   assert.equal(merged.downloadDir, 'new-library')
-  assert.equal(merged.exportDir, 'new-library')
 })
 
 test('server-owned fields never make the local config look dirty', () => {
-  // 后端会强制 exportDir = downloadDir，并在 Android 初始化时置位 androidStorageInitialized。
-  // 这些派生字段若参与脏检查，会在每次配置事件后触发一次无意义的保存。
-  const base = { revision: 1, schemaVersion: 1, downloadDir: 'lib', exportDir: 'lib', androidStorageInitialized: false }
+  // 后端在 Android 初始化时置位 androidStorageInitialized，
+  // 这类服务端拥有字段若参与脏检查，会在每次配置事件后触发一次无意义的保存。
+  const base = { revision: 1, schemaVersion: 1, downloadDir: 'lib', androidStorageInitialized: false }
   const server = { ...base, revision: 2, androidStorageInitialized: true }
   assert.equal(hasConfigChanges(server, base), false)
-
-  // exportDir 与 downloadDir 不一致时也不应被视为用户改动
-  const drifted = { ...base, exportDir: 'stale-export' }
-  assert.equal(hasConfigChanges(drifted, base), false)
 })

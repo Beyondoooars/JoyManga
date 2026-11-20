@@ -42,7 +42,10 @@ export async function runAutoLogin(options: AutoLoginOptions): Promise<AutoLogin
     if (options.shouldStop?.()) return { status: 'skipped' }
     try {
       const result = await options.login(options.username, options.password)
-      if (result.status === 'ok') return { status: 'success', data: result.data, attempts: attempt }
+      if (result.status === 'ok') {
+        if (options.shouldStop?.()) return { status: 'skipped' }
+        return { status: 'success', data: result.data, attempts: attempt }
+      }
       lastError = result.error
       // 失败可能正是手动登录/改配置导致的取消：此时静默让路，不再弹自动登录失败。
       if (options.shouldStop?.()) return { status: 'skipped' }

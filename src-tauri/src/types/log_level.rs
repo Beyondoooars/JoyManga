@@ -3,9 +3,9 @@ use specta::Type;
 
 /// 日志等级。
 ///
-/// `Trace`~`Error` 的 serde 字符串与 tracing JSON 输出的 `level` 字段一致，
-/// 既用于 `LogEvent` 的等级反序列化，也用于设置页的文件日志收集等级；
-/// `Off` 只在收集等级场景出现（表示不落盘），默认收集 `Info` 及以上。
+/// `Trace`~`Error` 的 serde 字符串与 tracing 日志级别一致，
+/// 用于设置页的文件日志收集等级；
+/// `Off` 表示不写入文件日志（仅保留近期内存轻量缓冲），默认收集 `Info` 及以上。
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub enum LogLevel {
     #[serde(rename = "TRACE")]
@@ -19,7 +19,7 @@ pub enum LogLevel {
     Warn,
     #[serde(rename = "ERROR")]
     Error,
-    /// 不写入文件日志（仍输出到前端事件层）。仅用于设置页的收集等级。
+    /// 不写入文件日志（仍保留内存近期轻量缓冲）。仅用于设置页的收集等级。
     #[serde(rename = "OFF")]
     Off,
 }
