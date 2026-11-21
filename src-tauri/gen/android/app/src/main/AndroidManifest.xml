@@ -8,8 +8,6 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- 应用内下载更新后直接拉起系统安装器；系统仍会要求用户确认安装 -->
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -66,8 +64,6 @@
         </activity>
 
         <service android:name=".DownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
-        <!-- 更新安装包下载：几十 MB 的包必须在前台服务里下，普通后台进程随时可能被回收 -->
-        <service android:name=".UpdateDownloadService" android:exported="false" android:foregroundServiceType="dataSync" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

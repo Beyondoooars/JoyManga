@@ -13,9 +13,6 @@ const {
   releaseNotes,
   downloadUpdate,
   ignoreCurrentUpdate,
-  installing,
-  installProgress,
-  installMessage,
 } = useAppUpdate()
 
 // Release 正文由 scripts/release-notes.mjs 生成，是「### 新功能 / * 条目」的纯列表。
@@ -82,15 +79,11 @@ onUnmounted(() => {
 
       <!-- 操作区：一个主按钮 + 跳过；关闭即稍后提醒，不再重复一个链接 -->
       <footer class="update-footer">
-        <div v-if="installing || installMessage" class="update-progress">
-          <n-progress v-if="installing" type="line" :percentage="installProgress" :processing="installProgress < 100" />
-          <span v-if="installMessage">{{ installMessage }}</span>
-        </div>
-        <n-button type="primary" block class="update-action" :loading="installing" :disabled="installing" @click="downloadUpdate">
+        <n-button type="primary" block class="update-action" @click="downloadUpdate">
           <template #icon>
             <PhDownloadSimple :size="16" aria-hidden="true" />
           </template>
-          {{ isAndroid ? (installing ? `下载中 ${installProgress}%` : '下载并更新 APK') : '下载新版本' }}
+          {{ isAndroid ? '浏览器下载更新' : '下载新版本' }}
         </n-button>
         <button type="button" class="update-skip" @click="ignoreCurrentUpdate">跳过此版本</button>
       </footer>
@@ -192,14 +185,6 @@ onUnmounted(() => {
   gap: 8px;
   padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
   border-top: 1px solid var(--jm-line);
-}
-
-.update-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--jm-text-3);
-  font-size: 11px;
 }
 
 .update-action {

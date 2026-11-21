@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 const state = {
   allFilesAccess: false,
   pickMode: 'success',
-  throwOnInstall: false,
   pickRequests: [],
   discarded: [],
   openFileReadyCalls: 0,
@@ -47,10 +46,6 @@ class MockWindow extends EventTarget {
       isMetered: () => state.metered,
       networkKey: () => state.networkKey,
       networkSnapshot: () => state.snapshot,
-      downloadAndInstallApk: () => {
-        if (state.throwOnInstall) throw new Error('service start rejected')
-      },
-      updateDownloadState: () => {},
       notifyOpenFileReady: () => {
         state.openFileReadyCalls += 1
       },
@@ -82,7 +77,6 @@ Object.defineProperty(globalThis, 'document', {
 })
 
 const {
-  downloadAndInstallApk,
   onOpenFile,
   requestAllFilesAccessAndWait,
   requiresAllFilesAccess,
@@ -94,7 +88,6 @@ const {
 function resetState() {
   state.allFilesAccess = false
   state.pickMode = 'success'
-  state.throwOnInstall = false
   state.pickRequests.length = 0
   state.discarded.length = 0
   state.openFileReadyCalls = 0
@@ -236,12 +229,6 @@ test('network watchers, open-file listener and install wrapper read initial stat
   stopOpen()
   mockWindow.dispatchEvent(new CustomEvent('jm-open-file', { detail: { path: '/tmp/after.cbz' } }))
   assert.deepEqual(opened, [{ id: 'req-2', path: '/tmp/book.cbz' }])
-
-  state.throwOnInstall = true
-  const installEvents = []
-  const stopInstall = downloadAndInstallApk('https://example.invalid/a.apk', 'a.apk', (p) => installEvents.push(p))
-  stopInstall()
-  assert.deepEqual(installEvents, [{ state: 'error', message: 'service start rejected' }])
 })
 
 test('requiresAllFilesAccess distinguishes app-private storage from public shared storage', () => {

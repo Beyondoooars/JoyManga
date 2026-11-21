@@ -4,23 +4,20 @@ import assert from 'node:assert/strict'
 class MockWindow extends EventTarget {
   constructor() {
     super()
-    this.installCalls = []
-    this.syncCalls = 0
     this.openCalls = []
     this.__TAURI_INTERNALS__ = {
-      invoke: async (command) => {
+      invoke: async (command, args) => {
         if (command === 'plugin:app|version') return '0.3.18'
+        if (command === 'plugin:opener|open_url') {
+          this.openCalls.push(args?.url)
+          return null
+        }
         return null
       },
     }
-    this.JmAndroid = {
-      downloadAndInstallApk: (url, fileName) => {
-        this.installCalls.push({ url, fileName })
-      },
-      updateDownloadState: () => {
-        this.syncCalls += 1
-      },
-    }
+  }
+  open(url) {
+    this.openCalls.push(url)
   }
 }
 
@@ -78,13 +75,9 @@ function resetUpdateState() {
   state.downloadUrl.value = ''
   state.downloadFileName.value = ''
   state.errorMessage.value = ''
-  state.installing.value = false
-  state.installProgress.value = 0
-  state.installMessage.value = ''
   memoryStorage.clear()
   storageThrow = false
-  mockWindow.installCalls.length = 0
-  mockWindow.syncCalls = 0
+  mockWindow.openCalls.length = 0
   return state
 }
 
@@ -177,42 +170,27 @@ test('ignoreCurrentUpdate suppresses silent check dialog while throwing localSto
   }
 })
 
-test('downloadUpdate tracks progress, resets on installer, keeps late error listener, and syncs on foreground', () => {
+test('downloadUpdate opens direct apk URL or falls back to release URL via external browser', async () => {
   const state = resetUpdateState()
   state.downloadUrl.value = 'https://example.invalid/app-arm64.apk'
   state.downloadFileName.value = 'app-arm64.apk'
+  state.releaseUrl.value = 'https://example.invalid/release'
 
   state.downloadUpdate()
-  assert.equal(mockWindow.installCalls.length, 1)
-  assert.equal(state.installing.value, true)
+  await Promise.resolve()
+  assert.deepEqual(mockWindow.openCalls, ['https://example.invalid/app-arm64.apk'])
 
-  mockWindow.dispatchEvent(new CustomEvent('jm-update-progress', { detail: { state: 'progress', percent: 60 } }))
-  assert.equal(state.installProgress.value, 60)
-
-  mockWindow.dispatchEvent(new CustomEvent('jm-update-progress', { detail: { state: 'done' } }))
-  assert.equal(state.installProgress.value, 100)
-
-  mockWindow.dispatchEvent(new CustomEvent('jm-update-progress', { detail: { state: 'installer', message: '确认安装' } }))
-  assert.equal(state.installing.value, false)
-  assert.equal(state.installMessage.value, '确认安装')
-
-  // Returning to foreground syncs state; idle when not installing must preserve installer message
-  mockDocument.visibilityState = 'visible'
-  mockDocument.dispatchEvent(new Event('visibilitychange'))
-  assert.equal(mockWindow.syncCalls, 1)
-
-  mockWindow.dispatchEvent(new CustomEvent('jm-update-progress', { detail: { state: 'idle' } }))
-  assert.equal(state.installMessage.value, '确认安装')
-
-  // Late PackageInstaller error after installer prompt is still captured
-  mockWindow.dispatchEvent(new CustomEvent('jm-update-progress', { detail: { state: 'error', message: '安装被取消' } }))
-  assert.equal(state.errorMessage.value, '安装被取消')
-
-  // Idle during active download resets installing back to false
-  state.errorMessage.value = ''
+  // 仅存在 Release 页链接时，也通过外部浏览器打开
+  mockWindow.openCalls.length = 0
+  state.downloadUrl.value = ''
   state.downloadUpdate()
-  assert.equal(state.installing.value, true)
-  mockWindow.dispatchEvent(new CustomEvent('jm-update-progress', { detail: { state: 'idle' } }))
-  assert.equal(state.installing.value, false)
-  assert.equal(state.installMessage.value, '')
+  await Promise.resolve()
+  assert.deepEqual(mockWindow.openCalls, ['https://example.invalid/release'])
+
+  // 无任何可用链接时不触发打开
+  mockWindow.openCalls.length = 0
+  state.releaseUrl.value = ''
+  state.downloadUpdate()
+  await Promise.resolve()
+  assert.deepEqual(mockWindow.openCalls, [])
 })

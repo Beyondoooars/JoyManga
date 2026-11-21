@@ -257,12 +257,4 @@ object AppState {
             false
         }
     }
-
-    /** 更新流程进度/结果回传前端；事件名与 `src/utils/androidStorage.ts` 的订阅保持一致。 */
-    fun emitUpdate(state: String, percent: Int = -1, message: String = "") {
-        val payload = org.json.JSONObject().put("state", state)
-        if (percent >= 0) payload.put("percent", percent)
-        if (message.isNotEmpty()) payload.put("message", message)
-        emit("window.dispatchEvent(new CustomEvent('jm-update-progress', {detail:$payload}))")
-    }
 }

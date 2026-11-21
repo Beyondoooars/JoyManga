@@ -261,8 +261,6 @@ if (!window.JmAndroid) {
     networkKey: () => networkState.networkKey,
     networkSnapshot: () => JSON.stringify({ active: networkState.vpn, metered: networkState.metered, networkKey: networkState.networkKey }),
     requestAllFilesAccess: () => {},
-    downloadAndInstallApk: () => {},
-    updateDownloadState: () => {},
     notifyOpenFileReady: () => {},
   }
 }

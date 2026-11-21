@@ -26,8 +26,6 @@ declare global {
       /** 一次 JsBridge 调用同时返回 VPN 与网络标识（JSON 字符串）。 */
       networkSnapshot?(): string
       requestAllFilesAccess(): void
-      downloadAndInstallApk(url: string, fileName: string): void
-      updateDownloadState(): void
       notifyOpenFileReady(): void
     }
   }
@@ -314,46 +312,6 @@ export function onOpenFile(handler: (detail: { id?: string; path: string }) => v
   // 注册完成后主动通知原生，把冷启动/早期到达的「用 JoyManga 打开」补发过来。
   try { window.JmAndroid?.notifyOpenFileReady() } catch (error) { console.error('通知原生打开文件监听器就绪失败', error) }
   return () => window.removeEventListener('jm-open-file', listener)
-}
-
-export interface UpdateProgress { state: 'progress' | 'done' | 'installer' | 'permission' | 'error' | 'idle'; percent?: number; message?: string }
-
-/**
- * 应用内更新：原生在前台服务里下载 APK，完成后直接拉起系统安装器。
- * 进度与结果经 `jm-update-progress` 回传，返回取消订阅函数。
- */
-export function downloadAndInstallApk(url: string, fileName: string, handler: (progress: UpdateProgress) => void): () => void {
-  if (!isAndroid || !window.JmAndroid) {
-    handler({ state: 'error', message: '当前环境不支持应用内安装' })
-    return () => {}
-  }
-  const listener = (event: Event) => {
-    const detail = (event as CustomEvent<UpdateProgress>).detail
-    if (detail?.state) handler(detail)
-  }
-  window.addEventListener('jm-update-progress', listener)
-  try {
-    window.JmAndroid.downloadAndInstallApk(url, fileName)
-  } catch (error) {
-    window.removeEventListener('jm-update-progress', listener)
-    handler({ state: 'error', message: error instanceof Error ? error.message : String(error) })
-  }
-  return () => window.removeEventListener('jm-update-progress', listener)
-}
-
-/**
- * 主动拉取一次更新下载的实时状态。
- *
- * 下载在原生前台服务里进行，应用被切到后台再回来时可能错过进度事件；
- * 回到前台后调用一次，界面就能接着显示「下载中 x%」而不是回到初始状态。
- */
-export function syncUpdateDownloadState() {
-  if (!isAndroid || !window.JmAndroid) return
-  try {
-    window.JmAndroid.updateDownloadState()
-  } catch (error) {
-    console.error('读取更新下载状态失败', error)
-  }
 }
 
 /** 音量键翻页事件（Android 原生转发），返回取消订阅函数 */

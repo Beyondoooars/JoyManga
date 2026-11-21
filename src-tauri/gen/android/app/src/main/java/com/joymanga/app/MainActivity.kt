@@ -21,7 +21,6 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.RejectedExecutionException
 
@@ -43,10 +42,9 @@ class MainActivity : TauriActivity() {
     private var appWebView: WebView? = null
     internal val webView: WebView? get() = appWebView
 
-    // 三个辅助类在基类 AttachBaseContext 之前初始化，构造方法内禁止触碰 Context 系统服务。
+    // 两个辅助类在基类 AttachBaseContext 之前初始化，构造方法内禁止触碰 Context 系统服务。
     private val networkTracker = AndroidNetworkTracker(this) { appWebView }
     private val storageHelper = AndroidStorageHelper(this) { appWebView }
-    private val apkInstallManager = ApkInstallManager(this)
 
     private var visible = false
     private var volumeKeyPaging = false
@@ -69,7 +67,6 @@ class MainActivity : TauriActivity() {
             override fun handleOnBackPressed() { dispatchBack() }
         })
         storageHelper.scheduleStartupCleanup(isColdStart = savedInstanceState == null)
-        apkInstallManager.scheduleStartupCleanup()
         // 冷启动时由「用 JoyManga 打开 CBZ」拉起：WebView 就绪后会自动导入
         storageHelper.handleViewIntent(intent)
     }
@@ -78,9 +75,6 @@ class MainActivity : TauriActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         storageHelper.handleViewIntent(intent)
-        // 点「安装包已下载完成」通知回来时 Activity 可能已经在前台（没有 onStart），
-        // 这里补一次；待安装包取走后就不会再重复拉起安装器。
-        apkInstallManager.installPendingUpdate(visible)
     }
 
     override fun onWebViewCreate(webView: WebView) {
@@ -98,7 +92,6 @@ class MainActivity : TauriActivity() {
         AppState.foreground = true
         if (hasDownloadStatus) updateDownloadService()
         networkTracker.pushCurrentNetworkState()
-        apkInstallManager.installPendingUpdate(visible)
     }
 
     override fun onStop() {
@@ -111,7 +104,6 @@ class MainActivity : TauriActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(updateDownloadServiceRunnable)
-        apkInstallManager.destroy()
         networkTracker.unregister()
         storageHelper.destroy()
         // 后台推送可能仍在队列里；清空引用后 evaluateJavascript 不会再碰已销毁的 WebView。
@@ -165,11 +157,6 @@ class MainActivity : TauriActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         storageHelper.onActivityResult(requestCode, resultCode, data)
-    }
-
-    /** 供 [UpdateDownloadService] 调用：应用在前台时下载完成，直接拉起安装器。 */
-    internal fun installDownloadedUpdate(apk: File) {
-        apkInstallManager.installDownloadedUpdate(apk)
     }
 
     private fun stopDownloadServiceAndNotification() {
@@ -303,10 +290,6 @@ class MainActivity : TauriActivity() {
         @JavascriptInterface fun pickDocuments(id: String, mode: String) = storageHelper.pickDocuments(id, mode)
         @JavascriptInterface fun discardImports(id: String) = storageHelper.discardImports(id)
         @JavascriptInterface fun exportDocuments(id: String, path: String) = storageHelper.exportDocuments(id, path)
-
-        @JavascriptInterface fun downloadAndInstallApk(url: String, fileName: String) =
-            apkInstallManager.downloadAndInstallApk(url, fileName)
-        @JavascriptInterface fun updateDownloadState() = apkInstallManager.syncDownloadState()
 
         @JavascriptInterface fun exitApp() { runOnUiThread { moveTaskToBack(true) } }
 

@@ -50,6 +50,15 @@ internal class AndroidStorageHelper(
                     ?.forEach { it.deleteRecursively() }
             } catch (_: Exception) {}
             try { File(activity.cacheDir, "android-imports").deleteRecursively() } catch (_: Exception) {}
+            // 清理旧版本应用内更新器留下的缓存安装包、偏好配置与通知渠道
+            try { File(activity.cacheDir, "updates").deleteRecursively() } catch (_: Exception) {}
+            try { activity.deleteSharedPreferences("joymanga_updates") } catch (_: Exception) {}
+            if (Build.VERSION.SDK_INT >= 26) {
+                try {
+                    activity.getSystemService(android.app.NotificationManager::class.java)
+                        ?.deleteNotificationChannel("joymanga_updates")
+                } catch (_: Exception) {}
+            }
         }
     }
 
