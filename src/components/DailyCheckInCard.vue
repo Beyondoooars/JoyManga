@@ -91,6 +91,8 @@ async function load() {
 
 async function signIn() {
   if (signing.value || signedToday.value) return
+  requestGeneration += 1
+  loading.value = false
   const epoch = store.sessionEpoch
   const key = sessionKey.value
   signing.value = true

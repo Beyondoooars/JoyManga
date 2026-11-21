@@ -149,6 +149,13 @@ static CURRENT_LEVEL: OnceLock<parking_lot::RwLock<LogLevel>> = OnceLock::new();
 /// 因此只解析一次并缓存；书库位置变化时由 `reset_logs_dir` 显式失效。
 static LOGS_DIR: OnceLock<parking_lot::RwLock<Option<std::path::PathBuf>>> = OnceLock::new();
 
+/// 通知 `file_log_watcher` 日志目录缓存已重置，重新绑定到最新目录。
+static LOG_DIR_NOTIFY: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn log_dir_sender() -> &'static tokio::sync::watch::Sender<u64> {
+    LOG_DIR_NOTIFY.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
 /// 当前文件日志等级（供配置变更后切目录时判断是否需要重建文件层）。
 pub fn current_log_level() -> LogLevel {
     current_level()
@@ -215,6 +222,16 @@ pub fn init(app: &AppHandle) -> anyhow::Result<()> {
             // 若交错执行，会把当前层的 guard 换成另一层的，丢弃后写入线程被关闭，
             // 文件日志会静默停止。
             let _reload_guard = RELOAD_LOCK.lock();
+            if level != LogLevel::Off {
+                // 先切到空层并释放旧句柄：Windows 上若旧文件刚被删除（DELETE_PENDING），
+                // 旧 WorkerGuard 未释放前重开同名文件会报拒绝访问。
+                if let Ok((off_layer, _)) = create_file_layer(&app, LogLevel::Off) {
+                    let _ = reload_handle.reload(off_layer);
+                }
+                if let Some(guard_cell) = GUARD.get() {
+                    *guard_cell.lock() = None;
+                }
+            }
             let (file_layer, guard) = create_file_layer(&app, level)?;
             reload_handle.reload(file_layer).context("reload失败")?;
             *GUARD.get().context("GUARD未初始化")?.lock() = guard;
@@ -350,60 +367,90 @@ async fn file_log_watcher(app: AppHandle) {
         }
     };
 
-    let logs_dir = match logs_dir(&app) {
-        Ok(logs_dir) => logs_dir,
-        Err(err) => {
-            let err_title = "日志文件watcher获取日志目录失败";
-            let string_chain = err.to_string_chain();
-            tracing::error!(err_title, message = string_chain);
-            return;
-        }
-    };
+    let mut dir_rx = log_dir_sender().subscribe();
+    let _ = *dir_rx.borrow_and_update();
+    let mut watched_dir: Option<std::path::PathBuf> = None;
 
-    if let Err(err) = std::fs::create_dir_all(&logs_dir) {
-        let err_title = "创建日志目录失败";
-        let string_chain = anyhow::Error::from(err).to_string_chain();
-        tracing::error!(err_title, message = string_chain);
-        return;
-    }
-
-    if let Err(err) = watcher
-        .watch(&logs_dir, notify::RecursiveMode::NonRecursive)
-        .map_err(anyhow::Error::from)
-    {
-        let err_title = "日志文件watcher监听日志目录失败";
-        let string_chain = err.to_string_chain();
-        tracing::error!(err_title, message = string_chain);
-        return;
-    }
-
-    while let Some(res) = receiver.recv().await {
-        match res.map_err(anyhow::Error::from) {
-            Ok(event) => {
-                // 只对受管的日志文件重载：书库目录里还有本子、备份与探针文件，
-                // 任何删除都重建文件层既无必要，也会让探针与 watcher 互相触发。
-                let managed = event
-                    .paths
-                    .iter()
-                    .filter_map(|path| path.file_name()?.to_str())
-                    .any(is_managed_log_file);
-                let removed = matches!(event.kind, notify::EventKind::Remove(_));
-                if managed && removed {
-                    // 当前等级为 Off 时文件层是 sink，重建无意义，跳过。
-                    let level = current_level();
-                    if level != LogLevel::Off {
-                        if let Err(err) = reload_file_logger(level) {
-                            let err_title = "重置日志文件失败";
-                            let string_chain = err.to_string_chain();
-                            tracing::error!(err_title, message = string_chain);
-                        }
-                    }
-                }
-            }
+    let bind_dir = |watcher: &mut RecommendedWatcher,
+                    watched_dir: &mut Option<std::path::PathBuf>| {
+        let next_dir = match logs_dir(&app) {
+            Ok(dir) => dir,
             Err(err) => {
-                let err_title = "接收日志文件watcher事件失败";
+                let err_title = "日志文件watcher获取日志目录失败";
                 let string_chain = err.to_string_chain();
                 tracing::error!(err_title, message = string_chain);
+                return false;
+            }
+        };
+        if watched_dir.as_ref() == Some(&next_dir) {
+            return true;
+        }
+        if let Some(old_dir) = watched_dir.take() {
+            let _ = watcher.unwatch(&old_dir);
+        }
+        if let Err(err) = std::fs::create_dir_all(&next_dir) {
+            let err_title = "创建日志目录失败";
+            let string_chain = anyhow::Error::from(err).to_string_chain();
+            tracing::error!(err_title, message = string_chain);
+            return false;
+        }
+        if let Err(err) = watcher
+            .watch(&next_dir, notify::RecursiveMode::NonRecursive)
+            .map_err(anyhow::Error::from)
+        {
+            let err_title = "日志文件watcher监听日志目录失败";
+            let string_chain = err.to_string_chain();
+            tracing::error!(err_title, message = string_chain);
+            return false;
+        }
+        *watched_dir = Some(next_dir);
+        true
+    };
+
+    if !bind_dir(&mut watcher, &mut watched_dir) {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            changed = dir_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let _ = bind_dir(&mut watcher, &mut watched_dir);
+            }
+            maybe_res = receiver.recv() => {
+                let Some(res) = maybe_res else {
+                    break;
+                };
+                match res.map_err(anyhow::Error::from) {
+                    Ok(event) => {
+                        // 只对受管的日志文件重载：书库目录里还有本子、备份与探针文件，
+                        // 任何删除都重建文件层既无必要，也会让探针与 watcher 互相触发。
+                        let managed = event
+                            .paths
+                            .iter()
+                            .filter_map(|path| path.file_name()?.to_str())
+                            .any(is_managed_log_file);
+                        let removed = matches!(event.kind, notify::EventKind::Remove(_));
+                        if managed && removed {
+                            // 当前等级为 Off 时文件层是 sink，重建无意义，跳过。
+                            let level = current_level();
+                            if level != LogLevel::Off {
+                                if let Err(err) = reload_file_logger(level) {
+                                    let err_title = "重置日志文件失败";
+                                    let string_chain = err.to_string_chain();
+                                    tracing::error!(err_title, message = string_chain);
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let err_title = "接收日志文件watcher事件失败";
+                        let string_chain = err.to_string_chain();
+                        tracing::error!(err_title, message = string_chain);
+                    }
+                }
             }
         }
     }
@@ -564,6 +611,10 @@ pub fn logs_dir(app: &AppHandle) -> anyhow::Result<std::path::PathBuf> {
 pub fn reset_logs_dir() {
     if let Some(cell) = LOGS_DIR.get() {
         *cell.write() = None;
+    }
+    if let Some(sender) = LOG_DIR_NOTIFY.get() {
+        let next = sender.borrow().wrapping_add(1);
+        sender.send_replace(next);
     }
 }
 

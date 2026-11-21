@@ -214,7 +214,7 @@ class UpdateDownloadService : Service() {
         // Android 10+ 会被系统直接忽略，安装器永远弹不出来。
         val activity = AppState.activity
         if (activity != null && AppState.foreground) {
-            terminal = "installer" to "请在系统弹窗中确认安装"
+            terminal = null
             activity.installDownloadedUpdate(apk)
             return
         }
@@ -225,13 +225,16 @@ class UpdateDownloadService : Service() {
         notifyReady(appCtx)
     }
 
-    /** 安装包落盘路径；顺带清掉 1 小时前的旧包（系统安装器可能还在读，不能删新的） */
+    /** 安装包落盘路径；顺带清掉 1 小时前的旧包（系统安装器与待安装包除外） */
     private fun updateTarget(appCtx: Context, fileName: String): File {
         val name = safeFileName(fileName).ifBlank { "update.apk" }.let {
             if (it.endsWith(".apk", ignoreCase = true)) it else "$it.apk"
         }
         val dir = File(appCtx.cacheDir, "updates").apply { mkdirs() }
-        dir.listFiles()?.filter { it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000 }?.forEach { it.delete() }
+        val pendingPath = peekPendingInstallPath(appCtx)
+        dir.listFiles()?.filter {
+            it.absolutePath != pendingPath && it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000
+        }?.forEach { it.delete() }
         return File(dir, name)
     }
 
@@ -415,6 +418,19 @@ class UpdateDownloadService : Service() {
             val outcome = terminal
             terminal = null
             return outcome
+        }
+
+        fun clearOutcome() {
+            terminal = null
+        }
+
+        fun peekPendingInstallPath(context: Context): String? {
+            pendingInstall?.let { return it.absolutePath }
+            return try {
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_PENDING_APK, null)
+            } catch (_: Exception) {
+                null
+            }
         }
 
         /**

@@ -176,3 +176,34 @@ test('stale refreshDownloadedComics scan cannot overwrite newer removal state', 
     commands.getDownloadedComics = originalGetDownloaded
   }
 })
+
+test('markComicRemoved with deletedFiles clears Completed download progresses for that comic only', async () => {
+  const store = useStore(createPinia())
+  const originalListen = events.downloadTaskEvent.listen
+  const originalGetTasks = commands.getDownloadTasks
+  let emitTask
+
+  events.downloadTaskEvent.listen = async (handler) => {
+    emitTask = handler
+    return () => {}
+  }
+  commands.getDownloadTasks = async () => []
+
+  try {
+    await store.initDownloadListener()
+    emitTask({ payload: { event: 'Create', data: makeSnapshot(700, 7001, 'Completed') } })
+    emitTask({ payload: { event: 'Create', data: makeSnapshot(800, 8001, 'Completed') } })
+    assert.equal(store.progresses.has(7001), true)
+    assert.equal(store.progresses.has(8001), true)
+
+    store.markComicRemoved(700, { deletedFiles: true })
+    assert.equal(store.progresses.has(7001), false)
+    assert.equal(store.progresses.has(8001), true)
+    // Dismissed completed task with same revision is suppressed if re-emitted
+    emitTask({ payload: { event: 'Create', data: makeSnapshot(700, 7001, 'Completed') } })
+    assert.equal(store.progresses.has(7001), false)
+  } finally {
+    events.downloadTaskEvent.listen = originalListen
+    commands.getDownloadTasks = originalGetTasks
+  }
+})

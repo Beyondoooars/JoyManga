@@ -219,14 +219,16 @@ fn remove_library_comic_blocking(
     // 归档整合会在后台合并/重命名/删除这本漫画的章节文件。与删除并发时，
     // 可能出现"刚删掉的漫画又被合并写回"或整合中途失败。这里与清空下载目录
     // 采用同一保护：整合进行中直接拒绝，等它结束再删。
-    if let Some(state) = app.try_state::<crate::archive_finalize::ArchiveFinalizeState>() {
-        if state.is_running(comic_id) {
-            return Err(CommandError::from(
-                "移除漫画失败",
-                anyhow!("该漫画正在整理 CBZ，请稍后再试"),
-            ));
-        }
-    }
+    let _removal_guard = app
+        .try_state::<crate::archive_finalize::ArchiveFinalizeState>()
+        .map(|state| {
+            state
+                .try_lock_comic_for_removal(app, comic_id)
+                .ok_or_else(|| {
+                    CommandError::from("移除漫画失败", anyhow!("该漫画正在整理 CBZ，请稍后再试"))
+                })
+        })
+        .transpose()?;
     let refreshed = if delete_files {
         let manager = app.get_download_manager();
         for task in manager
@@ -309,11 +311,13 @@ fn collect_delete_paths(
         return Ok(vec![canonical_source]);
     }
     let canonical_root = std::fs::canonicalize(root)?;
+    let mut files = HashSet::new();
+    let mut dir_roots = Vec::new();
     if canonical_source.is_dir() && canonical_source != canonical_root {
         utils::validate_delete_target(&canonical_root, &canonical_source)?;
-        return Ok(vec![canonical_source]);
+        dir_roots.push(canonical_source.clone());
+        files.insert(canonical_source.clone());
     }
-    let mut files = HashSet::new();
     for path in comic
         .chapter_infos
         .iter()
@@ -325,9 +329,50 @@ fn collect_delete_paths(
         }
         let path = std::fs::canonicalize(path)?;
         utils::validate_delete_target(&canonical_root, &path)?;
-        ensure!(path.is_file(), "章节路径不是普通文件");
+        ensure!(
+            path.is_file() || (path.is_dir() && path != canonical_root),
+            "删除路径无效"
+        );
+        if dir_roots.iter().any(|dir| path.starts_with(dir)) {
+            continue;
+        }
         files.insert(path);
     }
+    if comic.id > 0 {
+        let comic_name_filtered = utils::filename_filter(&comic.name);
+        let id_chapter_tag = format!("[JM{}-", comic.id);
+        let id_merged_tag = format!("[JM{}].cbz", comic.id);
+        if let Ok(entries) = std::fs::read_dir(&canonical_root) {
+            for entry in entries.filter_map(Result::ok) {
+                let entry_path = entry.path();
+                if !entry_path.is_file() || !entry_path.is_cbz() {
+                    continue;
+                }
+                let Some(file_name) = entry_path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let name_candidate = file_name.contains(&id_chapter_tag)
+                    || file_name.ends_with(&id_merged_tag)
+                    || (!comic_name_filtered.is_empty()
+                        && file_name.starts_with(&comic_name_filtered));
+                if !name_candidate {
+                    continue;
+                }
+                if crate::comic_scanner::read_comic_id_from_cbz(&entry_path).ok() == Some(comic.id)
+                {
+                    if let Ok(canonical_entry) = std::fs::canonicalize(&entry_path) {
+                        if utils::validate_delete_target(&canonical_root, &canonical_entry).is_ok()
+                        {
+                            files.insert(canonical_entry);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 若目录本身在待删列表中，去掉位于其内部的冗余子路径，避免二次移动出错。
+    let dirs: Vec<PathBuf> = files.iter().filter(|path| path.is_dir()).cloned().collect();
+    files.retain(|path| !dirs.iter().any(|dir| path != dir && path.starts_with(dir)));
     Ok(files.into_iter().collect())
 }
 
@@ -482,19 +527,36 @@ fn import_cbz_source(source: &Path, download_dir: &Path) -> anyhow::Result<(bool
             None => (default_name, vec!["本地导入".into()], Vec::new()),
         };
 
+        let chapters = crate::comic_scanner::inspect_cbz_chapters(&staged_cbz)?;
+        let chapter_infos = if chapters.is_empty() {
+            vec![ChapterInfo {
+                chapter_id: id - 1,
+                chapter_title: title,
+                order: 1,
+                is_downloaded: None,
+                chapter_download_dir: None,
+            }]
+        } else {
+            chapters
+                .into_iter()
+                .enumerate()
+                .map(|(idx, (order, chapter_title))| ChapterInfo {
+                    chapter_id: id.saturating_sub(i64::try_from(idx + 1).unwrap_or(i64::MAX)),
+                    chapter_title,
+                    order,
+                    is_downloaded: None,
+                    chapter_download_dir: None,
+                })
+                .collect()
+        };
+
         let comic = Comic {
             id,
             name,
             author,
             tags,
             comic_download_dir: Some(staging.clone()),
-            chapter_infos: vec![ChapterInfo {
-                chapter_id: id - 1,
-                chapter_title: title,
-                order: 1,
-                is_downloaded: None,
-                chapter_download_dir: None,
-            }],
+            chapter_infos,
             ..Comic::default()
         };
         comic.save_comic_metadata()?;
@@ -519,6 +581,14 @@ fn import_cbz_source(source: &Path, download_dir: &Path) -> anyhow::Result<(bool
 fn import_source(source: &Path, download_dir: &Path) -> anyhow::Result<(bool, Option<i64>)> {
     let source = std::fs::canonicalize(source).context("源文件不存在或无法访问")?;
     if std::fs::canonicalize(download_dir).is_ok_and(|root| source.starts_with(root)) {
+        if source.is_dir() {
+            let metadata_path = source.join("元数据.json");
+            if metadata_path.is_file() {
+                if let Ok(comic) = Comic::from_metadata(&metadata_path) {
+                    return Ok((false, Some(comic.id)));
+                }
+            }
+        }
         return Ok((false, None));
     }
     if source.is_file() {

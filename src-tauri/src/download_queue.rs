@@ -470,6 +470,15 @@ impl DownloadQueue {
         {
             return None;
         }
+        // 已失败任务允许取消（从界面移除）或同状态更新，但不能被并发的计费暂停覆写成 Paused。
+        if entry.snapshot.state == DownloadTaskState::Failed
+            && !matches!(
+                snapshot.state,
+                DownloadTaskState::Failed | DownloadTaskState::Cancelled
+            )
+        {
+            return None;
+        }
         let persist = entry.snapshot.state != snapshot.state
             || entry.snapshot.error_message != snapshot.error_message
             || entry.snapshot.stage != snapshot.stage
@@ -1023,6 +1032,34 @@ mod tests {
         );
         handle.join().unwrap();
         drop(_persist);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_task_rejects_stale_paused_update_but_allows_cancelled() {
+        let root = std::env::temp_dir().join(format!("jm-queue-failed-{}", uuid::Uuid::new_v4()));
+        let queue = DownloadQueue::load(root.join("queue.json")).unwrap();
+        let mut snapshot = queue
+            .insert(entry(1, DownloadTaskState::Downloading))
+            .unwrap();
+
+        snapshot.state = DownloadTaskState::Failed;
+        let failed = queue.update(snapshot).expect("Failed state should apply");
+
+        let mut stale_paused = failed.clone();
+        stale_paused.state = DownloadTaskState::Paused;
+        assert!(
+            queue.update(stale_paused).is_none(),
+            "stale Paused event must not overwrite Failed"
+        );
+        assert_eq!(queue.entries()[0].snapshot.state, DownloadTaskState::Failed);
+
+        let mut cancelled = failed;
+        cancelled.state = DownloadTaskState::Cancelled;
+        let updated = queue
+            .update(cancelled)
+            .expect("Cancelled transition from Failed must succeed");
+        assert_eq!(updated.state, DownloadTaskState::Cancelled);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

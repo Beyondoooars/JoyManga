@@ -224,7 +224,7 @@ pub fn resolve_archive_sizes<R: Read + Seek>(
 
     let stamp = sizes_cache::source_stamp(archive_path);
     let disk = stamp.and_then(|stamp| sizes_cache::read(archive_path, stamp));
-    let sizes: Vec<Option<PageSize>> = if let Some(disk) = disk {
+    let sizes: Vec<Option<PageSize>> = if let Some(ref disk) = disk {
         misses
             .iter()
             .map(|&idx| match disk.get(&names[idx]) {
@@ -239,7 +239,7 @@ pub fn resolve_archive_sizes<R: Read + Seek>(
             .collect()
     };
 
-    // 回填内嵌缓存命中项，再整体落盘
+    // 回填内嵌缓存命中项，再与同归档已有缓存合并落盘（避免合并 CBZ 切话时互相覆盖）
     let mut resolved: Vec<Option<PageSize>> = Vec::with_capacity(names.len());
     let mut miss_iter = sizes.into_iter();
     for name in names {
@@ -249,7 +249,7 @@ pub fn resolve_archive_sizes<R: Read + Seek>(
         }
     }
     if let Some(stamp) = stamp {
-        let mut to_store: BTreeMap<String, Option<PageSize>> = BTreeMap::new();
+        let mut to_store: BTreeMap<String, Option<PageSize>> = disk.unwrap_or_default();
         for (name, size) in names.iter().zip(resolved.iter()) {
             to_store.insert(name.clone(), *size);
         }

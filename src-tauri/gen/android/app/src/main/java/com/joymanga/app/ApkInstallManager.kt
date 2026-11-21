@@ -48,9 +48,11 @@ internal class ApkInstallManager(private val activity: Activity) {
                 android.content.pm.PackageInstaller.STATUS_SUCCESS -> {
                     // 成功时进程通常已被替换杀掉，这里多数情况跑不到，保留是为了覆盖
                     // 系统选择「不杀进程」的机型。安装包由启动兜底清理接手。
+                    UpdateDownloadService.clearOutcome()
                     runUpdateApkCleanup("安装成功")
                 }
                 else -> {
+                    UpdateDownloadService.clearOutcome()
                     val reason = intent.getStringExtra(android.content.pm.PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "安装未完成"
                     emitUpdateEvent("error", message = if (status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED) "已取消安装" else reason)
                     // 用户取消或安装失败：安装器不会再读这个文件，立刻清掉
@@ -61,12 +63,16 @@ internal class ApkInstallManager(private val activity: Activity) {
     }
 
     fun scheduleStartupCleanup() {
+        val pendingPath = UpdateDownloadService.peekPendingInstallPath(activity)
         activity.submitTo(updateWorker) {
             // 安装成功时系统会杀掉本进程，onStart 的清理来不及执行，安装包会一直留着。
-            // 启动时兜底清掉 1 小时前的旧包：此时上一次安装早已结束，不会影响安装器读取。
+            // 启动时兜底清掉 1 小时前的旧包，但必须保留尚未取走的待安装后台包。
             try {
                 File(activity.cacheDir, "updates").listFiles()
-                    ?.filter { it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000 }
+                    ?.filter {
+                        it.absolutePath != pendingPath &&
+                            it.lastModified() < System.currentTimeMillis() - 60 * 60 * 1000
+                    }
                     ?.forEach { it.delete() }
             } catch (_: Exception) {}
         }
@@ -152,13 +158,14 @@ internal class ApkInstallManager(private val activity: Activity) {
      */
     fun installPendingUpdate(isVisible: Boolean) {
         if (!isVisible || UpdateDownloadService.isRunning()) return
-        val apk = UpdateDownloadService.takePendingInstall(activity) ?: return
+        val apk = UpdateDownloadService.takePendingInstall(activity)
         UpdateDownloadService.clearReadyNotification(activity)
-        installDownloadedUpdate(apk)
+        if (apk != null) installDownloadedUpdate(apk)
     }
 
     private fun installApk(apk: File) {
         if (Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()) {
+            UpdateDownloadService.clearOutcome()
             emitUpdateEvent("permission", message = "请在设置中允许 JoyManga 安装未知应用，然后重新点击更新")
             try {
                 activity.startActivity(
@@ -171,6 +178,7 @@ internal class ApkInstallManager(private val activity: Activity) {
         }
         try {
             commitInstallSession(apk)
+            UpdateDownloadService.clearOutcome()
             emitUpdateEvent("installer", message = "请在系统弹窗中确认安装")
             scheduleUpdateApkCleanup(apk)
         } catch (error: Exception) {
@@ -179,9 +187,11 @@ internal class ApkInstallManager(private val activity: Activity) {
             android.util.Log.w("JoyManga", "PackageInstaller 会话提交失败，回退到系统安装器", error)
             try {
                 fallbackInstallViaIntent(apk)
+                UpdateDownloadService.clearOutcome()
                 emitUpdateEvent("installer", message = "请在系统安装器中确认安装")
                 scheduleUpdateApkCleanup(apk)
             } catch (fallbackError: Exception) {
+                UpdateDownloadService.clearOutcome()
                 emitUpdateEvent("error", message = "无法启动安装：${fallbackError.message ?: "未知错误"}")
             }
         }

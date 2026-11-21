@@ -21,6 +21,12 @@ pub async fn clear_logs(app: AppHandle) -> CommandResult<()> {
 }
 
 fn clear_logs_blocking(app: &AppHandle) -> CommandResult<()> {
+    // 清理前先关闭当前滚动日志句柄，避免 Windows 下被占用文件无法删除或重载报拒绝访问，
+    // 删除完后再按原等级重建新文件。
+    let prev_level = logger::current_log_level();
+    if prev_level != crate::types::LogLevel::Off {
+        let _ = logger::reload_file_logger(crate::types::LogLevel::Off);
+    }
     // 两处都要清：应用数据目录里的滚动日志，以及用户导出到书库 logs 的诊断日志。
     // 导出后诊断日志就搬到了书库，只清前者会让「清理日志」看起来没生效。
     let mut failures = 0;
@@ -31,6 +37,11 @@ fn clear_logs_blocking(app: &AppHandle) -> CommandResult<()> {
         }
     }
     logger::clear_recent_logs();
+    if prev_level != crate::types::LogLevel::Off {
+        if let Err(error) = logger::reload_file_logger(prev_level) {
+            tracing::warn!(error = %error, "清理日志后重建文件日志层失败");
+        }
+    }
     if failures > 0 {
         return Err(CommandError::from(
             "清理日志失败",

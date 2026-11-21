@@ -101,7 +101,7 @@ pub(crate) fn downloaded_library(app: &AppHandle, include_removed: bool) -> Libr
                 map.insert(comic.id, dir.clone());
             }
         }
-        cache.set(map);
+        cache.set(&download_dir, map);
         let visible_count = visible.len();
         cache.set_comics(&download_dir, visible);
         cache.set_scan(&download_dir, visible_count, scan.skipped.clone());

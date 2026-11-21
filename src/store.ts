@@ -42,12 +42,17 @@ export const useStore = defineStore('store', () => {
   const favoriteResultEpoch = ref<number>()
   const favoriteListStale = ref(false)
 
-  function applyConfig(server: Config, discardLocal = false) {
+  let inFlightConfigSnapshot: Config | undefined
+  let lastScheduledSnapshot: Config | undefined
+
+  function applyConfig(server: Config, discardLocal = false, mergeBaseOverride?: Config) {
     if (authoritativeConfig.value && (server.revision ?? 0) < (authoritativeConfig.value.revision ?? 0)) return
     const old = authoritativeConfig.value
     const previousDownloadDir = config.value?.downloadDir
     const previousCredentials = config.value === undefined ? undefined : `${config.value.username}\u0000${config.value.password}`
-    config.value = discardLocal ? structuredClone(toRaw(server)) : mergeServerConfig(config.value, old, server)
+    const mergeBase = mergeBaseOverride ?? inFlightConfigSnapshot ?? old
+    if (discardLocal) lastScheduledSnapshot = undefined
+    config.value = discardLocal ? structuredClone(toRaw(server)) : mergeServerConfig(config.value, mergeBase, server)
     authoritativeConfig.value = structuredClone(toRaw(server))
     if ((old !== undefined && old.downloadDir !== server.downloadDir)
       || (previousDownloadDir !== undefined && previousDownloadDir !== config.value.downloadDir)) {
@@ -59,13 +64,22 @@ export const useStore = defineStore('store', () => {
     }
   }
 
-  function configIsDirty() { return !!config.value && !!authoritativeConfig.value && hasConfigChanges(config.value, authoritativeConfig.value) }
+  function configIsDirty(baseOverride = inFlightConfigSnapshot ?? authoritativeConfig.value) {
+    return !!config.value && !!baseOverride && hasConfigChanges(config.value, baseOverride)
+  }
 
   async function persistConfig(snapshot = config.value, base = authoritativeConfig.value) {
     if (!snapshot || !base) throw new Error('配置尚未加载')
-    const result = await commands.saveConfig(structuredClone(toRaw(snapshot)), structuredClone(toRaw(base)))
-    if (result.status === 'error') throw new Error(`${result.error.err_title}：${result.error.err_message}`)
-    applyConfig(result.data)
+    const clonedSnapshot = structuredClone(toRaw(snapshot))
+    const clonedBase = structuredClone(toRaw(base))
+    inFlightConfigSnapshot = clonedSnapshot
+    try {
+      const result = await commands.saveConfig(clonedSnapshot, clonedBase)
+      if (result.status === 'error') throw new Error(`${result.error.err_title}：${result.error.err_message}`)
+      applyConfig(result.data, false, clonedSnapshot)
+    } finally {
+      if (inFlightConfigSnapshot === clonedSnapshot) inFlightConfigSnapshot = undefined
+    }
   }
 
   function applySession(data: SessionChangedEvent) {
@@ -198,6 +212,13 @@ export const useStore = defineStore('store', () => {
         archivingComics.value.delete(comicId)
         archiveFailures.value.delete(comicId)
         markComicDownloaded(comicId)
+        if (pickedComic.value?.id === comicId && payload.data.archivePath) {
+          pickedComic.value.isDownloaded = true
+          pickedComic.value.comicDownloadDir = payload.data.archivePath
+          for (const chapter of pickedComic.value.chapterInfos) {
+            if (chapter.isDownloaded) chapter.chapterDownloadDir = payload.data.archivePath
+          }
+        }
         // 整合会重写书库文件（合并成整本 CBZ 或改名），列表必须重新扫描；
         // 不在书库页时只做陈旧标记，由可见页的单一调度入口扫描。
         invalidateDownloadedLibrary()
@@ -292,8 +313,12 @@ export const useStore = defineStore('store', () => {
       })
       .then(async () => {
         if (item.revision !== configSaveRevision || configMaintenanceInProgress.value) return
+        if (lastScheduledSnapshot === item.snapshot) lastScheduledSnapshot = undefined
+        const snapshot = config.value ? structuredClone(toRaw(config.value)) : item.snapshot
+        const base = authoritativeConfig.value ? structuredClone(toRaw(authoritativeConfig.value)) : item.base
+        if (!hasConfigChanges(snapshot, base)) return
         try {
-          await persistConfig(item.snapshot, item.base)
+          await persistConfig(snapshot, base)
         } catch (error) {
           console.error(error)
           if (item.revision === configSaveRevision) {
@@ -324,17 +349,31 @@ export const useStore = defineStore('store', () => {
     configAutoSaveEnabled = false
     clearPendingConfigSaveTimer()
     pendingConfigSave = undefined
+    lastScheduledSnapshot = undefined
   }
 
   watch(
     () => config.value,
     (nextConfig) => {
-      if (!configAutoSaveEnabled || nextConfig === undefined || configMaintenanceInProgress.value || !configIsDirty()) {
+      if (!configAutoSaveEnabled || nextConfig === undefined || configMaintenanceInProgress.value) {
+        return
+      }
+      const effectiveBase = inFlightConfigSnapshot ?? authoritativeConfig.value
+      if (!effectiveBase) return
+      if (!hasConfigChanges(nextConfig, effectiveBase)) {
+        configSaveRevision++
+        pendingConfigSave = undefined
+        lastScheduledSnapshot = undefined
+        clearPendingConfigSaveTimer()
+        return
+      }
+      if (lastScheduledSnapshot && !hasConfigChanges(nextConfig, lastScheduledSnapshot)) {
         return
       }
       const revision = ++configSaveRevision
       const snapshot = structuredClone(toRaw(nextConfig))
-      const base = structuredClone(toRaw(authoritativeConfig.value!))
+      lastScheduledSnapshot = snapshot
+      const base = structuredClone(toRaw(effectiveBase))
       pendingConfigSave = { revision, snapshot, base }
       clearPendingConfigSaveTimer()
       configSaveTimer = setTimeout(() => {
@@ -352,6 +391,7 @@ export const useStore = defineStore('store', () => {
     configMaintenanceInProgress.value = true
     configSaveRevision++
     pendingConfigSave = undefined
+    lastScheduledSnapshot = undefined
     clearPendingConfigSaveTimer()
     try {
       await configSaveQueue
@@ -417,12 +457,20 @@ export const useStore = defineStore('store', () => {
     sessionDownloadedComicIds.value.add(comicId)
   }
 
-  function markComicRemoved(comicId: number) {
+  function markComicRemoved(comicId: number, options?: { deletedFiles?: boolean }) {
     sessionDownloadedComicIds.value.delete(comicId)
     sessionRemovedComicIds.value.add(comicId)
     downloadedComics.value = downloadedComics.value.filter((comic) => comic.id !== comicId)
     if (pickedComic.value?.id === comicId) {
       clearComicDownloadMarkers(pickedComic.value)
+    }
+    if (options?.deletedFiles) {
+      for (const [chapterId, progress] of progresses.value.entries()) {
+        if (progress.comic.id === comicId && progress.state === 'Completed') {
+          dismissedCompleted.set(dismissedCompletedKey(chapterId, progress.taskId), progress.revision)
+          progresses.value.delete(chapterId)
+        }
+      }
     }
   }
 
@@ -701,9 +749,24 @@ export const useStore = defineStore('store', () => {
   let taskListenerPromise: Promise<void> | undefined
   const bufferedTasks: DownloadTaskEvent[] = []
   const dismissedCompleted = new Map<string, number>()
+  const lastDownloadBatchOutcome = ref<'idle' | 'completed' | 'interrupted'>('idle')
+  let batchHadCompleted = false
+  let batchHadNonCompletedEnd = false
+
+  function isActiveTaskState(state: ProgressData['state'] | undefined) {
+    return state === 'Downloading' || state === 'Pending'
+  }
 
   function dismissedCompletedKey(chapterId: number, taskId: string) {
     return `${chapterId}:${taskId}`
+  }
+
+  function resetProgressHistory() {
+    progresses.value.clear()
+    dismissedCompleted.clear()
+    batchHadCompleted = false
+    batchHadNonCompletedEnd = false
+    lastDownloadBatchOutcome.value = 'idle'
   }
 
   function clearCompletedProgresses() {
@@ -722,8 +785,27 @@ export const useStore = defineStore('store', () => {
     } else if (event.event === 'Create') {
       dismissedCompleted.delete(dismissedCompletedKey(chapterId, event.data.taskId))
     }
+    const prevActiveCount = activeDownloadCount.value
     const previous = progresses.value.get(chapterId)?.state
     const progress = applyDownloadEvent(progresses.value, event)
+    if (!tasksHydrating && progress) {
+      const nextActiveCount = activeDownloadCount.value
+      const wasActive = isActiveTaskState(previous)
+      const isNowActive = isActiveTaskState(progress.state)
+      if (prevActiveCount === 0 && nextActiveCount > 0) {
+        batchHadCompleted = false
+        batchHadNonCompletedEnd = false
+        lastDownloadBatchOutcome.value = 'idle'
+      } else if (wasActive && !isNowActive) {
+        if (progress.state === 'Completed') batchHadCompleted = true
+        else batchHadNonCompletedEnd = true
+        if (nextActiveCount === 0) {
+          lastDownloadBatchOutcome.value = batchHadCompleted && !batchHadNonCompletedEnd ? 'completed' : 'interrupted'
+          batchHadCompleted = false
+          batchHadNonCompletedEnd = false
+        }
+      }
+    }
     if (progress?.state === 'Completed' && previous !== 'Completed') {
       progress.chapterInfo.isDownloaded = true
       syncCompletedDownload(progress, !tasksHydrating)
@@ -811,7 +893,7 @@ function trimProgressHistory() {
     searchResultEpoch, weeklyResultEpoch, favoriteResultEpoch, favoriteListStale,
     applySession, applyLoginResult, recordFavorite, applyFavoriteMutation, favoriteRevision, setFavorite, handleFavoriteChangedEvent, initStateListeners,
     archivingComics, isArchiving, archiveFailures, archiveFailure,
-    initDownloadListener, reloadTasks, taskLoadError, loadingTasks, clearCompletedProgresses,
+    initDownloadListener, reloadTasks, taskLoadError, loadingTasks, clearCompletedProgresses, resetProgressHistory, lastDownloadBatchOutcome,
     readingState,
     readingPersistenceError,
     saveReadingProgress,

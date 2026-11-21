@@ -13,7 +13,7 @@ internal class AndroidNetworkTracker(
     private val activity: Activity,
     private val webViewProvider: () -> WebView?,
 ) {
-    private data class PhysicalNetworkInfo(val kind: String, val validated: Boolean)
+    private data class PhysicalNetworkInfo(val kind: String, val validated: Boolean, val notMetered: Boolean)
 
     /// 当前可用的物理网络（Wi-Fi/蜂窝）：VPN 开启时默认网络是隧道，
     /// 只有跟踪这一层才能发现底层换网。
@@ -37,7 +37,12 @@ internal class AndroidNetworkTracker(
             val manager = activity.getSystemService(ConnectivityManager::class.java)
             val defaultCallback = object : ConnectivityManager.NetworkCallback() {
                 override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-                    pushMetered(!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
+                    val metered = if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                        effectiveMetered(manager, network)
+                    } else {
+                        !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+                    }
+                    pushMetered(metered)
                     pushVpn(
                         capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
                         networkPathKey(network),
@@ -71,6 +76,7 @@ internal class AndroidNetworkTracker(
                     physicalNetworks[network] = PhysicalNetworkInfo(
                         physicalKind(capabilities),
                         capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
                     )
                     pushCurrentNetworkState()
                 }
@@ -103,12 +109,12 @@ internal class AndroidNetworkTracker(
     /** 启动/换网/物理网络变化时统一推送一次当前状态。 */
     fun pushCurrentNetworkState() {
         val manager = activity.getSystemService(ConnectivityManager::class.java)
-        pushMetered(manager.isActiveNetworkMetered)
+        pushMetered(effectiveMetered(manager))
         pushCurrentVpn(manager)
     }
 
     fun isMetered(): Boolean =
-        activity.getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered
+        effectiveMetered(activity.getSystemService(ConnectivityManager::class.java))
 
     fun isVpnActive(): Boolean =
         isVpnActive(activity.getSystemService(ConnectivityManager::class.java))
@@ -125,7 +131,7 @@ internal class AndroidNetworkTracker(
         val network = manager.activeNetwork
         return JSONObject()
             .put("active", isVpnActive(manager, network))
-            .put("metered", manager.isActiveNetworkMetered)
+            .put("metered", effectiveMetered(manager, network))
             .put("networkKey", networkPathKey(network))
             .toString()
     }
@@ -143,10 +149,33 @@ internal class AndroidNetworkTracker(
                     physicalNetworks[network] = PhysicalNetworkInfo(
                         physicalKind(capabilities),
                         capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
                     )
                 }
             }
         } catch (_: Exception) {}
+    }
+
+    private fun effectiveMetered(
+        manager: ConnectivityManager,
+        network: Network? = manager.activeNetwork,
+    ): Boolean {
+        val caps = manager.getNetworkCapabilities(network)
+        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            // Android 10+ 许多 VPN 默认不声明 NOT_METERED；当流量经 VPN 隧道走时，
+            // 依据底层物理网络的计费属性判断，避免连接 Wi-Fi 开 VPN 误触发「仅 Wi-Fi 下载」拦截。
+            val best = physicalNetworks.entries.minWithOrNull(
+                compareBy<Map.Entry<Network, PhysicalNetworkInfo>>(
+                    { if (it.value.validated) 0 else 1 },
+                    { physicalRank(it.value.kind) },
+                    { it.key.toString() },
+                ),
+            )
+            if (best != null) {
+                return !best.value.notMetered
+            }
+        }
+        return manager.isActiveNetworkMetered
     }
 
     /**
@@ -186,6 +215,7 @@ internal class AndroidNetworkTracker(
         physicalNetworks[network] = PhysicalNetworkInfo(
             physicalKind(capabilities),
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
         )
         return true
     }

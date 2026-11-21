@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use parking_lot::{Mutex, RwLock};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_specta::Event;
 use tokio::sync::watch;
 
@@ -174,15 +174,6 @@ impl DownloadTask {
         let chapter_title = &self.chapter_info.chapter_title;
         let chapter_id = self.chapter_info.chapter_id;
 
-        if let Some(dir) = &self.comic.comic_download_dir {
-            if let Some(cache) = self
-                .app
-                .try_state::<crate::library_catalog::DownloadedLibraryCache>()
-            {
-                cache.insert(self.comic.id, dir.clone());
-            }
-        }
-
         // 获取此章节每张图片的下载链接以及对应的block_num
         let Some(urls_with_block_num) = self.get_urls_with_block_num(chapter_id).await else {
             return;
@@ -197,10 +188,8 @@ impl DownloadTask {
             let task = self.clone();
             let expected_pages = urls_with_block_num.len();
             match tokio::task::spawn_blocking(move || {
-                let Some(temp_download_dir) = task.create_temp_download_dir() else {
-                    return Ok::<_, (String, anyhow::Error)>(None);
-                };
-                task.clean_temp_download_dir(&temp_download_dir);
+                let temp_download_dir = task.create_temp_download_dir()?;
+                task.clean_temp_download_dir(&temp_download_dir, expected_pages);
 
                 // 重新下载时保留原CBZ，复用可读取的页面，只请求缺失或损坏页面。
                 if let Some(source) = &task.chapter_info.chapter_download_dir {
@@ -221,12 +210,11 @@ impl DownloadTask {
                         })
                         .map_err(|error| ("复用现有章节图片失败".to_string(), error))?;
                 }
-                Ok(Some(temp_download_dir))
+                Ok::<_, (String, anyhow::Error)>(temp_download_dir)
             })
             .await
             {
-                Ok(Ok(Some(dir))) => dir,
-                Ok(Ok(None)) => return,
+                Ok(Ok(dir)) => dir,
                 Ok(Err((title, error))) => {
                     self.fail_with_error(title, &error);
                     return;
@@ -348,38 +336,28 @@ impl DownloadTask {
         // 完成收尾可收敛收尾瞬间的 Paused，但不能覆盖取消或失败。
     }
 
-    fn create_temp_download_dir(&self) -> Option<PathBuf> {
+    fn create_temp_download_dir(&self) -> Result<PathBuf, (String, anyhow::Error)> {
         let comic_title = &self.comic.name;
         let chapter_title = &self.chapter_info.chapter_title;
 
-        let temp_download_dir = match self.chapter_info.get_temp_download_dir() {
-            Ok(temp_download_dir) => temp_download_dir,
-            Err(err) => {
-                let err_title = format!("`{comic_title} - {chapter_title}`获取临时下载目录失败");
-                let string_chain = err.to_string_chain();
-                tracing::error!(err_title, message = string_chain);
-
-                self.fail_with_error(err_title, &err);
-
-                return None;
-            }
-        };
-
-        if let Err(err) = self
-            .file_writes
-            .run(|| std::fs::create_dir_all(&temp_download_dir).map_err(anyhow::Error::from))
-        {
-            let err_title = format!(
-                "`{comic_title} - {chapter_title}`创建临时下载目录`{}`失败",
-                temp_download_dir.display()
-            );
+        let temp_download_dir = self.chapter_info.get_temp_download_dir().map_err(|err| {
+            let err_title = format!("`{comic_title} - {chapter_title}`获取临时下载目录失败");
             let string_chain = err.to_string_chain();
             tracing::error!(err_title, message = string_chain);
+            (err_title, err)
+        })?;
 
-            self.fail_with_error(err_title, &err);
-
-            return None;
-        }
+        self.file_writes
+            .run(|| std::fs::create_dir_all(&temp_download_dir).map_err(anyhow::Error::from))
+            .map_err(|err| {
+                let err_title = format!(
+                    "`{comic_title} - {chapter_title}`创建临时下载目录`{}`失败",
+                    temp_download_dir.display()
+                );
+                let string_chain = err.to_string_chain();
+                tracing::error!(err_title, message = string_chain);
+                (err_title, err)
+            })?;
 
         tracing::trace!(
             comic_title,
@@ -388,7 +366,7 @@ impl DownloadTask {
             temp_download_dir.display()
         );
 
-        Some(temp_download_dir)
+        Ok(temp_download_dir)
     }
 
     async fn get_urls_with_block_num(&self, chapter_id: i64) -> Option<Vec<(String, u32)>> {
@@ -465,9 +443,10 @@ impl DownloadTask {
     }
 
     /// 删除临时下载目录中不属于当前页码或不是图片的文件
-    fn clean_temp_download_dir(&self, temp_download_dir: &Path) {
+    fn clean_temp_download_dir(&self, temp_download_dir: &Path, expected_pages: usize) {
         let comic_title = &self.comic.name;
         let chapter_title = &self.chapter_info.chapter_title;
+        let expected_pages = u32::try_from(expected_pages).unwrap_or(u32::MAX);
 
         let entries = match std::fs::read_dir(temp_download_dir).map_err(anyhow::Error::from) {
             Ok(entries) => entries,
@@ -483,7 +462,8 @@ impl DownloadTask {
         };
 
         for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
-            // 只保留合法页码的图片文件（扩展名随源格式，不做格式转换）
+            // 只保留标准 4 位零填充合法页码的图片文件（扩展名随源格式），
+            // 避免 `"1.jpg"` 等非标准命名在打包阶段造成页数重复计数。
             let should_keep = path
                 .extension()
                 .and_then(|ext| ext.to_str())
@@ -492,10 +472,9 @@ impl DownloadTask {
                 && path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
+                    .filter(|stem| stem.len() == 4 && stem.chars().all(|c| c.is_ascii_digit()))
                     .and_then(|stem| stem.parse::<u32>().ok())
-                    .is_some_and(|page| {
-                        page > 0 && page <= self.total_img_count.load(Ordering::Relaxed)
-                    });
+                    .is_some_and(|page| page > 0 && page <= expected_pages);
             if should_keep {
                 continue;
             }
@@ -554,8 +533,10 @@ impl DownloadTask {
                 }
                 ControlFlow::Continue(())
             }
-            DownloadTaskState::Cancelled => {
-                tracing::debug!(comic_title, chapter_title, "章节取消下载");
+            DownloadTaskState::Cancelled
+            | DownloadTaskState::Failed
+            | DownloadTaskState::Completed => {
+                tracing::debug!(comic_title, chapter_title, ?state, "章节下载任务结束");
                 ControlFlow::Break(())
             }
             _ => ControlFlow::Continue(()),
@@ -832,7 +813,7 @@ impl Comic {
 }
 
 impl ChapterInfo {
-    fn get_temp_download_dir(&self) -> anyhow::Result<PathBuf> {
+    pub(crate) fn get_temp_download_dir(&self) -> anyhow::Result<PathBuf> {
         let chapter_download_dir = self
             .chapter_download_dir
             .as_ref()

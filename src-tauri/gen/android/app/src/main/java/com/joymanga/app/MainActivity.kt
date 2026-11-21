@@ -130,7 +130,10 @@ class MainActivity : TauriActivity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_BACK) { dispatchBack(); return true }
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event?.repeatCount == 0) dispatchBack()
+            return true
+        }
         if (volumeKeyPaging && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)) {
             if (event?.repeatCount == 0) {
                 val direction = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) "prev" else "next"
@@ -249,6 +252,41 @@ class MainActivity : TauriActivity() {
         ""
     }
 
+    private fun handleDownloadStatus(
+        active: Int,
+        speed: String,
+        current: Int,
+        total: Int,
+        notifyCompleted: Boolean,
+    ) {
+        runOnUiThread {
+            if (isDestroyed || isFinishing) return@runOnUiThread
+            hasDownloadStatus = true
+            val wasActive = activeDownloads > 0
+            activeDownloads = active.coerceAtLeast(0)
+            downloadSpeed = speed.take(80)
+            downloadPagesCurrent = current.coerceAtLeast(0)
+            downloadPagesTotal = total.coerceAtLeast(0)
+            val prefs = getSharedPreferences("joymanga_permissions", MODE_PRIVATE)
+            val version = appVersionName()
+            val askedVersion = prefs.getString("notifications_prompted_version", null)
+            if (activeDownloads > 0 && Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
+                askedVersion != version
+            ) {
+                prefs.edit().putString("notifications_prompted_version", version).apply()
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATION_PERMISSION)
+            }
+            if (activeDownloads == 0) {
+                updateDownloadService()
+            } else {
+                scheduleDownloadServiceUpdate()
+                if (!wasActive) updateDownloadService()
+            }
+            if (wasActive && activeDownloads == 0 && notifyCompleted) notifyDownloadsFinished()
+        }
+    }
+
     inner class AndroidBridge {
         @JavascriptInterface fun isMetered(): Boolean = networkTracker.isMetered()
         @JavascriptInterface fun isVpnActive(): Boolean = networkTracker.isVpnActive()
@@ -272,30 +310,16 @@ class MainActivity : TauriActivity() {
 
         @JavascriptInterface fun exitApp() { runOnUiThread { moveTaskToBack(true) } }
 
-        @JavascriptInterface fun downloadStatus(active: Int, speed: String, current: Int, total: Int) {
-            runOnUiThread {
-                if (isDestroyed || isFinishing) return@runOnUiThread
-                hasDownloadStatus = true
-                val wasActive = activeDownloads > 0
-                activeDownloads = active.coerceAtLeast(0)
-                downloadSpeed = speed.take(80)
-                downloadPagesCurrent = current.coerceAtLeast(0)
-                downloadPagesTotal = total.coerceAtLeast(0)
-                val prefs = getSharedPreferences("joymanga_permissions", MODE_PRIVATE)
-                val version = appVersionName()
-                val askedVersion = prefs.getString("notifications_prompted_version", null)
-                if (activeDownloads > 0 && Build.VERSION.SDK_INT >= 33 &&
-                    checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-                    askedVersion != version
-                ) {
-                    prefs.edit().putString("notifications_prompted_version", version).apply()
-                    requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATION_PERMISSION)
-                }
-                scheduleDownloadServiceUpdate()
-                if (activeDownloads > 0 && !wasActive) updateDownloadService()
-                if (wasActive && activeDownloads == 0) notifyDownloadsFinished()
-            }
-        }
+        @JavascriptInterface fun downloadStatus(active: Int, speed: String, current: Int, total: Int) =
+            handleDownloadStatus(active, speed, current, total, notifyCompleted = false)
+
+        @JavascriptInterface fun downloadStatusWithCompletion(
+            active: Int,
+            speed: String,
+            current: Int,
+            total: Int,
+            notifyCompleted: Boolean,
+        ) = handleDownloadStatus(active, speed, current, total, notifyCompleted)
 
         /** 阅读时保持屏幕常亮；关闭后恢复系统默认息屏策略。 */
         @JavascriptInterface fun setKeepScreenOn(enabled: Boolean) {

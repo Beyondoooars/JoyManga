@@ -88,6 +88,13 @@ pub struct ConfigInfo {
     pub log_level: LogLevel,
 }
 
+fn redact_proxy_host(host: &str) -> String {
+    match host.rsplit_once('@') {
+        Some((_, clean_host)) => format!("***@{clean_host}"),
+        None => host.to_string(),
+    }
+}
+
 impl From<&Config> for ConfigInfo {
     fn from(config: &Config) -> Self {
         Self {
@@ -96,7 +103,7 @@ impl From<&Config> for ConfigInfo {
             password_saved: !config.password.is_empty(),
             download_dir: config.download_dir.clone(),
             proxy_mode: config.proxy_mode.clone(),
-            proxy_host: config.proxy_host.clone(),
+            proxy_host: redact_proxy_host(&config.proxy_host),
             proxy_port: config.proxy_port,
             chapter_concurrency: config.chapter_concurrency,
             img_concurrency: config.img_concurrency,
@@ -135,6 +142,11 @@ pub struct QueueTaskInfo {
 
 impl From<DownloadTaskSnapshot> for QueueTaskInfo {
     fn from(snapshot: DownloadTaskSnapshot) -> Self {
+        let failure = snapshot.failure.map(|mut failure| {
+            failure.message = redact_text(&failure.message);
+            failure.line = failure.line.map(|line| redact_text(&line));
+            failure
+        });
         Self {
             task_id: snapshot.task_id,
             comic_id: snapshot.comic.id,
@@ -146,9 +158,9 @@ impl From<DownloadTaskSnapshot> for QueueTaskInfo {
             downloaded_img_count: snapshot.downloaded_img_count,
             total_img_count: snapshot.total_img_count,
             attempts: snapshot.attempts,
-            failure: snapshot.failure,
+            failure,
             image_failures: snapshot.image_failures,
-            error_message: snapshot.error_message,
+            error_message: snapshot.error_message.map(|msg| redact_text(&msg)),
         }
     }
 }
@@ -411,12 +423,27 @@ fn strip_url_queries(line: &str) -> String {
             })
             .unwrap_or(after.len());
         let token = &after[..end];
-        match token.find('?') {
-            Some(query) => {
-                out.push_str(&token[..query]);
-                out.push_str("?<redacted>");
+        let base = match token.find('?') {
+            Some(query) => &token[..query],
+            None => token,
+        };
+        if let Some(scheme_sep) = base.find("://") {
+            let scheme_end = scheme_sep + 3;
+            let after_scheme = &base[scheme_end..];
+            let authority_end = after_scheme.find(['/', '#']).unwrap_or(after_scheme.len());
+            let authority = &after_scheme[..authority_end];
+            if let Some(at_pos) = authority.rfind('@') {
+                out.push_str(&base[..scheme_end]);
+                out.push_str("***@");
+                out.push_str(&after_scheme[at_pos + 1..]);
+            } else {
+                out.push_str(base);
             }
-            None => out.push_str(token),
+        } else {
+            out.push_str(base);
+        }
+        if token.contains('?') {
+            out.push_str("?<redacted>");
         }
         rest = &after[end..];
     }
@@ -428,6 +455,16 @@ fn find_url_start(text: &str) -> Option<usize> {
     match (text.find("http://"), text.find("https://")) {
         (Some(http), Some(https)) => Some(http.min(https)),
         (http, https) => http.or(https),
+    }
+}
+
+fn consume_secret_quote(bytes: &[u8], pos: usize) -> Option<(usize, u8, bool)> {
+    if pos + 1 < bytes.len() && bytes[pos] == b'\\' && matches!(bytes[pos + 1], b'"' | b'\'') {
+        Some((pos + 2, bytes[pos + 1], true))
+    } else if pos < bytes.len() && matches!(bytes[pos], b'"' | b'\'') {
+        Some((pos + 1, bytes[pos], false))
+    } else {
+        None
     }
 }
 
@@ -451,9 +488,9 @@ fn redact_secrets(line: &str) -> String {
         while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
             pos += 1;
         }
-        // JSON / JS 对象里的键通常带引号："password": "secret"。
-        if pos < bytes.len() && matches!(bytes[pos], b'"' | b'\'') {
-            let mut after_quote = pos + 1;
+        // JSON / JS / 转义 JSON 字符串里的键通常带引号或转义引号："password": "secret" / \"password\":\"secret\"。
+        if let Some((next_pos, _, _)) = consume_secret_quote(bytes, pos) {
+            let mut after_quote = next_pos;
             while after_quote < bytes.len() && bytes[after_quote].is_ascii_whitespace() {
                 after_quote += 1;
             }
@@ -469,18 +506,33 @@ fn redact_secrets(line: &str) -> String {
             while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
                 pos += 1;
             }
-            let quote = if pos < bytes.len() && matches!(bytes[pos], b'"' | b'\'') {
-                let quote = bytes[pos];
-                pos += 1;
-                Some(quote)
-            } else {
-                None
-            };
+            let quote =
+                if let Some((next_pos, quote_byte, escaped)) = consume_secret_quote(bytes, pos) {
+                    pos = next_pos;
+                    Some((quote_byte, escaped))
+                } else {
+                    None
+                };
             let value_start = pos;
             match quote {
-                Some(quote) => {
-                    while pos < bytes.len() && bytes[pos] != quote {
+                Some((quote_byte, false)) => {
+                    while pos < bytes.len() && bytes[pos] != quote_byte {
                         // 跳过反斜杠转义，避免把 \" 当成值的结束。
+                        pos += if bytes[pos] == b'\\' && pos + 1 < bytes.len() {
+                            2
+                        } else {
+                            1
+                        };
+                    }
+                }
+                Some((quote_byte, true)) => {
+                    while pos < bytes.len() {
+                        if pos + 1 < bytes.len()
+                            && bytes[pos] == b'\\'
+                            && bytes[pos + 1] == quote_byte
+                        {
+                            break;
+                        }
                         pos += if bytes[pos] == b'\\' && pos + 1 < bytes.len() {
                             2
                         } else {
@@ -490,6 +542,12 @@ fn redact_secrets(line: &str) -> String {
                 }
                 None => {
                     while pos < bytes.len() && !is_secret_value_delimiter(bytes[pos]) {
+                        if pos + 1 < bytes.len()
+                            && bytes[pos] == b'\\'
+                            && matches!(bytes[pos + 1], b'"' | b'\'')
+                        {
+                            break;
+                        }
                         pos += 1;
                     }
                 }

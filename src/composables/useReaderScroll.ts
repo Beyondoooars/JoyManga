@@ -23,6 +23,8 @@ export function useReaderScroll(options: UseReaderScrollOptions) {
 
   const scrollViewer = options.scrollViewer ?? ref<HTMLElement | null>(null)
   let scrollObserver: IntersectionObserver | undefined
+  let observedScrollContainer: HTMLElement | undefined
+  let scrollEndListener: (() => void) | undefined
   const intersectingPages = new Set<number>()
   const observedPageEls = new Map<number, HTMLElement>()
   const measuredPageSizes = ref<Map<number, { width: number; height: number }>>(new Map())
@@ -45,6 +47,11 @@ export function useReaderScroll(options: UseReaderScrollOptions) {
   function disconnectScrollObserver() {
     scrollObserver?.disconnect()
     scrollObserver = undefined
+    if (observedScrollContainer && scrollEndListener) {
+      observedScrollContainer.removeEventListener('scroll', scrollEndListener)
+    }
+    observedScrollContainer = undefined
+    scrollEndListener = undefined
     intersectingPages.clear()
     observedPageEls.clear()
   }
@@ -221,6 +228,15 @@ export function useReaderScroll(options: UseReaderScrollOptions) {
       { root: container, threshold: [0.1, 0.5] },
     )
     pages.forEach((page) => scrollObserver?.observe(page))
+    const onContainerScroll = () => {
+      if (settleTarget !== null) return
+      const totalPages = chapterData.value?.imagePaths.length ?? 0
+      if (totalPages <= 0 || !scrollContainerAtEnd(container)) return
+      syncCurrentPageFromLayout(container)
+    }
+    container.addEventListener('scroll', onContainerScroll, { passive: true })
+    observedScrollContainer = container
+    scrollEndListener = onContainerScroll
   }
 
   function onScrollTouchStart(e: TouchEvent) {

@@ -3,7 +3,7 @@ use crate::responses::GetWeeklyInfoRespData;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,8 +59,9 @@ const IMAGE_SPEED_WARMUP_BYTES: usize = 64 * 1024;
 /// 进程级测速互斥：前端丢弃旧结果并不会停止后端请求，手动再次测速若并行执行
 /// 会一起抢占带宽。第二个请求直接返回可读的忙碌提示，而不是排队后重复测速。
 static IMAGE_SPEED_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-/// 测速取消标记：前端离开设置页或改动线路时通知后端停止剩余线路。
-static IMAGE_SPEED_CANCEL: AtomicBool = AtomicBool::new(false);
+/// 测速运行与取消代际：用单调递增序号配对，避免“刚发起测速立即取消”时启动复位抹掉取消信号。
+static IMAGE_SPEED_RUN_GEN: AtomicU64 = AtomicU64::new(0);
+static IMAGE_SPEED_CANCEL_GEN: AtomicU64 = AtomicU64::new(0);
 static IMAGE_SPEED_CANCEL_NOTIFY: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
 
 fn cancel_sender() -> &'static tokio::sync::watch::Sender<u64> {
@@ -69,14 +70,18 @@ fn cancel_sender() -> &'static tokio::sync::watch::Sender<u64> {
 
 /// 请求尽快停止当前图片线路测速；后端会在当前线路探测结束后退出。
 pub fn cancel_image_speed_test() {
-    IMAGE_SPEED_CANCEL.store(true, Ordering::SeqCst);
+    let run_gen = IMAGE_SPEED_RUN_GEN.load(Ordering::SeqCst);
+    IMAGE_SPEED_CANCEL_GEN.fetch_max(run_gen, Ordering::SeqCst);
     let sender = cancel_sender();
     let next = sender.borrow().wrapping_add(1);
     sender.send_replace(next);
 }
 
-fn ensure_speed_test_active() -> anyhow::Result<()> {
-    anyhow::ensure!(!IMAGE_SPEED_CANCEL.load(Ordering::SeqCst), "测速已取消");
+fn ensure_speed_test_active(run_gen: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        IMAGE_SPEED_CANCEL_GEN.load(Ordering::SeqCst) < run_gen,
+        "测速已取消"
+    );
     Ok(())
 }
 
@@ -84,15 +89,16 @@ fn ensure_speed_test_active() -> anyhow::Result<()> {
 /// 每条线路单独使用客户端，避免某个域名的连接池状态污染另一条线路。
 /// 只比较当前网络与代理/VPN 路径下的结果，不声称 VPN 本身一定提速。
 pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<ImageSpeedReport> {
+    let my_gen = IMAGE_SPEED_RUN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut cancel_rx = cancel_sender().subscribe();
+    let _ = *cancel_rx.borrow_and_update();
     config.validate()?;
     anyhow::ensure!(comic_id > 0, "先选择一本在线漫画，再测速图片线路");
     let _speed_test_guard = IMAGE_SPEED_TEST_LOCK
         .get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock()
         .map_err(|_| anyhow::anyhow!("已有图片线路测速正在进行，请等待完成后再试"))?;
-    let mut cancel_rx = cancel_sender().subscribe();
-    let _ = *cancel_rx.borrow_and_update();
-    IMAGE_SPEED_CANCEL.store(false, Ordering::SeqCst);
+    ensure_speed_test_active(my_gen)?;
 
     // 测速开始时固定 VPN 状态与网络代际；中途切换 VPN/代理/默认网络时整轮作废，
     // 避免前半段走代理、后半段走 VPN 的结果被放在一起排序。
@@ -103,7 +109,7 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
 
     let mut results = Vec::with_capacity(candidates.len());
     for candidate in candidates {
-        ensure_speed_test_active()?;
+        ensure_speed_test_active(my_gen)?;
         ensure_same_network(network_epoch)?;
         let result = tokio::select! {
             _ = cancel_rx.changed() => {
@@ -115,16 +121,15 @@ pub async fn image_speed_test(config: Config, comic_id: i64) -> anyhow::Result<I
                 comic_id,
                 network_epoch,
                 &referer,
+                my_gen,
             ) => {
-                if IMAGE_SPEED_CANCEL.load(Ordering::SeqCst) {
-                    return Err(anyhow::anyhow!("测速已取消"));
-                }
+                ensure_speed_test_active(my_gen)?;
                 res
             }
         };
         // 网络变化优先于单线路超时报出：否则用户会误以为只是线路慢。
         ensure_same_network(network_epoch)?;
-        ensure_speed_test_active()?;
+        ensure_speed_test_active(my_gen)?;
         let (bytes, elapsed_ms, successful_samples, error) = match result {
             Ok(summary) => (
                 summary.bytes,
@@ -272,6 +277,7 @@ async fn probe_image_domain(
     comic_id: i64,
     network_epoch: u64,
     referer: &str,
+    run_gen: u64,
 ) -> anyhow::Result<ProbeSummary> {
     let client = config
         .apply_proxy_best_effort(
@@ -291,7 +297,7 @@ async fn probe_image_domain(
     )
     .await;
     ensure_same_network(network_epoch)?;
-    ensure_speed_test_active()?;
+    ensure_speed_test_active(run_gen)?;
 
     let started = Instant::now();
     let measure = async {

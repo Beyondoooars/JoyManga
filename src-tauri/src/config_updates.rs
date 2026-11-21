@@ -73,20 +73,6 @@ pub fn publish(app: &AppHandle, config: &Config) {
     .emit(app);
 }
 
-#[cfg(target_os = "android")]
-pub fn update(
-    app: &AppHandle,
-    change: impl FnOnce(&Config) -> anyhow::Result<Config>,
-) -> anyhow::Result<Config> {
-    let guard = write_guard();
-    let current = app.get_config().read().clone();
-    let next = change(&current)?;
-    let saved = commit(app, &guard, next)?;
-    drop(guard);
-    publish(app, &saved);
-    Ok(saved)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

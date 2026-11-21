@@ -18,7 +18,32 @@ pub(crate) struct StateJournal {
 
 impl StateJournal {
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        atomic_fs::write(path, serde_json::to_vec(self)?)
+        let mut sanitized = StateJournal {
+            previous_config: self.previous_config.clone(),
+            previous_queue: self.previous_queue.clone(),
+            previous_intents: self.previous_intents.clone(),
+            intents_managed: self.intents_managed,
+            committed: self.committed,
+        };
+        if !sanitized.previous_config.username.is_empty()
+            && !crate::credential_cipher::is_encrypted(&sanitized.previous_config.username)
+        {
+            sanitized.previous_config.username =
+                crate::credential_cipher::encrypt_for_this_machine(
+                    &sanitized.previous_config.username,
+                )
+                .context("加密事务日志中的登录账号失败")?;
+        }
+        if !sanitized.previous_config.password.is_empty()
+            && !crate::credential_cipher::is_encrypted(&sanitized.previous_config.password)
+        {
+            sanitized.previous_config.password =
+                crate::credential_cipher::encrypt_for_this_machine(
+                    &sanitized.previous_config.password,
+                )
+                .context("加密事务日志中的登录密码失败")?;
+        }
+        atomic_fs::write(path, serde_json::to_vec(&sanitized)?)
     }
 }
 
@@ -204,7 +229,23 @@ pub(crate) fn recover(config_path: &Path) {
             return;
         }
     };
-    for entry in entries.flatten() {
+    let mut removal_entries: Vec<(std::time::SystemTime, std::fs::DirEntry)> = entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".library-delete-") && name.ends_with(".json")
+        })
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (modified, entry)
+        })
+        .collect();
+    removal_entries.sort_by_key(|(modified, _)| *modified);
+    for (_, entry) in removal_entries {
         if let Err(error) = recover_removal(&records_path, &entry) {
             tracing::error!(path = %entry.path().display(), error = %error, "恢复书库删除事务失败，已保留日志以便排查");
         }
@@ -518,6 +559,46 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![kept_id]);
         assert!(!ids.contains(&deleted_id));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn state_journal_encrypts_credentials_on_disk() {
+        let root = std::env::temp_dir().join(format!("jm-journal-cipher-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state_path = root.join(".state-replace.json");
+        let mut config = crate::config::Config::default(&root);
+        config.username = "plain_user_name".to_string();
+        config.password = "plain_super_secret".to_string();
+        let journal = StateJournal {
+            previous_config: config,
+            previous_queue: None,
+            previous_intents: None,
+            intents_managed: false,
+            committed: false,
+        };
+        journal.save(&state_path).unwrap();
+
+        let raw = std::fs::read_to_string(&state_path).unwrap();
+        assert!(!raw.contains("plain_user_name"));
+        assert!(!raw.contains("plain_super_secret"));
+        let saved: StateJournal = serde_json::from_str(&raw).unwrap();
+        assert!(crate::credential_cipher::is_encrypted(
+            &saved.previous_config.username
+        ));
+        assert!(crate::credential_cipher::is_encrypted(
+            &saved.previous_config.password
+        ));
+        assert_eq!(
+            crate::credential_cipher::decrypt_for_this_machine(&saved.previous_config.username)
+                .unwrap(),
+            "plain_user_name"
+        );
+        assert_eq!(
+            crate::credential_cipher::decrypt_for_this_machine(&saved.previous_config.password)
+                .unwrap(),
+            "plain_super_secret"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -204,6 +204,7 @@ pub(crate) fn write_merged_cbz_archive(
         archive: zip::ZipArchive<std::fs::File>,
         all_img_names: Vec<String>,
         identity: Option<(i64, i64)>,
+        archived_orders: std::collections::HashMap<i64, i64>,
         pages: std::collections::BTreeMap<String, crate::types::PageSize>,
     }
     let mut merged_page_sizes: std::collections::BTreeMap<String, crate::types::PageSize> =
@@ -239,33 +240,41 @@ pub(crate) fn write_merged_cbz_archive(
                     let all_img_names = crate::comic_scanner::image_entry_names(&mut archive);
                     let identity =
                         crate::comic_scanner::read_chapter_identity_from_archive(&mut archive)?;
+                    let archived_orders =
+                        crate::comic_scanner::read_merged_chapter_orders_from_archive(
+                            &mut archive,
+                            comic.id,
+                        );
                     let pages = crate::page_size::read_pages_entry(&mut archive);
                     vacant.insert(CachedSourceArchive {
                         archive,
                         all_img_names,
                         identity,
+                        archived_orders,
                         pages,
                     })
                 }
             };
 
-            // 来源是独立章节文件时使用全部图片；来源是整本归档（无本章身份）时按话切片，
-            // 避免把其他话的页面重复写入合并结果。
+            // 来源是独立章节文件时使用全部图片；来源是整本归档（无本章身份）时按源归档自身的
+            // 章节序号切片（避免服务端增删章节引发 order 偏移后切错话）。
             let is_own_chapter_file = cached.identity == Some((comic.id, chapter_info.chapter_id));
+            let slice_order = cached
+                .archived_orders
+                .get(&chapter_info.chapter_id)
+                .copied()
+                .unwrap_or(chapter_info.order);
             let mut img_names = if is_own_chapter_file {
                 cached.all_img_names.clone()
             } else {
-                crate::comic_scanner::select_chapter_pages(
-                    &cached.all_img_names,
-                    chapter_info.order,
-                )
-                .with_context(|| {
-                    format!(
-                        "整本归档`{}`中找不到章节`{}`的页面",
-                        chapter_download_dir.display(),
-                        chapter_info.chapter_title
-                    )
-                })?
+                crate::comic_scanner::select_chapter_pages(&cached.all_img_names, slice_order)
+                    .with_context(|| {
+                        format!(
+                            "整本归档`{}`中找不到章节`{}`的页面",
+                            chapter_download_dir.display(),
+                            chapter_info.chapter_title
+                        )
+                    })?
             };
             img_names.sort_by(|a, b| utils::natural_cmp(a, b));
             total_pages += i64::try_from(img_names.len()).unwrap_or(0);
@@ -847,6 +856,92 @@ mod tests {
         // 归档原样保留，第二话页面还在
         let mut archive = zip::ZipArchive::new(std::fs::File::open(&merged).unwrap()).unwrap();
         assert!(archive.by_name("[02] 二/0001.png").is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn merged_cbz_reslice_uses_archived_orders_when_remote_order_shifts() {
+        use std::io::Read as _;
+        let root = std::env::temp_dir().join(format!("jm-remerge-order-{}", uuid::Uuid::new_v4()));
+        let prequel_dir = root.join("chapter_300");
+        std::fs::create_dir_all(&prequel_dir).unwrap();
+        std::fs::write(prequel_dir.join("0001.png"), b"new-ch0-p1").unwrap();
+
+        let merged = root.join("多话本.cbz");
+        let old_comic = Comic {
+            id: 30,
+            name: "多话本".into(),
+            chapter_infos: vec![
+                ChapterInfo {
+                    chapter_id: 301,
+                    chapter_title: "一".into(),
+                    order: 1,
+                    is_downloaded: Some(true),
+                    chapter_download_dir: None,
+                },
+                ChapterInfo {
+                    chapter_id: 302,
+                    chapter_title: "二".into(),
+                    order: 2,
+                    is_downloaded: Some(true),
+                    chapter_download_dir: None,
+                },
+            ],
+            ..Comic::default()
+        };
+        let mut zip = ZipWriter::new(std::fs::File::create(&merged).unwrap());
+        zip.start_file("元数据.json", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&serde_json::to_vec(&old_comic).unwrap())
+            .unwrap();
+        zip.start_file("[01] 一/0001.png", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"old-ch1-p1").unwrap();
+        zip.start_file("[02] 二/0001.png", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"old-ch2-p1").unwrap();
+        zip.finish().unwrap();
+
+        // 远端插入了序章 300，使原第 1/2 话在新列表里分别偏移到 order 2/3。
+        let ch300 = ChapterInfo {
+            chapter_id: 300,
+            chapter_title: "零".into(),
+            order: 1,
+            is_downloaded: Some(true),
+            chapter_download_dir: Some(prequel_dir),
+        };
+        let ch301 = ChapterInfo {
+            chapter_id: 301,
+            chapter_title: "一".into(),
+            order: 2,
+            is_downloaded: Some(true),
+            chapter_download_dir: Some(merged.clone()),
+        };
+        let ch302 = ChapterInfo {
+            chapter_id: 302,
+            chapter_title: "二".into(),
+            order: 3,
+            is_downloaded: Some(true),
+            chapter_download_dir: Some(merged.clone()),
+        };
+        let comic = Comic {
+            id: 30,
+            name: "多话本".into(),
+            chapter_infos: vec![ch300.clone(), ch301.clone(), ch302.clone()],
+            ..Comic::default()
+        };
+
+        write_merged_cbz_archive(&comic, &[&ch300, &ch301, &ch302], &merged, |_| {}).unwrap();
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&merged).unwrap()).unwrap();
+        let read_entry = |arch: &mut zip::ZipArchive<std::fs::File>, name: &str| {
+            let mut buf = Vec::new();
+            arch.by_name(name).unwrap().read_to_end(&mut buf).unwrap();
+            buf
+        };
+        assert_eq!(read_entry(&mut archive, "[01] 零/0001.png"), b"new-ch0-p1");
+        assert_eq!(read_entry(&mut archive, "[02] 一/0001.png"), b"old-ch1-p1");
+        assert_eq!(read_entry(&mut archive, "[03] 二/0001.png"), b"old-ch2-p1");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

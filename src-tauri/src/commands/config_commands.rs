@@ -65,16 +65,43 @@ fn save_config_blocking(
 ) -> CommandResult<Config> {
     let state = app.get_config();
     let (previous, next) = crate::network_state::with_download_policy(|| {
+        let manager = app.get_download_manager();
+        let tasks_guard = manager.download_tasks.read();
         let write_guard = crate::config_updates::write_guard();
         let previous = state.read().clone();
         let candidate =
             crate::config_updates::merge_config_changes(&previous, &base_config, &config)
                 .map_err(|err| CommandError::from("设置存在冲突", err))?;
+        if previous.download_dir != candidate.download_dir {
+            let has_active_tasks = tasks_guard.values().any(|task| {
+                matches!(
+                    *task.state_sender.borrow(),
+                    crate::download_manager::DownloadTaskState::Pending
+                        | crate::download_manager::DownloadTaskState::Downloading
+                )
+            });
+            if has_active_tasks {
+                return Err(CommandError::from(
+                    "保存配置失败",
+                    anyhow!("仍有下载任务运行，请暂停或等待完成后再修改书库目录"),
+                ));
+            }
+            if app
+                .try_state::<crate::archive_finalize::ArchiveFinalizeState>()
+                .is_some_and(|finalize| finalize.is_any_running())
+            {
+                return Err(CommandError::from(
+                    "保存配置失败",
+                    anyhow!("正在整理 CBZ，请稍后再修改书库目录"),
+                ));
+            }
+        }
         let next = crate::config_updates::commit(app, &write_guard, candidate)
             .map_err(|err| CommandError::from("保存配置失败", err))?;
-        // 释放配置写锁后再切换会话与下载队列，保持全局锁序：
+        // 释放配置写锁与任务读锁后再切换会话与下载队列，保持全局锁序：
         // DOWNLOAD_NETWORK_LOCK → download_tasks → CONFIG_WRITE_LOCK → Config
         drop(write_guard);
+        drop(tasks_guard);
         if previous.get_api_domain() != next.get_api_domain() {
             app.get_jm_client().invalidate_session();
         }
@@ -169,15 +196,49 @@ pub async fn initialize_android_storage(
                     anyhow!("应用书库路径无效"),
                 ));
             }
-            crate::config_updates::update(&app, |current| {
-                let mut next = current.clone();
-                if !current.android_storage_initialized {
-                    next.download_dir = candidate;
-                    next.android_storage_initialized = true;
+            let mut changed_pair: Option<(Config, Config)> = None;
+            let saved = crate::network_state::with_download_policy(|| {
+                let manager = app.get_download_manager();
+                let tasks_guard = manager.download_tasks.read();
+                let write_guard = crate::config_updates::write_guard();
+                let previous = app.get_config().read().clone();
+                let mut next = previous.clone();
+                if previous.download_dir != candidate {
+                    let has_active_tasks = tasks_guard.values().any(|task| {
+                        matches!(
+                            *task.state_sender.borrow(),
+                            crate::download_manager::DownloadTaskState::Pending
+                                | crate::download_manager::DownloadTaskState::Downloading
+                        )
+                    });
+                    if has_active_tasks {
+                        return Err(CommandError::from(
+                            "初始化书库失败",
+                            anyhow!("仍有下载任务运行，请暂停或等待完成后再切换书库目录"),
+                        ));
+                    }
+                    if app
+                        .try_state::<crate::archive_finalize::ArchiveFinalizeState>()
+                        .is_some_and(|finalize| finalize.is_any_running())
+                    {
+                        return Err(CommandError::from(
+                            "初始化书库失败",
+                            anyhow!("正在整理 CBZ，请稍后再切换书库目录"),
+                        ));
+                    }
                 }
-                Ok(next)
-            })
-            .map_err(|err| CommandError::from("初始化书库失败", err))
+                next.download_dir = candidate;
+                next.android_storage_initialized = true;
+                let saved = crate::config_updates::commit(&app, &write_guard, next)
+                    .map_err(|err| CommandError::from("初始化书库失败", err))?;
+                changed_pair = Some((previous, saved.clone()));
+                Ok(saved)
+            })?;
+            if let Some((previous, next)) = changed_pair {
+                apply_config_effects(&app, &previous, &next);
+                crate::config_updates::publish(&app, &next);
+            }
+            Ok(saved)
         })
         .await
         .map_err(|err| CommandError::from("初始化书库任务失败", err))?;
@@ -320,16 +381,31 @@ fn replace_config_and_queue(
             let storage = app.state::<ConfigStorage>();
             let queue_path = manager.queue.path();
             let previous_queue = if queue_path.exists() {
-                Some(serde_json::from_slice::<serde_json::Value>(
-                    &std::fs::read(queue_path)?,
-                )?)
+                match std::fs::read(queue_path)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .map_err(anyhow::Error::from)
+                    }) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "读取旧下载队列快照失败，已跳过回滚快照");
+                        None
+                    }
+                }
             } else {
                 None
             };
             let intents_path = crate::archive_intents::intents_path(storage.config_path());
             let intents_managed = intents.is_some();
             let previous_intents = if intents_managed {
-                crate::archive_intents::read_file_snapshot(&intents_path)?
+                match crate::archive_intents::read_file_snapshot(&intents_path) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "读取旧归档意图快照失败，已跳过回滚快照");
+                        None
+                    }
+                }
             } else {
                 None
             };

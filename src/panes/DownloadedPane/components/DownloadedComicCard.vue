@@ -9,6 +9,7 @@ import { formatCommandError, getErrorMessage } from '../../../utils/errors.ts'
 import { failureKindLabels } from '../../../utils/downloadProgress.ts'
 import { copyPathWithToast } from '../../../utils/clipboard.ts'
 import { useLongPress } from '../../../composables/useLongPress.ts'
+import { useBackHandler } from '../../../composables/useAndroidBack.ts'
 
 const store = useStore()
 const message = useMessage()
@@ -107,6 +108,12 @@ const menuOpen = ref(false)
 const menuX = ref(0)
 const menuY = ref(0)
 const merging = ref(false)
+
+useBackHandler(() => {
+  if (!menuOpen.value) return false
+  menuOpen.value = false
+  return true
+}, 25)
 
 const menuOptions = computed(() => [
   { label: '复制下载目录', key: 'dir', icon: () => h(PhFolderOpen, { size: 16 }) },

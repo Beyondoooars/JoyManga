@@ -163,8 +163,16 @@ where
 }
 
 fn is_cross_device_error(err: &std::io::Error) -> bool {
-    // EXDEV = 18 on Linux/Android
-    err.raw_os_error() == Some(18)
+    #[cfg(windows)]
+    {
+        // ERROR_NOT_SAME_DEVICE = 17 on Windows
+        err.raw_os_error() == Some(17)
+    }
+    #[cfg(not(windows))]
+    {
+        // EXDEV = 18 on Linux/Android
+        err.raw_os_error() == Some(18)
+    }
 }
 
 /// 目标/来源文件仍被其他程序占用，无法直接改名。
@@ -391,20 +399,36 @@ pub fn evict_to_trash(path: &Path) -> Result<PathBuf> {
     Ok(trash_path)
 }
 
+fn has_pending_removal_journal(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".library-delete-")
+        })
+    })
+}
+
 /// 扫描并清理指定目录下遗留的隐藏回收临时目录（命名形如 `.*.trash-{UUID}`）。
 /// 用于应用启动时清理先前崩溃或未正常结束的后台异步删除任务遗留物。
+#[cfg(test)]
 pub fn cleanup_residual_trash(dir: &Path) -> Result<usize> {
+    cleanup_residual_trash_with_journal_dir(dir, None)
+}
+
+/// 扫描并清理指定目录下遗留的隐藏回收临时目录；若传入 `journal_dir`（配置目录），
+/// 同时检查该目录中是否存在未完成的 `.library-delete-*` 事务日志，防止误删待恢复文件。
+pub fn cleanup_residual_trash_with_journal_dir(
+    dir: &Path,
+    journal_dir: Option<&Path>,
+) -> Result<usize> {
     if !dir.exists() || !dir.is_dir() {
         return Ok(0);
     }
-    // 书库删除事务使用同一个隔离命名（`.<name>.trash-<uuid>`）。存在未完成的事务日志时，
-    // 这些隔离文件可能还要回滚，必须交给启动恢复处理，不能在扫尾时删除。
-    if dir.read_dir()?.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".library-delete-")
-    }) {
+    // 书库删除事务使用同一个隔离命名（`.<name>.trash-<uuid>`），而事务日志保存在配置目录中。
+    // 任一位置存在未完成的事务日志时，这些隔离文件可能还要回滚，必须交给启动恢复处理。
+    if has_pending_removal_journal(dir) || journal_dir.is_some_and(has_pending_removal_journal) {
         tracing::debug!("存在未完成的删除事务，跳过本次隔离文件清理");
         return Ok(0);
     }

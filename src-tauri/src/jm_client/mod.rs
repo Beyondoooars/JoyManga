@@ -54,12 +54,14 @@ struct SessionState {
     epoch: u64,
     /// 每次成功登录都递增；同账号刷新保持 session epoch 时仍能让排队 401 去重。
     login_revision: u64,
+    /// 当前会话对应的登录账号名（trimmed），供 401 刷新时核对配置账密是否属于同一账号。
+    login_account: String,
     token: String,
     profile: Option<GetUserProfileRespData>,
 }
 
 fn refresh_already_completed(state: &SessionState, epoch: u64, login_revision: u64) -> bool {
-    state.epoch != epoch || state.login_revision != login_revision
+    state.epoch == epoch && state.profile.is_some() && state.login_revision != login_revision
 }
 
 #[derive(Debug)]
@@ -419,7 +421,14 @@ impl JmClient {
             self.auth_cancel_network_generation
                 .store(0, Ordering::SeqCst);
         }
-        self.auth_cancel.send_replace(generation);
+        self.auth_cancel.send_if_modified(|current| {
+            if generation > *current {
+                *current = generation;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     /// 登录被取消时返回对应类别：若在本轮 `generation` 之后发生过因网络路径变化触发的取消，
@@ -437,6 +446,7 @@ impl JmClient {
         let snapshot = {
             let mut state = self.session.write();
             state.epoch += 1;
+            state.login_account.clear();
             state.token.clear();
             state.profile = None;
             SessionChangedEvent {
@@ -670,7 +680,14 @@ impl JmClient {
     pub async fn login(&self, username: &str, password: &str) -> anyhow::Result<LoginRespData> {
         let started = Instant::now();
         let generation = self.auth_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        self.auth_cancel.send_replace(generation);
+        self.auth_cancel.send_if_modified(|current| {
+            if generation > *current {
+                *current = generation;
+                true
+            } else {
+                false
+            }
+        });
         let mut cancellation = self.auth_cancel.subscribe();
         tracing::info!(
             generation,
@@ -693,7 +710,7 @@ impl JmClient {
             result = tokio::time::timeout(Duration::from_secs(35), self.login_candidates(&config, username, password, generation)) => {
                 result.map_err(|_| anyhow!("登录整体超时，请在设置 → 网络中检查线路或代理"))?
             },
-            _ = cancellation.changed() => {
+            _ = cancellation.wait_for(|&cancel_gen| cancel_gen > generation) => {
                 let current_generation = self.auth_generation.load(Ordering::SeqCst);
                 let network_changed = self
                     .auth_cancel_network_generation
@@ -823,8 +840,14 @@ impl JmClient {
                     } else {
                         preset_mode_for_domain(candidate).unwrap_or(config.api_domain_mode)
                     };
-                    let outcome =
-                        self.commit_login(config, mode, profile, generation, network_epoch);
+                    let outcome = self.commit_login(
+                        config,
+                        username,
+                        mode,
+                        profile,
+                        generation,
+                        network_epoch,
+                    );
                     if let Err(error) = &outcome {
                         tracing::warn!(
                             generation,
@@ -876,6 +899,7 @@ impl JmClient {
     fn commit_login(
         &self,
         base: &Config,
+        username: &str,
         mode: ApiDomainMode,
         mut profile: GetUserProfileRespData,
         generation: u64,
@@ -934,6 +958,7 @@ impl JmClient {
                 state.epoch += 1;
             }
             state.login_revision += 1;
+            state.login_account = username.trim().to_owned();
             state.token = token;
             state.profile = Some(profile.clone());
             Ok((saved, state.epoch))
@@ -949,7 +974,7 @@ impl JmClient {
             } else {
                 let current_generation = self.auth_generation.load(Ordering::SeqCst);
                 if generation != current_generation {
-                    self.cancelled_login_error(current_generation)
+                    self.cancelled_login_error(generation)
                 } else {
                     crate::errors::login_network_changed()
                 }
@@ -1003,16 +1028,23 @@ impl JmClient {
     async fn refresh_session(&self, epoch: u64, login_revision: u64) -> anyhow::Result<()> {
         self.ensure_session_epoch_for(epoch, "会话刷新")?;
         let _guard = self.auth_lock.lock().await;
+        // 等待锁期间可能已退出登录或切换了账号，必须先复核会话代际，再判断同账号去重。
+        self.ensure_session_epoch_for(epoch, "会话刷新")?;
         if refresh_already_completed(&self.session.read(), epoch, login_revision) {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.session.read().profile.is_some(),
-            "会话已退出，请重新登录"
-        );
+        let expected_account = {
+            let state = self.session.read();
+            anyhow::ensure!(state.profile.is_some(), "会话已退出，请重新登录");
+            state.login_account.clone()
+        };
         let config = self.app.get_config().read().clone();
         anyhow::ensure!(
             config.auto_login && !config.username.is_empty() && !config.password.is_empty(),
+            "登录已失效，请重新登录"
+        );
+        anyhow::ensure!(
+            expected_account.is_empty() || expected_account == config.username.trim(),
             "登录已失效，请重新登录"
         );
         let mut cancellation = self.auth_cancel.subscribe();
@@ -1021,7 +1053,9 @@ impl JmClient {
             result = tokio::time::timeout(Duration::from_secs(35), self.login_candidates(&config, &config.username, &config.password, generation)) => {
                 result.map_err(|_| anyhow!("刷新登录超时"))??; Ok(())
             },
-            _ = cancellation.changed() => Err(anyhow!("会话刷新已取消")),
+            _ = cancellation.wait_for(|&cancel_gen| cancel_gen > generation) => {
+                Err(self.cancelled_login_error(generation))
+            },
         }
     }
 
@@ -1165,6 +1199,8 @@ impl JmClient {
             before.daily_id > 0,
             "签到活动信息缺失，请在「我的」页下拉刷新后重试"
         );
+        // 发起写请求前再次确认会话未被切换或登出，避免用旧 uid 顶着新会话 Cookie 签到
+        self.ensure_session_epoch_for(session_epoch, "签到")?;
 
         let payload = json!({ "user_id": uid, "daily_id": before.daily_id.to_string() });
         let result: DailyCheckInResultRespData = self
@@ -1322,6 +1358,7 @@ impl JmClient {
                 let revision =
                     request_login_revision(&error).context("认证失败缺少请求登录代际")?;
                 self.refresh_session(epoch, revision).await?;
+                self.ensure_session_epoch_for(epoch, "获取收藏夹")?;
                 fetch().await
             }
             Err(error) => Err(error),
@@ -1898,12 +1935,14 @@ mod review_regression_tests {
         let mut state = SessionState {
             epoch: 3,
             login_revision: 1,
+            profile: Some(GetUserProfileRespData::default()),
             ..SessionState::default()
         };
         assert!(!refresh_already_completed(&state, 3, 1));
         state.login_revision = 2;
         assert!(refresh_already_completed(&state, 3, 1));
-        assert!(refresh_already_completed(&state, 2, 1));
+        // 退出登录或切换账号会推进 epoch：绝不能误判成「同账号已完成刷新」。
+        assert!(!refresh_already_completed(&state, 2, 1));
         assert!(!refresh_already_completed(&state, 3, 2));
         // 迟到的 401 使用请求发出时的代际，不能重新采样已刷新的 revision。
         assert!(refresh_already_completed(&state, 3, 1));

@@ -1,6 +1,6 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import { commands } from '../bindings.ts'
+import { commands, type LoginRespData } from '../bindings.ts'
 import { useStore } from '../store.ts'
 import type { CurrentTabName } from '../types.ts'
 import { getErrorMessage } from '../utils/errors.ts'
@@ -12,6 +12,7 @@ import {
   downloadsPath,
   hasAllFilesAccess,
   requestAllFilesAccessAndWait,
+  requiresAllFilesAccess,
   supportsPublicStorage,
   watchNetworkMetered,
   watchNetworkVpn,
@@ -35,7 +36,7 @@ export function useAppBootstrap(options: { onNavigateToTab: (tab: CurrentTabName
   let updateCheckTimer: ReturnType<typeof setTimeout> | undefined
   let stopNetworkWatch: (() => void) | undefined
   let stopVpnWatch: (() => void) | undefined
-  let networkMeteredQueue = Promise.resolve()
+  let networkStateQueue = Promise.resolve()
   let stopCancelListener: (() => void) | undefined
   let stopOpenFileListener: (() => void) | undefined
   let stopBackgroundFailureListener: (() => void) | undefined
@@ -43,8 +44,16 @@ export function useAppBootstrap(options: { onNavigateToTab: (tab: CurrentTabName
 
   watch(
     () => [store.activeDownloadCount, store.downloadSpeed, store.activeDownloadPages] as const,
-    ([active, speed, pages]) => {
-      if (isAndroid) window.JmAndroid?.downloadStatus(active, speed, pages.current, pages.total)
+    ([active, speed, pages], oldValue) => {
+      const prevActive = oldValue?.[0] ?? 0
+      const notifyCompleted = prevActive > 0 && active === 0 && store.lastDownloadBatchOutcome === 'completed'
+      if (isAndroid) {
+        if (window.JmAndroid?.downloadStatusWithCompletion) {
+          window.JmAndroid.downloadStatusWithCompletion(active, speed, pages.current, pages.total, notifyCompleted)
+        } else {
+          window.JmAndroid?.downloadStatus(active, speed, pages.current, pages.total)
+        }
+      }
     },
     { immediate: true },
   )
@@ -67,14 +76,14 @@ export function useAppBootstrap(options: { onNavigateToTab: (tab: CurrentTabName
       store.applyConfig(await commands.getConfig())
       if (isAndroid && store.config && window.JmAndroid) {
         const bridge = window.JmAndroid
-        // 已初始化也可能停在旧的私有目录（旧版配置迁移过来的），或用户撤销了
-        // 「所有文件访问」权限。这两种情况都要重新选书库，否则下载写进一个目录、
-        // 书库扫描另一个目录，表现就是「下载完成却看不到本子」。
         const libraryLocationUninitialized = !store.config.androidStorageInitialized
-        if (libraryLocationUninitialized || !hasAllFilesAccess()) {
+        // 仅当未初始化，或当前下载目录确实需要「所有文件访问」权限却尚未授权时，才请求权限；
+        // 用户已改用应用专用目录时不再反复弹出公共存储授权并把目录改回 Download/JoyManga。
+        const needsPublicPermission = requiresAllFilesAccess(store.config.downloadDir) && !hasAllFilesAccess()
+        if (libraryLocationUninitialized || needsPublicPermission) {
           if (!supportsPublicStorage()) {
             // Android 10 既没有「所有文件访问」也无法申请写外部存储：直接落到应用专用目录
-            if (!store.config.androidStorageInitialized) {
+            if (libraryLocationUninitialized) {
               const result = await commands.initializeAndroidStorage(bridge.libraryPath() ?? '')
               if (result.status === 'error') throw new Error(result.error.err_message)
               store.applyConfig(result.data)
@@ -85,17 +94,21 @@ export function useAppBootstrap(options: { onNavigateToTab: (tab: CurrentTabName
             if (!hasAllFilesAccess()) {
               await requestAllFilesAccessAndWait()
             }
-            if (hasAllFilesAccess() && canWritePublicDownloads()) {
-              const result = await commands.initializeAndroidStorage(downloadsPath())
-              if (result.status === 'error') {
-                // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
-                console.error(result.error)
-                storageOnboardingShowing.value = true
+            if (libraryLocationUninitialized) {
+              if (hasAllFilesAccess() && canWritePublicDownloads()) {
+                const result = await commands.initializeAndroidStorage(downloadsPath())
+                if (result.status === 'error') {
+                  // 初始化失败不再让启动进入不可恢复的错误页，交给引导让用户选应用专用目录
+                  console.error(result.error)
+                  storageOnboardingShowing.value = true
+                } else {
+                  store.applyConfig(result.data)
+                }
               } else {
-                store.applyConfig(result.data)
+                // 用户拒绝授权或公共目录暂不可写：兜底引导，可改用应用专用目录
+                storageOnboardingShowing.value = true
               }
-            } else if (libraryLocationUninitialized) {
-              // 用户拒绝授权或公共目录暂不可写：兜底引导，可改用应用专用目录
+            } else if (requiresAllFilesAccess(store.config.downloadDir) && !hasAllFilesAccess()) {
               storageOnboardingShowing.value = true
             }
           }
@@ -144,25 +157,32 @@ export function useAppBootstrap(options: { onNavigateToTab: (tab: CurrentTabName
       const username = store.config.username
       const password = store.config.password
       const startSessionEpoch = store.sessionEpoch
+      const isOwnSettledSession = (settledData?: LoginRespData) => settledData !== undefined
+        && store.sessionEpoch === settledData.sessionEpoch
+        && store.userProfile?.uid === settledData.profile.uid
+        && !store.manualLoginInProgress
+        && store.config?.username === username
+        && store.config?.password === password
       const outcome = await runAutoLogin({
         username,
         password,
         login: (name, secret) => commands.login(name, secret),
         // 用户已手动登录、正在手动登录，或手动改了表单：停止自动重试，
-        // 避免自动登录的新请求把正在进行的会话顶掉。
-        shouldStop: () => unmounted
-          || store.sessionEpoch !== startSessionEpoch
-          || store.userProfile !== undefined
+        // 避免自动登录的新请求把正在进行的会话顶掉；若是本次自动登录的 SessionChangedEvent 先到达，则放行完成。
+        shouldStop: (settledData) => unmounted
+          || (!isOwnSettledSession(settledData) && (store.sessionEpoch !== startSessionEpoch || store.userProfile !== undefined))
           || store.manualLoginInProgress
           || store.config?.username !== username
           || store.config?.password !== password,
         onRetry: (attempt, error) => console.warn(`自动登录第 ${attempt} 次失败，准备重试`, error),
       })
-      if (unmounted || store.sessionEpoch !== startSessionEpoch) return
+      if (unmounted) return
       if (outcome.status === 'success') {
+        if (store.sessionEpoch !== startSessionEpoch && !isOwnSettledSession(outcome.data)) return
         store.applyLoginResult(outcome.data)
         message.success(outcome.attempts > 1 ? `自动登录成功（第 ${outcome.attempts} 次尝试）` : '自动登录成功')
       } else if (outcome.status === 'failed') {
+        if (store.sessionEpoch !== startSessionEpoch) return
         const errorMessage = typeof outcome.error === 'string' ? outcome.error : outcome.error.err_message
         console.error(outcome.error)
         message.warning(`自动登录失败：${errorMessage}`)
@@ -183,16 +203,19 @@ export function useAppBootstrap(options: { onNavigateToTab: (tab: CurrentTabName
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pagehide', flushOnBackground)
     }
+    const enqueueNetworkStateUpdate = (task: () => Promise<unknown>) => {
+      // IPC 命令可能并发执行；按原生事件顺序串行提交，避免计费/VPN 回调竞态相互覆盖。
+      networkStateQueue = networkStateQueue
+        .then(task)
+        .then(() => undefined, () => { /* 旧后端无此命令时忽略，且不能阻断后续上报 */ })
+    }
     // 把 Android 的网络计费状态同步给后端，「仅 Wi-Fi 下载」依赖它做判断
     stopNetworkWatch = watchNetworkMetered((metered) => {
-      // IPC 命令可能并发执行；按原生事件顺序串行提交，避免旧的计费状态最后覆盖新状态。
-      networkMeteredQueue = networkMeteredQueue
-        .then(() => commands.setNetworkMetered(metered))
-        .then(() => undefined, () => { /* 旧后端无此命令时忽略，且不能阻断后续上报 */ })
+      enqueueNetworkStateUpdate(() => commands.setNetworkMetered(metered))
     })
     // VPN 开启时后端跳过手动代理，否则「开 VPN 反而连不上」
     stopVpnWatch = watchNetworkVpn((active, networkKey) => {
-      void commands.setNetworkVpn(active, networkKey).catch(() => { /* 旧后端无此命令时忽略 */ })
+      enqueueNetworkStateUpdate(() => commands.setNetworkVpn(active, networkKey))
     })
     // 通知栏"取消当前"：由原生转发事件，这里执行取消并给出反馈
     const onCancelCurrent = async () => {

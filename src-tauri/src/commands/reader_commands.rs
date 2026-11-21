@@ -179,10 +179,16 @@ pub(crate) fn chapter_reader_data_from_comic(
                 img_names.sort_by(|a, b| utils::natural_cmp(a, b));
                 img_names
             } else {
-                crate::comic_scanner::select_chapter_pages(&img_names, current_chapter.order)
-                    .ok_or_else(|| {
-                        CommandError::from("读取章节失败", anyhow!("归档中没有该章节的页面"))
-                    })?
+                let slice_order = crate::comic_scanner::read_merged_chapter_orders_from_archive(
+                    &mut archive,
+                    comic.id,
+                )
+                .get(&chapter_id)
+                .copied()
+                .unwrap_or(current_chapter.order);
+                crate::comic_scanner::select_chapter_pages(&img_names, slice_order).ok_or_else(
+                    || CommandError::from("读取章节失败", anyhow!("归档中没有该章节的页面")),
+                )?
             };
 
             // 尺寸必须在把 img_names 挪走之前取：优先命中原归档自带的 pages.json，

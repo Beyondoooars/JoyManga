@@ -9,7 +9,7 @@ export interface AutoLoginOptions {
   password: string
   login: (username: string, password: string) => Promise<LoginCommandResult>
   /** 用户已手动登录、或表单里的账密已改变时停止重试 */
-  shouldStop?: () => boolean
+  shouldStop?: (settledData?: LoginRespData) => boolean
   wait?: (milliseconds: number) => Promise<void>
   attempts?: number
   retryDelayMs?: number
@@ -43,7 +43,7 @@ export async function runAutoLogin(options: AutoLoginOptions): Promise<AutoLogin
     try {
       const result = await options.login(options.username, options.password)
       if (result.status === 'ok') {
-        if (options.shouldStop?.()) return { status: 'skipped' }
+        if (options.shouldStop?.(result.data)) return { status: 'skipped' }
         return { status: 'success', data: result.data, attempts: attempt }
       }
       lastError = result.error

@@ -23,12 +23,14 @@ let prepareMessage: MessageReactive | undefined
 onMounted(async () => {
   const unlisten = await events.downloadAllFavoritesEvent.listen(({ payload }) => {
     if (payload.event === 'GetFavoritesStart') {
+      prepareMessage?.destroy()
       prepareMessage = message.loading('正在获取收藏夹', { duration: 0 })
     } else if (payload.event === 'GetComicsProgress' && prepareMessage !== undefined) {
       const { current, total } = payload.data
       prepareMessage.content = `正在获取收藏夹中的漫画(${current}/${total})`
     } else if (payload.event === 'StartCreateDownloadTasks') {
       const { comicId, comicTitle, current, total } = payload.data
+      progresses.value.get(comicId)?.progressMessage.destroy()
       progresses.value.set(comicId, {
         comicId,
         comicTitle,
@@ -53,19 +55,23 @@ onMounted(async () => {
       const { comicId } = payload.data
       const progressData = progresses.value.get(comicId)
       if (progressData) {
-        progressData.progressMessage.type = 'success'
-        progressData.progressMessage.content = `${progressData.comicTitle} 创建下载任务完成(${progressData.current}/${progressData.total})`
+        const msg = progressData.progressMessage
+        msg.type = 'success'
+        msg.content = `${progressData.comicTitle} 创建下载任务完成(${progressData.current}/${progressData.total})`
         setTimeout(() => {
-          progressData.progressMessage.destroy()
-          progresses.value.delete(comicId)
+          msg.destroy()
+          if (progresses.value.get(comicId) === progressData) {
+            progresses.value.delete(comicId)
+          }
         }, 3000)
       }
     } else if (payload.event === 'GetComicsEnd' && prepareMessage !== undefined) {
-      prepareMessage.type = 'success'
-      prepareMessage.content = '已获取收藏夹全部漫画'
+      const msg = prepareMessage
+      msg.type = 'success'
+      msg.content = '已获取收藏夹全部漫画'
       setTimeout(() => {
-        prepareMessage?.destroy()
-        prepareMessage = undefined
+        msg.destroy()
+        if (prepareMessage === msg) prepareMessage = undefined
       }, 3000)
     }
   })

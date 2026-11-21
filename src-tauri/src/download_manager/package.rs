@@ -9,7 +9,8 @@ use zip::ZipWriter;
 
 use crate::atomic_fs;
 use crate::comic_scanner::collect_page_images;
-use crate::library_catalog::DownloadedLibraryCache;
+use crate::extensions::AppHandleExt;
+use crate::library_catalog::{restore_comic_in_catalog, DownloadedLibraryCache};
 use crate::types::{ChapterInfo, Comic, ComicInfo, PageSize};
 
 pub(crate) fn package_chapter_to_cbz(
@@ -132,6 +133,9 @@ pub(crate) fn package_chapter_to_cbz(
 
     // 清理散图临时目录
     let _ = std::fs::remove_dir_all(temp_download_dir);
+
+    let download_dir = app.get_config().read().download_dir.clone();
+    restore_comic_in_catalog(app, &download_dir, comic.id);
 
     if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
         cache.invalidate();

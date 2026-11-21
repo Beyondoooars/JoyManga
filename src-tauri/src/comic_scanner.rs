@@ -504,6 +504,38 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
         })
         .collect();
 
+    let has_jm_tag = |file_name: &str| {
+        file_name
+            .strip_suffix("].cbz")
+            .and_then(|stem| stem.rsplit_once("[JM"))
+            .is_some_and(|(_, inner)| {
+                !inner.is_empty() && inner.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+            })
+    };
+    let starts_with_comic_title = |file_name: &str| {
+        !comic_name_filtered.is_empty()
+            && file_name.starts_with(&comic_name_filtered)
+            && matches!(
+                file_name[comic_name_filtered.len()..].chars().next(),
+                None | Some(' ' | '-' | '.' | '[' | '_')
+            )
+    };
+    let single_archive_orders: Option<(std::path::PathBuf, std::collections::HashSet<i64>)> =
+        if !is_flat_mode && cbz_files.len() == 1 {
+            std::fs::File::open(&cbz_files[0])
+                .ok()
+                .and_then(|file| zip::ZipArchive::new(file).ok())
+                .map(|mut archive| {
+                    let orders = image_entry_names(&mut archive)
+                        .into_iter()
+                        .filter_map(|name| bracket_order(&name))
+                        .collect();
+                    (cbz_files[0].clone(), orders)
+                })
+        } else {
+            None
+        };
+
     let chapter_count = comic.chapter_infos.len();
     for chapter in &mut comic.chapter_infos {
         chapter.chapter_download_dir = None;
@@ -533,6 +565,10 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
                 return read_chapter_identity(cbz_path).ok().flatten()
                     == Some((comic.id, chapter.chapter_id));
             }
+            if has_jm_tag(file_name) {
+                // 明确带有其他漫画或章节 `[JM...]` 标签的文件，绝不降级走名称/序号模糊匹配。
+                return false;
+            }
             if file_name == expected_cbz_name {
                 return true;
             }
@@ -542,9 +578,9 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
                 }
                 if chapter_count == 1
                     && cbz_files.len() == 1
-                    && file_name.starts_with(&comic_prefix)
+                    && (comic.id < 0 || file_name.starts_with(&comic_prefix))
                 {
-                    // 单话本：目录里唯一的 CBZ 视为本章，但文件名必须属于本漫画，
+                    // 单话本：目录里唯一的 CBZ 视为本章，但文件名必须属于本漫画（本地导入负数 ID 除外），
                     // 否则会把同目录里其他漫画的孤本误标记为已下载
                     return true;
                 }
@@ -563,10 +599,8 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
                     }
                 }
             } else {
-                // 平铺模式下，必须明确归属当前漫画
-                if file_name.starts_with(&comic_prefix)
-                    || file_name.starts_with(&comic_name_filtered)
-                {
+                // 平铺模式下，必须明确归属当前漫画且按完整标题边界分隔
+                if file_name.starts_with(&comic_prefix) || starts_with_comic_title(file_name) {
                     if file_name.contains(&order_dash_pad)
                         || file_name.contains(&order_dash)
                         || file_name.ends_with(&order_space)
@@ -594,6 +628,12 @@ pub fn update_chapter_infos_fields(comic: &mut Comic) -> anyhow::Result<()> {
                     .iter()
                     .any(|archived| archived.chapter_id == chapter.chapter_id)
             })
+        {
+            chapter.chapter_download_dir = Some(archive_path.clone());
+            chapter.is_downloaded = Some(true);
+        } else if let Some((archive_path, _)) = single_archive_orders
+            .as_ref()
+            .filter(|(_, orders)| !orders.is_empty() && orders.contains(&chapter.order))
         {
             chapter.chapter_download_dir = Some(archive_path.clone());
             chapter.is_downloaded = Some(true);
@@ -708,6 +748,103 @@ pub(crate) fn read_merged_archive_identity(
         return Ok(None);
     }
     Ok(Some((comic.id, comic.chapter_infos)))
+}
+
+/// 从整本合并归档自身内嵌的 `元数据.json` 读取各 `chapter_id` 打包当时的 `order`，
+/// 避免线上增删/重排章节导致 `order` 偏移后按新 `order` 误切旧归档的 `[NN]` 目录。
+pub(crate) fn read_merged_chapter_orders_from_archive<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    expected_comic_id: i64,
+) -> HashMap<i64, i64> {
+    if archive.by_name("chapter.json").is_ok() {
+        return HashMap::new();
+    }
+    let Ok(mut entry) = archive.by_name("元数据.json") else {
+        return HashMap::new();
+    };
+    let size = entry.size();
+    let Ok(bytes) =
+        crate::image_data::read_limited(&mut entry, size, crate::image_data::MAX_METADATA_BYTES)
+    else {
+        return HashMap::new();
+    };
+    let Ok(comic) = serde_json::from_slice::<Comic>(&bytes) else {
+        return HashMap::new();
+    };
+    if comic.id != expected_comic_id {
+        return HashMap::new();
+    }
+    comic
+        .chapter_infos
+        .into_iter()
+        .map(|chapter| (chapter.chapter_id, chapter.order))
+        .collect()
+}
+
+fn bracket_folder_title(entry_name: &str, order: i64) -> String {
+    let folder = entry_name.split(['/', '\\']).next().unwrap_or("");
+    let title = folder
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+        .map(|(_, tail)| tail.trim())
+        .unwrap_or("");
+    if title.is_empty() {
+        format!("第{order}话")
+    } else {
+        title.to_owned()
+    }
+}
+
+/// 提取多话或内嵌整本 CBZ 的 `(order, title)` 章节列表，供本地导入与目录登记保留分话结构。
+/// 单话平铺外部 CBZ 返回空列表，由调用方沿用默认单话标题。
+pub(crate) fn inspect_cbz_chapters(cbz_path: &Path) -> anyhow::Result<Vec<(i64, String)>> {
+    let mut archive = ZipArchive::new(std::fs::File::open(cbz_path)?)?;
+    if archive.by_name("chapter.json").is_ok() {
+        return Ok(Vec::new());
+    }
+
+    let img_names = image_entry_names(&mut archive);
+    let mut present_orders = std::collections::BTreeMap::new();
+    for name in &img_names {
+        if let Some(order) = bracket_order(name) {
+            present_orders
+                .entry(order)
+                .or_insert_with(|| bracket_folder_title(name, order));
+        }
+    }
+
+    if let Ok(mut entry) = archive.by_name("元数据.json") {
+        let size = entry.size();
+        if let Ok(bytes) =
+            crate::image_data::read_limited(&mut entry, size, crate::image_data::MAX_METADATA_BYTES)
+        {
+            if let Ok(comic) = serde_json::from_slice::<Comic>(&bytes) {
+                if !present_orders.is_empty() {
+                    let mut chapters: Vec<(i64, String)> = comic
+                        .chapter_infos
+                        .into_iter()
+                        .filter(|chapter| present_orders.contains_key(&chapter.order))
+                        .map(|chapter| (chapter.order, chapter.chapter_title))
+                        .collect();
+                    chapters.sort_by_key(|(order, _)| *order);
+                    chapters.dedup_by_key(|(order, _)| *order);
+                    if !chapters.is_empty() {
+                        return Ok(chapters);
+                    }
+                    return Ok(present_orders.into_iter().collect());
+                }
+                if comic.chapter_infos.len() == 1 {
+                    let only = &comic.chapter_infos[0];
+                    return Ok(vec![(only.order, only.chapter_title.clone())]);
+                }
+            }
+        }
+    }
+
+    if present_orders.len() > 1 || (present_orders.len() == 1 && !present_orders.contains_key(&1)) {
+        return Ok(present_orders.into_iter().collect());
+    }
+    Ok(Vec::new())
 }
 
 /// 应用在书库里创建的隐藏工作目录（名字通常带前导 `.`）。

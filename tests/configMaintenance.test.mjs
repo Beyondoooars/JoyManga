@@ -137,3 +137,57 @@ test('failed maintenance releases the guard for the next attempt', async () => {
   assert.equal(store.configMaintenanceInProgress, false)
   assert.equal(await store.runConfigMaintenance(async () => 'retried'), 'retried')
 })
+
+test('reverting edit within debounce window cancels pending save and reverts during in-flight save trigger follow-up', async (t) => {
+  const store = useStore(createPinia())
+  const originalSaveConfig = commands.saveConfig
+  const savedSnapshots = []
+  let inFlightSave
+  commands.saveConfig = async (snapshot) => {
+    savedSnapshots.push(snapshot.downloadDir)
+    if (inFlightSave) return inFlightSave.promise
+    return { status: 'ok', data: { ...snapshot, revision: (snapshot.revision ?? 1) + 1 } }
+  }
+
+  try {
+    store.applyConfig(makeConfig({ revision: 1, downloadDir: 'initial-dir' }), true)
+    store.enableConfigAutoSave()
+
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+
+    // 1. 400ms 内改完又改回原值：取消防抖，不触发保存
+    store.config.downloadDir = 'temp-dir'
+    await nextTick()
+    store.config.downloadDir = 'initial-dir'
+    await nextTick()
+    t.mock.timers.tick(500)
+    await flushMicrotasks()
+    assert.equal(savedSnapshots.length, 0)
+
+    // 2. 一次保存已发出、尚未返回前又改回原值：第一个返回不能覆盖本地还原，并继续排入第二次保存
+    inFlightSave = deferred()
+    store.config.downloadDir = 'dir-edited'
+    await nextTick()
+    store.flushPendingConfigSave()
+    await flushMicrotasks()
+    assert.deepEqual(savedSnapshots, ['dir-edited'])
+
+    store.config.downloadDir = 'initial-dir'
+    await nextTick()
+    store.flushPendingConfigSave()
+
+    const firstDeferred = inFlightSave
+    inFlightSave = undefined
+    firstDeferred.resolve({ status: 'ok', data: makeConfig({ revision: 2, downloadDir: 'dir-edited' }) })
+    await flushMicrotasks()
+    await nextTick()
+    await flushMicrotasks()
+
+    assert.deepEqual(savedSnapshots, ['dir-edited', 'initial-dir'])
+    assert.equal(store.config.downloadDir, 'initial-dir')
+  } finally {
+    t.mock.timers.reset()
+    store.disableConfigAutoSave()
+    commands.saveConfig = originalSaveConfig
+  }
+})

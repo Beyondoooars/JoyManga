@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { commands, type GetWeeklyInfoRespData } from '../bindings.ts'
 import { useMessage } from 'naive-ui'
 import ComicCard from '../components/ComicCard.vue'
@@ -20,6 +20,8 @@ const loadError = ref<string | null>(null)
 const weeklyResultLibraryEpoch = ref(store.downloadedLibraryResetEpoch)
 let initialized = false
 let isMounted = false
+let paneActive = true
+let epochStaleWhileInactive = false
 let requestGeneration = 0
 let activeRequestKey = ''
 
@@ -79,7 +81,20 @@ async function initWeeklyInfo() {
 
 onMounted(() => {
   isMounted = true
+  paneActive = true
   void initWeeklyInfo()
+})
+
+onActivated(() => {
+  paneActive = true
+  if (epochStaleWhileInactive) {
+    epochStaleWhileInactive = false
+    if (initialized) void getWeekly()
+  }
+})
+
+onDeactivated(() => {
+  paneActive = false
 })
 
 onUnmounted(() => {
@@ -101,6 +116,10 @@ watch(() => store.sessionEpoch, () => {
   requestGeneration++
   loading.value = false
   activeRequestKey = ''
+  if (!paneActive) {
+    if (initialized) epochStaleWhileInactive = true
+    return
+  }
   if (initialized) void getWeekly()
 })
 

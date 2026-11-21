@@ -140,3 +140,27 @@ test('only network, timeout and unknown errors are retryable', () => {
   assert.equal(isRetryableAutoLoginError(commandError('Cancelled', '别的原因')), false)
   assert.equal(isRetryableAutoLoginError('抛出异常'), true)
 })
+
+test('auto login completes when SessionChangedEvent updates store before login resolves', async () => {
+  let storeSessionEpoch = 1
+  let storeUid
+  const outcome = await runAutoLogin({
+    username: 'alice',
+    password: 'secret',
+    login: async () => {
+      // 模拟 SessionChangedEvent 先于 commands.login 返回到达前端
+      storeSessionEpoch = 2
+      storeUid = '1'
+      return success
+    },
+    shouldStop: (settledData) => {
+      const ownSettled = settledData !== undefined
+        && storeSessionEpoch === settledData.sessionEpoch
+        && storeUid === settledData.profile.uid
+      return !ownSettled && (storeSessionEpoch !== 1 || storeUid !== undefined)
+    },
+  })
+
+  assert.equal(outcome.status, 'success')
+  assert.equal(outcome.data.sessionEpoch, 2)
+})

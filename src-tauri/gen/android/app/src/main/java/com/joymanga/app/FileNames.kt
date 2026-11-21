@@ -10,7 +10,7 @@ internal fun safeFileName(name: String): String {
     val clean = name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "file" }
     if (clean == "." || clean == "..") return "file"
     val extension = clean.substringAfterLast('.', "").lowercase()
-    val suffix = if (extension in listOf("cbz", "json", "jpg", "jpeg", "png", "webp")) ".$extension" else ""
+    val suffix = if (extension in listOf("cbz", "json", "jpg", "jpeg", "png", "webp", "gif")) ".$extension" else ""
     val stem = if (suffix.isEmpty()) clean else clean.dropLast(extension.length + 1)
     val result = StringBuilder()
     var bytes = 0

@@ -17,7 +17,7 @@ use crate::download_queue::{
 use crate::download_scheduler::DownloadLimiter;
 use crate::events::DownloadTaskEvent;
 use crate::extensions::AppHandleExt;
-use crate::types::{Comic, FailureKind, TaskFailure, TaskStage};
+use crate::types::{ChapterInfo, Comic, FailureKind, TaskFailure, TaskStage};
 use crate::DownloadSpeedEvent;
 
 pub(crate) mod download_task;
@@ -65,9 +65,18 @@ pub enum DownloadTaskState {
     Failed,
 }
 
+fn cleanup_temp_download_dir(chapter: &ChapterInfo) {
+    let Ok(temp_dir) = chapter.get_temp_download_dir() else {
+        return;
+    };
+    if temp_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}
+
 /// 缓冲名额：允许本地处理与网络下载重叠，但把同时持有已下载图片的任务数
 /// 限制在网络并发的两倍，避免多章节并发时内存随章节数放大。
-pub(crate) fn buffer_limit(img_concurrency: usize) -> usize {
+fn buffer_limit(img_concurrency: usize) -> usize {
     img_concurrency.max(1).saturating_mul(2)
 }
 
@@ -118,6 +127,19 @@ impl DownloadManager {
                 && matches!(
                     *task.state_sender.borrow(),
                     DownloadTaskState::Pending | DownloadTaskState::Downloading
+                )
+        })
+    }
+
+    pub fn has_incomplete_tasks_for_comic(&self, comic_id: i64) -> bool {
+        self.snapshots().into_iter().any(|snapshot| {
+            snapshot.comic.id == comic_id
+                && matches!(
+                    snapshot.state,
+                    DownloadTaskState::Pending
+                        | DownloadTaskState::Downloading
+                        | DownloadTaskState::Paused
+                        | DownloadTaskState::Failed
                 )
         })
     }
@@ -424,32 +446,31 @@ impl DownloadManager {
             );
             return Ok(result);
         }
-        let mut added_intent = false;
-        if let Some(cbz_mode) = cbz_mode {
-            let intents = self
-                .app
-                .state::<crate::archive_intents::ArchiveIntentStore>();
-            let intent_result = if preserve_existing_intent {
-                intents.set_if_absent(comic.id, cbz_mode)
-            } else {
-                intents.set(comic.id, cbz_mode).map(|()| true)
-            };
-            match intent_result {
-                Ok(added) => added_intent = added,
-                Err(error) => {
-                    self.queue.remove_many(&entries).with_context(|| {
-                        format!("保存归档设置失败：{error:#}；撤销本批下载任务也失败")
-                    })?;
-                    result.failed.extend(pending.iter().map(|task| {
-                        (
-                            task.chapter_info.chapter_id,
-                            format!("保存归档设置失败：{error:#}"),
-                        )
-                    }));
-                    return Ok(result);
-                }
+        let resolved_cbz_mode =
+            cbz_mode.unwrap_or_else(|| self.app.get_config().read().default_cbz_mode);
+        let intents = self
+            .app
+            .state::<crate::archive_intents::ArchiveIntentStore>();
+        let intent_result = if preserve_existing_intent || cbz_mode.is_none() {
+            intents.set_if_absent(comic.id, resolved_cbz_mode)
+        } else {
+            intents.set(comic.id, resolved_cbz_mode).map(|()| true)
+        };
+        let added_intent = match intent_result {
+            Ok(added) => added,
+            Err(error) => {
+                self.queue.remove_many(&entries).with_context(|| {
+                    format!("保存归档设置失败：{error:#}；撤销本批下载任务也失败")
+                })?;
+                result.failed.extend(pending.iter().map(|task| {
+                    (
+                        task.chapter_info.chapter_id,
+                        format!("保存归档设置失败：{error:#}"),
+                    )
+                }));
+                return Ok(result);
             }
-        }
+        };
         for task in &pending {
             result.created += 1;
             tasks.insert(task.chapter_info.chapter_id, task.clone());
@@ -545,6 +566,9 @@ impl DownloadManager {
                     DownloadTaskState::Failed,
                 ],
             );
+            if *task.state_sender.borrow() == DownloadTaskState::Cancelled {
+                cleanup_temp_download_dir(&task.chapter_info);
+            }
         } else {
             let Some(mut snapshot) = self
                 .snapshots()
@@ -563,7 +587,10 @@ impl DownloadManager {
             }
             snapshot.state = DownloadTaskState::Cancelled;
             if let Some(snapshot) = self.queue.update(snapshot) {
-                let _ = DownloadTaskEvent::Create(snapshot).emit(&self.app);
+                let _ = DownloadTaskEvent::Create(snapshot.clone()).emit(&self.app);
+                if !self.download_tasks.read().contains_key(&chapter_id) {
+                    cleanup_temp_download_dir(&snapshot.chapter_info);
+                }
             }
         }
         Ok(())

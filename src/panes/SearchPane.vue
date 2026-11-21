@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, ref, watch } from 'vue'
 import {
   commands,
   type ComicInSearch,
@@ -18,6 +18,7 @@ import {
   PhX,
 } from '@phosphor-icons/vue'
 import { useStore } from '../store.ts'
+import { useBackHandler } from '../composables/useAndroidBack.ts'
 import { getErrorMessage } from '../utils/errors.ts'
 import {
   SearchSession,
@@ -198,9 +199,45 @@ watch(
   { immediate: true },
 )
 
+let paneActive = true
+let epochStaleWhileInactive = false
+
+onActivated(() => {
+  paneActive = true
+  if (epochStaleWhileInactive) {
+    epochStaleWhileInactive = false
+    if (committedKeyword.value !== '') {
+      void startSearch(committedKeyword.value, committedSort.value, searchPage.value)
+    }
+  }
+})
+
+onDeactivated(() => {
+  paneActive = false
+})
+
+useBackHandler(() => {
+  if (!paneActive || store.currentTabName !== 'search' || store.chapterDetailShowing || store.activeReaderTarget) {
+    return false
+  }
+  if (historyOpen.value) {
+    historyOpen.value = false
+    return true
+  }
+  if (view.value === 'search') {
+    clearSearch()
+    return true
+  }
+  return false
+}, 15)
+
 watch(() => store.sessionEpoch, () => {
   searchGeneration++
   searching.value = false
+  if (!paneActive) {
+    if (committedKeyword.value !== '') epochStaleWhileInactive = true
+    return
+  }
   if (committedKeyword.value !== '') {
     void startSearch(committedKeyword.value, committedSort.value, searchPage.value)
   }
@@ -252,6 +289,18 @@ async function startSearch(keyword: string, sort: SearchSort, page = 1) {
   }
 
   saveHistory(keyword)
+  const previousSnapshot = {
+    view: view.value,
+    committedKeyword: committedKeyword.value,
+    committedSort: committedSort.value,
+    sortSelected: sortSelected.value,
+    searchPage: searchPage.value,
+    languageFilter: languageFilter.value,
+    activeSession,
+    sessionLibraryResetEpoch: sessionLibraryResetEpoch.value,
+    searchResult: store.searchResult,
+    searchResultEpoch: store.searchResultEpoch,
+  }
   view.value = 'search'
   historyOpen.value = false
 
@@ -275,13 +324,30 @@ async function startSearch(keyword: string, sort: SearchSort, page = 1) {
   sessionLibraryResetEpoch.value = store.downloadedLibraryResetEpoch
   sessionRevision.value++
 
-  await loadPage(page, { generation, epoch, observedRevision })
+  await loadPage(page, {
+    generation,
+    epoch,
+    observedRevision,
+    onRedirect: () => {
+      view.value = previousSnapshot.view
+      committedKeyword.value = previousSnapshot.committedKeyword
+      committedSort.value = previousSnapshot.committedSort
+      sortSelected.value = previousSnapshot.sortSelected
+      searchPage.value = previousSnapshot.searchPage
+      languageFilter.value = previousSnapshot.languageFilter
+      activeSession = previousSnapshot.activeSession
+      sessionLibraryResetEpoch.value = previousSnapshot.sessionLibraryResetEpoch
+      store.searchResult = previousSnapshot.searchResult
+      store.searchResultEpoch = previousSnapshot.searchResultEpoch
+      sessionRevision.value++
+    },
+  })
 }
 
 /** 加载指定逻辑页；已加载的结果不会重复请求 */
 async function loadPage(
   page: number,
-  context?: { generation: number; epoch: number; observedRevision: number },
+  context?: { generation: number; epoch: number; observedRevision: number; onRedirect?: () => void },
 ) {
   const session = activeSession
   if (session === null) return
@@ -303,7 +369,9 @@ async function loadPage(
     searchPage.value = page
 
     if (session.redirect !== null) {
-      store.showComic(session.redirect, true)
+      const targetComic = session.redirect
+      context?.onRedirect?.()
+      store.showComic(targetComic, true)
       return
     }
 

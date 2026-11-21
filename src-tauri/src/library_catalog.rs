@@ -17,6 +17,7 @@ use crate::{
 pub(crate) static CATALOG_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 type ComicIndex = (PathBuf, HashMap<i64, Comic>);
+type PathMapIndex = (PathBuf, HashMap<i64, PathBuf>);
 
 /// 最近一次书库扫描的摘要，供 `diagnose_library` 复用，避免刷新后立刻再扫一遍整库。
 pub struct LibraryScanSnapshot {
@@ -27,7 +28,7 @@ pub struct LibraryScanSnapshot {
 
 #[derive(Default)]
 pub struct DownloadedLibraryCache {
-    map: RwLock<Option<HashMap<i64, PathBuf>>>,
+    map: RwLock<Option<PathMapIndex>>,
     comics: RwLock<Option<ComicIndex>>,
     scan: RwLock<Option<LibraryScanSnapshot>>,
 }
@@ -56,30 +57,35 @@ impl DownloadedLibraryCache {
         (snapshot.root == root).then(|| (snapshot.comic_count, snapshot.skipped.clone()))
     }
 
-    pub fn get(&self) -> Option<HashMap<i64, PathBuf>> {
-        self.map.read().clone()
+    pub fn get(&self, root: &Path) -> Option<HashMap<i64, PathBuf>> {
+        let guard = self.map.read();
+        let (stored_root, map) = guard.as_ref()?;
+        (stored_root == root).then(|| map.clone())
     }
 
-    pub fn set(&self, map: HashMap<i64, PathBuf>) {
+    pub fn set(&self, root: &Path, map: HashMap<i64, PathBuf>) {
         // 路径映射变了，基于旧映射建立的漫画快照同样失效；否则归档整合会拿到
         // 章节没有下载路径的旧快照，整本合并直接失败。
         *self.comics.write() = None;
         *self.scan.write() = None;
-        *self.map.write() = Some(map);
+        *self.map.write() = Some((root.to_path_buf(), map));
     }
 
-    pub fn insert(&self, id: i64, path: PathBuf) {
+    #[cfg(test)]
+    pub fn insert(&self, root: &Path, id: i64, path: PathBuf) {
         *self.comics.write() = None;
         let mut guard = self.map.write();
-        if let Some(map) = guard.as_mut() {
-            map.insert(id, path);
+        if let Some((stored_root, map)) = guard.as_mut() {
+            if stored_root == root {
+                map.insert(id, path);
+            }
         }
     }
 
     pub fn remove(&self, id: i64) {
         *self.comics.write() = None;
         let mut guard = self.map.write();
-        if let Some(map) = guard.as_mut() {
+        if let Some((_, map)) = guard.as_mut() {
             map.remove(&id);
         }
     }
@@ -122,7 +128,7 @@ pub fn create_id_to_dir_map(app: &AppHandle) -> anyhow::Result<HashMap<i64, Path
     };
     let removed = catalog.removed_ids(&download_dir);
     if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
-        if let Some(mut cached_map) = cache.get() {
+        if let Some(mut cached_map) = cache.get(&download_dir) {
             cached_map.retain(|id, _| !removed.contains(id));
             return Ok(cached_map);
         }
@@ -131,7 +137,7 @@ pub fn create_id_to_dir_map(app: &AppHandle) -> anyhow::Result<HashMap<i64, Path
     let mut id_to_dir_map: HashMap<i64, PathBuf> = HashMap::new();
     if !download_dir.exists() {
         if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
-            cache.set(id_to_dir_map.clone());
+            cache.set(&download_dir, id_to_dir_map.clone());
         }
         return Ok(id_to_dir_map);
     }
@@ -177,7 +183,7 @@ pub fn create_id_to_dir_map(app: &AppHandle) -> anyhow::Result<HashMap<i64, Path
     }
     id_to_dir_map.retain(|id, _| !removed.contains(id));
     if let Some(cache) = app.try_state::<DownloadedLibraryCache>() {
-        cache.set(id_to_dir_map.clone());
+        cache.set(&download_dir, id_to_dir_map.clone());
     }
 
     Ok(id_to_dir_map)
@@ -235,6 +241,24 @@ pub(crate) fn catalog_path(app: &AppHandle) -> PathBuf {
     app.state::<ConfigStorage>()
         .config_path()
         .with_file_name(".library.json")
+}
+
+/// 重新下载章节成功落盘后，若该漫画曾被「移除出书库」，自动清除移除黑名单使其恢复可见与可合并。
+pub(crate) fn restore_comic_in_catalog(app: &AppHandle, root: &Path, comic_id: i64) {
+    let _guard = CATALOG_LOCK.lock();
+    let path = catalog_path(app);
+    let mut catalog = match LibraryCatalog::load(&path) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            tracing::warn!(comic_id, error = %error, "加载书库记录以恢复已移除漫画失败");
+            return;
+        }
+    };
+    if catalog.restore(root, comic_id) {
+        if let Err(error) = catalog.save(&path) {
+            tracing::warn!(comic_id, error = %error, "保存解除移除标记的书库记录失败");
+        }
+    }
 }
 
 impl LibraryCatalog {
@@ -383,6 +407,30 @@ pub(crate) fn registered_cbz_comic(record: &RegisteredCbz) -> anyhow::Result<cra
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    let inspected = crate::comic_scanner::inspect_cbz_chapters(&record.path).unwrap_or_default();
+    let chapter_infos = if inspected.is_empty() {
+        vec![ChapterInfo {
+            chapter_id: record.id - 1,
+            chapter_title: "第1话".into(),
+            order: 1,
+            is_downloaded: Some(true),
+            chapter_download_dir: Some(record.path.clone()),
+        }]
+    } else {
+        inspected
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (order, chapter_title))| ChapterInfo {
+                chapter_id: record
+                    .id
+                    .saturating_sub(i64::try_from(idx + 1).unwrap_or(i64::MAX)),
+                chapter_title,
+                order,
+                is_downloaded: Some(true),
+                chapter_download_dir: Some(record.path.clone()),
+            })
+            .collect()
+    };
     Ok(Comic {
         id: record.id,
         name: original.as_ref().map_or(title, |comic| comic.name.clone()),
@@ -392,13 +440,7 @@ pub(crate) fn registered_cbz_comic(record: &RegisteredCbz) -> anyhow::Result<cra
         tags: original
             .as_ref()
             .map_or_else(Vec::new, |comic| comic.tags.clone()),
-        chapter_infos: vec![ChapterInfo {
-            chapter_id: record.id - 1,
-            chapter_title: "第1话".into(),
-            order: 1,
-            is_downloaded: Some(true),
-            chapter_download_dir: Some(record.path.clone()),
-        }],
+        chapter_infos,
         comic_download_dir: Some(record.path.clone()),
         is_downloaded: Some(true),
         local_cover_data,
@@ -484,21 +526,29 @@ mod tests {
     #[test]
     fn downloaded_library_cache_operations() {
         let cache = DownloadedLibraryCache::new();
-        assert!(cache.get().is_none());
+        let root = Path::new("downloads");
+        assert!(cache.get(root).is_none());
 
         let mut map = HashMap::new();
         map.insert(123, PathBuf::from("dir1"));
-        cache.set(map);
-        assert_eq!(cache.get().unwrap().get(&123), Some(&PathBuf::from("dir1")));
+        cache.set(root, map);
+        assert_eq!(
+            cache.get(root).unwrap().get(&123),
+            Some(&PathBuf::from("dir1"))
+        );
+        assert!(cache.get(Path::new("other")).is_none());
 
-        cache.insert(456, PathBuf::from("dir2"));
-        assert_eq!(cache.get().unwrap().get(&456), Some(&PathBuf::from("dir2")));
+        cache.insert(root, 456, PathBuf::from("dir2"));
+        assert_eq!(
+            cache.get(root).unwrap().get(&456),
+            Some(&PathBuf::from("dir2"))
+        );
 
         cache.remove(123);
-        assert_eq!(cache.get().unwrap().get(&123), None);
+        assert_eq!(cache.get(root).unwrap().get(&123), None);
 
         cache.invalidate();
-        assert!(cache.get().is_none());
+        assert!(cache.get(root).is_none());
     }
 
     #[test]
@@ -513,7 +563,7 @@ mod tests {
         cache.set_comics(root, vec![comic.clone()]);
         assert!(cache.comic(root, 1).unwrap().local_cover_data.is_none());
         assert!(cache.comic(Path::new("other"), 1).is_none());
-        cache.insert(1, root.join("chapter"));
+        cache.insert(root, 1, root.join("chapter"));
         assert!(cache.comic(root, 1).is_none());
         cache.set_comics(root, vec![comic]);
         cache.invalidate();
@@ -533,8 +583,26 @@ mod tests {
 
         let mut map = HashMap::new();
         map.insert(1, root.join("chapter.cbz"));
-        cache.set(map);
+        cache.set(root, map);
         // 重新扫描书库后，旧快照必须失效，否则归档整合会拿到没有下载路径的漫画。
         assert!(cache.comic(root, 1).is_none());
+    }
+
+    #[test]
+    fn restore_clears_removed_id_for_matching_root() {
+        let root = std::env::temp_dir().join(format!("jm-restore-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let other = root.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let mut catalog = LibraryCatalog::default();
+        catalog.remove(&root, 42);
+        catalog.remove(&other, 42);
+
+        assert!(catalog.removed_ids(&root).contains(&42));
+        assert!(catalog.restore(&root, 42));
+        assert!(!catalog.restore(&root, 42));
+        assert!(!catalog.removed_ids(&root).contains(&42));
+        assert!(catalog.removed_ids(&other).contains(&42));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

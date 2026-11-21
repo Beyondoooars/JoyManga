@@ -31,9 +31,9 @@ if (arg === 'patch') {
   process.exit(1)
 }
 
-// 计算 Android versionCode: major * 10000 + minor * 100 + patch
+// 计算 Android versionCode: 与 Tauri CLI 保持一致（major * 1000000 + minor * 1000 + patch）
 const [tMajor, tMinor, tPatch] = targetVersion.split('.').map(n => parseInt(n, 10) || 0)
-const targetVersionCode = tMajor * 10000 + tMinor * 100 + tPatch
+const targetVersionCode = tMajor * 1000000 + tMinor * 1000 + tPatch
 
 console.log(`[bump-version] 开始同步升级版本: v${currentVersion} -> v${targetVersion} (Android versionCode: ${targetVersionCode})`)
 

@@ -18,8 +18,16 @@ export function useLongPress<T = void>(options: UseLongPressOptions<T>) {
   const vibrateMs = options.vibrateMs ?? 12
 
   let pressTimer: ReturnType<typeof setTimeout> | undefined
+  let longResetTimer: ReturnType<typeof setTimeout> | undefined
   let pressStart: { x: number; y: number } | undefined
   let longPressed = false
+
+  function clearLongResetTimer() {
+    if (longResetTimer !== undefined) {
+      clearTimeout(longResetTimer)
+      longResetTimer = undefined
+    }
+  }
 
   function clearPress() {
     if (pressTimer !== undefined) {
@@ -29,10 +37,17 @@ export function useLongPress<T = void>(options: UseLongPressOptions<T>) {
     pressStart = undefined
   }
 
+  function cleanupPressState() {
+    clearPress()
+    clearLongResetTimer()
+    longPressed = false
+  }
+
   function startPress(event: PointerEvent, ...args: T extends void ? [] : [payload: T]) {
     if (event.button !== 0) return
     if (options.shouldStart && !options.shouldStart(event)) return
     clearPress()
+    clearLongResetTimer()
     longPressed = false
     pressStart = { x: event.clientX, y: event.clientY }
     const payload = args[0] as T
@@ -56,10 +71,19 @@ export function useLongPress<T = void>(options: UseLongPressOptions<T>) {
 
   function endPress() {
     clearPress()
+    if (longPressed) {
+      // pointerleave / pointercancel 不会派发后续 click；短窗兜底复位，防止吞掉下一次正常点击
+      clearLongResetTimer()
+      longResetTimer = setTimeout(() => {
+        longPressed = false
+        longResetTimer = undefined
+      }, 100)
+    }
   }
 
   function consumeLongPressClick(event: MouseEvent): boolean {
     if (!longPressed) return false
+    clearLongResetTimer()
     longPressed = false
     event.preventDefault()
     event.stopPropagation()
@@ -67,8 +91,8 @@ export function useLongPress<T = void>(options: UseLongPressOptions<T>) {
   }
 
   if (getCurrentInstance()) {
-    onBeforeUnmount(clearPress)
-    onDeactivated(clearPress)
+    onBeforeUnmount(cleanupPressState)
+    onDeactivated(cleanupPressState)
   }
 
   return {

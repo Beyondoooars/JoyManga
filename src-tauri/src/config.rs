@@ -391,6 +391,31 @@ pub struct Config {
     pub log_level: LogLevel,
 }
 
+fn sanitize_invalid_config_backup(raw: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(object) = value.as_object_mut() {
+            for field in ["username", "password"] {
+                if let Some(plain) = object
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                {
+                    if !plain.is_empty() && !crate::credential_cipher::is_encrypted(&plain) {
+                        let replacement =
+                            crate::credential_cipher::encrypt_for_this_machine(&plain)
+                                .unwrap_or_default();
+                        object.insert(field.into(), serde_json::Value::String(replacement));
+                    }
+                }
+            }
+            if let Ok(pretty) = serde_json::to_string_pretty(&value) {
+                return pretty;
+            }
+        }
+    }
+    crate::diagnostics::redact_text(raw)
+}
+
 impl Config {
     pub fn apply_storage_policy(&mut self) {
         // 下载始终默认合并为整本 CBZ；忽略旧版本保留的逐话默认值。
@@ -420,7 +445,8 @@ impl Config {
                 .context(format!("配置`{}`没有父目录", config_path.display()))?
                 .join(format!("config.invalid-{}.json", uuid::Uuid::new_v4()));
             let config_string = std::fs::read_to_string(config_path)?;
-            atomic_fs::write(&backup_path, config_string).context(format!(
+            let sanitized_backup = sanitize_invalid_config_backup(&config_string);
+            atomic_fs::write(&backup_path, sanitized_backup).context(format!(
                 "备份需要修复的配置到`{}`失败",
                 backup_path.display()
             ))?;
@@ -475,8 +501,19 @@ impl Config {
         }
 
         if self.proxy_mode == ProxyMode::Custom {
-            ensure!(!self.proxy_host.trim().is_empty(), "代理主机不能为空");
+            let host = self.proxy_host.trim();
+            ensure!(!host.is_empty(), "代理主机不能为空");
+            ensure!(
+                !host.contains("://")
+                    && !host.contains('/')
+                    && !host.contains('@')
+                    && !host.chars().any(char::is_whitespace),
+                "代理主机格式无效，请只填写主机名或 IP（不含协议头和路径）"
+            );
             ensure!(self.proxy_port > 0, "代理端口必须大于0");
+            let formatted_host = format_proxy_host(host);
+            let proxy_url = format!("http://{formatted_host}:{}", self.proxy_port);
+            reqwest::Proxy::all(&proxy_url).context("代理地址无效")?;
         }
 
         Ok(())
@@ -589,9 +626,11 @@ impl Config {
     pub fn effective_proxy_url(&self) -> Option<String> {
         let vpn_active = crate::network_state::is_vpn_active();
         match self.proxy_mode {
-            ProxyMode::Custom if !vpn_active => {
-                Some(format!("http://{}:{}", self.proxy_host, self.proxy_port))
-            }
+            ProxyMode::Custom if !vpn_active => Some(format!(
+                "http://{}:{}",
+                format_proxy_host(&self.proxy_host),
+                self.proxy_port
+            )),
             ProxyMode::Custom if vpn_active => {
                 // 开着 VPN 却仍连不上时，首先要能确认「代理到底有没有被跳过」。
                 // 这条信息此前完全没有落盘，用户反馈「开 VPN 还是连不上」时无从判断
@@ -638,9 +677,22 @@ impl Config {
             Err(err) => {
                 let err_title = format!("`{client_name}`设置代理`{proxy_url}`失败");
                 tracing::error!(err_title, message = %err);
-                builder
+                // 明确启用了自定义代理却构造失败时，绝不能退回直连泄漏流量，改挂本地不可达端口拦截。
+                match reqwest::Proxy::all("http://127.0.0.1:1") {
+                    Ok(block_proxy) => builder.proxy(block_proxy),
+                    Err(_) => builder,
+                }
             }
         }
+    }
+}
+
+fn format_proxy_host(host: &str) -> std::borrow::Cow<'_, str> {
+    let trimmed = host.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') && !trimmed.ends_with(']') {
+        std::borrow::Cow::Owned(format!("[{trimmed}]"))
+    } else {
+        std::borrow::Cow::Borrowed(trimmed)
     }
 }
 

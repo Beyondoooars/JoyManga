@@ -17,6 +17,7 @@
 use anyhow::{anyhow, ensure, Context};
 use base64::engine::general_purpose;
 use base64::Engine as _;
+use parking_lot::RwLock;
 use ring::aead;
 use ring::hkdf;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -27,16 +28,57 @@ const CIPHER_PREFIX: &str = "enc:v1:";
 const NONCE_LEN: usize = 12;
 /// GCM 认证标签长度。
 const TAG_LEN: usize = 16;
+const SALT_FILE_NAME: &str = ".credential-salt";
 
-/// 本机稳定标识：用户主目录 + 操作系统。
-///
-/// 不读取硬件序列号一类的设备标识：既拿不到也不需要，路径已随安装稳定。
-/// 取不到时用固定串兜底，保证同一台机器上前后一致即可。
-fn machine_salt() -> String {
+/// 本次安装生成的随机凭据盐（`<base64>|<os>`），避免 Android 等无 HOME 环境下所有设备共用同一密钥。
+static INSTALL_SALT: RwLock<Option<String>> = RwLock::new(None);
+
+/// 旧版本使用的环境变量派生盐；初始化前（单测）与历史配置升级解密兜底沿用它。
+fn legacy_machine_salt() -> String {
     let base = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| "joymanga".to_string());
     format!("{base}|{}", std::env::consts::OS)
+}
+
+fn active_machine_salt() -> String {
+    INSTALL_SALT
+        .read()
+        .clone()
+        .unwrap_or_else(legacy_machine_salt)
+}
+
+fn load_or_create_install_salt(base_dir: &std::path::Path) -> Option<String> {
+    let salt_path = base_dir.join(SALT_FILE_NAME);
+    if let Ok(existing) = std::fs::read_to_string(&salt_path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Some(format!("{trimmed}|{}", std::env::consts::OS));
+        }
+    }
+    let mut raw = [0u8; 32];
+    if SystemRandom::new().fill(&mut raw).is_err() {
+        tracing::warn!("生成随机凭据盐失败，沿用环境变量派生");
+        return None;
+    }
+    let encoded = general_purpose::URL_SAFE_NO_PAD.encode(raw);
+    if let Err(error) = crate::atomic_fs::write(&salt_path, &encoded) {
+        tracing::warn!(error = %error, "写入安装凭据盐失败，沿用环境变量派生");
+        return None;
+    }
+    Some(format!("{encoded}|{}", std::env::consts::OS))
+}
+
+/// 在应用配置目录初始化本机随机安装盐（存在则读取，不存在则生成并原子落盘）。
+/// 落盘失败时保持回退旧盐，避免只读环境下写入内存盐后下次启动无法解密。
+pub fn init_install_salt(base_dir: &std::path::Path) {
+    if let Some(salt) = load_or_create_install_salt(base_dir) {
+        *INSTALL_SALT.write() = Some(salt);
+    }
+}
+
+pub fn is_encrypted(stored: &str) -> bool {
+    stored.starts_with(CIPHER_PREFIX)
 }
 
 /// 由本机标识经 HKDF-SHA256 派生 32 字节密钥，不落盘。
@@ -129,14 +171,28 @@ pub fn decrypt(stored: &str, machine: &str) -> anyhow::Result<String> {
     String::from_utf8(plaintext.to_vec()).context("凭据明文不是有效的 UTF-8")
 }
 
-/// 供配置层使用：用当前机器的密钥加密。
+/// 供配置层使用：用当前安装专属密钥加密。
 pub fn encrypt_for_this_machine(plaintext: &str) -> anyhow::Result<String> {
-    encrypt(plaintext, &machine_salt())
+    encrypt(plaintext, &active_machine_salt())
 }
 
-/// 供配置层使用：用当前机器的密钥解密；兼容历史明文。
+fn decrypt_with_fallback(stored: &str, active: &str, legacy: &str) -> anyhow::Result<String> {
+    match decrypt(stored, active) {
+        Ok(plain) => Ok(plain),
+        Err(error) => {
+            if legacy != active {
+                if let Ok(plain) = decrypt(stored, legacy) {
+                    return Ok(plain);
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+/// 供配置层使用：优先用当前安装专属密钥解密；若失败则回退旧版环境变量盐，保证升级无缝迁移。
 pub fn decrypt_for_this_machine(stored: &str) -> anyhow::Result<String> {
-    decrypt(stored, &machine_salt())
+    decrypt_with_fallback(stored, &active_machine_salt(), &legacy_machine_salt())
 }
 
 #[cfg(test)]
@@ -197,5 +253,31 @@ mod tests {
     fn empty_value_stays_empty() {
         assert_eq!(encrypt("", MACHINE).unwrap(), "");
         assert_eq!(decrypt("", MACHINE).unwrap(), "");
+    }
+
+    #[test]
+    fn install_salt_persists_roundtrip_and_falls_back_to_legacy_salt() {
+        let root = std::env::temp_dir().join(format!("jm-salt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first_salt = load_or_create_install_salt(&root).unwrap();
+        let second_salt = load_or_create_install_salt(&root).unwrap();
+        assert_eq!(first_salt, second_salt);
+        assert!(root.join(SALT_FILE_NAME).exists());
+
+        let legacy = legacy_machine_salt();
+        assert_ne!(first_salt, legacy);
+
+        let encrypted_install = encrypt("new-secret", &first_salt).unwrap();
+        assert_eq!(
+            decrypt_with_fallback(&encrypted_install, &first_salt, &legacy).unwrap(),
+            "new-secret"
+        );
+
+        let encrypted_legacy = encrypt("old-secret", &legacy).unwrap();
+        assert_eq!(
+            decrypt_with_fallback(&encrypted_legacy, &first_salt, &legacy).unwrap(),
+            "old-secret"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

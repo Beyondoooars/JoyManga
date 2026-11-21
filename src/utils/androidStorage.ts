@@ -11,6 +11,7 @@ declare global {
       discardImports(requestId: string): void
       exportDocuments(requestId: string, path: string): void
       downloadStatus(active: number, speed: string, current: number, total: number): void
+      downloadStatusWithCompletion?(active: number, speed: string, current: number, total: number, notifyCompleted: boolean): void
       exitApp(): void
       setKeepScreenOn(enabled: boolean): void
       setImmersiveMode(enabled: boolean): void
@@ -71,6 +72,23 @@ export function exportToAndroidDownloads(path: string) {
 /** 公共下载目录下的默认书库（Download/JoyManga）绝对路径；桥不可用时返回空串。 */
 export function downloadsPath() {
   return window.JmAndroid?.downloadsPath() ?? ''
+}
+
+/**
+ * 当前书库目录是否需要「所有文件访问」权限。
+ * 应用内部私有目录、外部应用专属目录（Android/data/<pkg>/files）及空路径无需该权限。
+ */
+export function requiresAllFilesAccess(downloadDir: string): boolean {
+  const trimmed = downloadDir.trim()
+  if (trimmed === '') return false
+  const normalized = trimmed.replace(/\\/g, '/').replace(/\/+$/, '')
+  const privatePath = (window.JmAndroid?.libraryPath() ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  if (privatePath !== '' && (normalized === privatePath || normalized.startsWith(`${privatePath}/`))) {
+    return false
+  }
+  if (normalized.startsWith('/data/')) return false
+  if (/\/Android\/data\/[^/]+\/files(\/|$)/.test(normalized)) return false
+  return true
 }
 
 /**

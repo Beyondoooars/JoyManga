@@ -179,6 +179,7 @@ pub fn run() {
             builder.mount_events(app);
 
             let config_storage = ConfigStorage::new(app.handle())?;
+            credential_cipher::init_install_salt(config_storage.base_dir());
             // 崩溃报告与滚动日志同目录（书库下的 logs），启动时书库路径还没从配置读出来，
             // 先放在配置目录，等 logger::init 时再改到书库；见下方 set_dir 调用。
             crash::set_dir(config_storage.logs_dir());
@@ -194,9 +195,17 @@ pub fn run() {
                 crate::archive_intents::intents_path(config_storage.config_path());
             let config = RwLock::new(Config::new(&config_storage)?);
             let download_dir = config.read().download_dir.clone();
+            let journal_dir = config_storage
+                .config_path()
+                .parent()
+                .map(std::path::Path::to_path_buf);
             let _ = std::fs::create_dir_all(&download_dir);
             tauri::async_runtime::spawn_blocking(move || {
-                if let Err(err) = atomic_fs::cleanup_residual_trash(&download_dir) {
+                let _guard = crate::library_catalog::CATALOG_LOCK.lock();
+                if let Err(err) = atomic_fs::cleanup_residual_trash_with_journal_dir(
+                    &download_dir,
+                    journal_dir.as_deref(),
+                ) {
                     tracing::warn!(error = %err, "清理残留隔离目录失败");
                 }
             });

@@ -9,7 +9,11 @@ import {
   withAndroidSelection,
   exportToAndroidDownloads,
   isUnderPublicDownloads,
+  hasAllFilesAccess,
+  canWritePublicDownloads,
+  downloadsPath,
 } from '../../utils/androidStorage.ts'
+import { isAndroid } from '../../composables/useIsMobile.ts'
 import { getErrorMessage } from '../../utils/errors.ts'
 import { getFrontendErrorLogs } from '../../utils/frontendErrors.ts'
 
@@ -79,15 +83,15 @@ function restore() {
     // 确认后先选文件：Android 的导入文件会在选择回调返回后清理，
     // 若把确认框放进回调里等用户点击，恢复时文件可能已经被删掉。
     onPositiveClick: () => {
-      void withAndroidSelection('backup', (paths) =>
-        dataAction('restore', async () => {
+      void dataAction('restore', async () => {
+        await withAndroidSelection('backup', async (paths) => {
           await store.saveConfigNow()
           const result = await store.runConfigMaintenance(() => commands.restoreAppData(paths[0]))
           if (result.status === 'error') throw new Error(result.error.err_message)
           const outcome = result.data
           store.applyConfig(outcome.config, true)
           store.applySession(await commands.getSession())
-          store.progresses.clear()
+          store.resetProgressHistory()
           let readingNotice = ''
           if (outcome.readingState !== null) {
             const imported = store.importReadingStateSnapshot(outcome.readingState)
@@ -97,9 +101,7 @@ function restore() {
           await store.reloadTasks()
           store.invalidateDownloadedLibrary({ clear: true })
           message.success(readingNotice ? `备份已恢复${readingNotice}` : '备份已恢复')
-        }),
-      ).catch((error) => {
-        dataError.value = getErrorMessage(error)
+        })
       })
     },
   })
@@ -125,7 +127,18 @@ function resetSettings() {
         if (result.status === 'error') throw new Error(result.error.err_message)
         store.applyConfig(result.data, true)
         store.applySession(await commands.getSession())
-        store.progresses.clear()
+        store.resetProgressHistory()
+        if (isAndroid && window.JmAndroid) {
+          const targetDir = hasAllFilesAccess() && canWritePublicDownloads()
+            ? downloadsPath()
+            : (window.JmAndroid.libraryPath() ?? '')
+          if (targetDir) {
+            const initResult = await commands.initializeAndroidStorage(targetDir)
+            if (initResult.status === 'ok') {
+              store.applyConfig(initResult.data, true)
+            }
+          }
+        }
         store.invalidateDownloadedLibrary({ clear: true })
         message.success('设置已重置')
       }),

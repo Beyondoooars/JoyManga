@@ -29,14 +29,21 @@ class DownloadService : Service() {
         }
     }
 
+    private fun ensureWakeLockAndRunning() {
+        AppState.downloadServiceRunning = true
+        if (wakeLock == null) {
+            wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK, "$packageName:downloads"
+            ).apply { setReferenceCounted(false) }
+            handler.removeCallbacks(renew)
+            renew.run()
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
-        AppState.downloadServiceRunning = true
         ensureChannel(this)
-        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK, "$packageName:downloads"
-        ).apply { setReferenceCounted(false) }
-        renew.run()
+        ensureWakeLockAndRunning()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -61,6 +68,8 @@ class DownloadService : Service() {
             return START_NOT_STICKY
         }
 
+        // 若前一轮 stopGracefully(startId - 1) 因本请求已入队未销毁实例，这里需恢复状态与唤醒锁。
+        ensureWakeLockAndRunning()
         val total = intent.getIntExtra("total", 0)
         val current = intent.getIntExtra("current", 0)
         val speed = intent.getStringExtra("speed").orEmpty()

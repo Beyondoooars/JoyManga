@@ -349,12 +349,16 @@ internal class AndroidStorageHelper(
         val tree = picker.mode == "directory" || picker.mode == "export-directory"
         val intent = if (tree) Intent(Intent.ACTION_OPEN_DOCUMENT_TREE) else Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = if (picker.mode == "backup") "application/json" else "*/*"
+            type = "*/*"
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, picker.mode == "cbz")
-            if (picker.mode == "cbz") {
-                putExtra(
+            when (picker.mode) {
+                "cbz" -> putExtra(
                     Intent.EXTRA_MIME_TYPES,
                     arrayOf("application/zip", "application/x-cbz", "application/vnd.comicbook+zip", "application/octet-stream"),
+                )
+                "backup" -> putExtra(
+                    Intent.EXTRA_MIME_TYPES,
+                    arrayOf("application/json", "text/json", "text/plain", "application/octet-stream"),
                 )
             }
         }
@@ -445,7 +449,7 @@ internal class AndroidStorageHelper(
                 if (type == DocumentsContract.Document.MIME_TYPE_DIR) {
                     val directory = uniqueFile(target, name).apply { mkdirs() }
                     copyTree(tree, uri, directory, depth + 1, counter)
-                } else if (name.endsWith(".cbz", true) || listOf(".jpg", ".jpeg", ".png", ".webp").any { name.endsWith(it, true) }) {
+                } else if (name.endsWith(".cbz", true) || listOf(".jpg", ".jpeg", ".png", ".webp", ".gif").any { name.endsWith(it, true) }) {
                     copyUri(
                         uri,
                         uniqueFile(target, name),
@@ -463,9 +467,11 @@ internal class AndroidStorageHelper(
         // 其他公共目录；三者都允许导出（无存储权限时公共路径的读取会自然失败）。
         // 只发布 cbz/json/txt，避免把目录里的其他文件一起复制出去。
         val allowed = listOfNotNull(
+            activity.dataDir,
             activity.filesDir,
             activity.getExternalFilesDir(null),
             Environment.getExternalStorageDirectory(),
+            File("/storage"),
         ).map { it.canonicalFile }
         require(allowed.any { canonical.path == it.path || canonical.path.startsWith(it.path + File.separator) }) {
             "请先将文件导出到应用专用目录或公共存储"

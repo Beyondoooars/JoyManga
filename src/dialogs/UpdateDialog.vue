@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onUnmounted, watch } from 'vue'
 import { NModal, NButton } from 'naive-ui'
 import { PhDownloadSimple, PhX } from '@phosphor-icons/vue'
 import { useAppUpdate } from '../composables/useAppUpdate.ts'
 import { isAndroid } from '../composables/useIsMobile.ts'
-import { useAndroidBack } from '../composables/useAndroidBack.ts'
+import { registerBackHandler } from '../composables/useAndroidBack.ts'
 
 const {
   showUpdateDialog,
@@ -40,13 +40,28 @@ const notes = computed(() =>
     .trim(),
 )
 
-useAndroidBack(() => {
-  if (showUpdateDialog.value) {
-    showUpdateDialog.value = false
-    return true
-  }
-  return false
-}, 60)
+let unregisterBack: (() => void) | undefined
+
+watch(
+  showUpdateDialog,
+  (open) => {
+    unregisterBack?.()
+    unregisterBack = undefined
+    if (open) {
+      unregisterBack = registerBackHandler(() => {
+        if (!showUpdateDialog.value) return false
+        showUpdateDialog.value = false
+        return true
+      }, 65)
+    }
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  unregisterBack?.()
+  unregisterBack = undefined
+})
 </script>
 
 <template>

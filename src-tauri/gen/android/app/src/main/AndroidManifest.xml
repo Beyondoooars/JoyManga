@@ -52,10 +52,16 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="*/*" />
                 <data android:scheme="file" android:host="*" />
                 <data android:scheme="content" android:host="*" />
                 <data android:pathPattern=".*\\.cbz" />
                 <data android:pathPattern=".*\\..*\\.cbz" />
+                <data android:pathPattern=".*\\..*\\..*\\.cbz" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.cbz" />
+                <data android:pathPattern=".*\\.CBZ" />
+                <data android:pathPattern=".*\\..*\\.CBZ" />
             </intent-filter>
         </activity>
 

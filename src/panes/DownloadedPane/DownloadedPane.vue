@@ -136,11 +136,14 @@ watch(
 
 async function importComics(directory = false) {
   if (importing.value) return
+  importing.value = true
   // Android 通过 SAF 选择文件/目录；应用只面向 Android，不再有桌面分支。
   try {
     await withAndroidSelection(directory ? 'directory' : 'cbz', executeImport)
   } catch (error) {
     message.error(`选择文件失败：${getErrorMessage(error)}`)
+  } finally {
+    importing.value = false
   }
 }
 
@@ -351,7 +354,7 @@ function confirmDeleteComics(selected: Comic[]) {
       for (const comic of comics) {
         try {
           await libraryApi.removeComic(comic.id, deleteFiles.value)
-          store.markComicRemoved(comic.id)
+          store.markComicRemoved(comic.id, { deletedFiles: deleteFiles.value })
           if (store.activeReaderTarget?.comicId === comic.id) store.closeReader()
           store.forgetComicReadingState(comic.id)
         } catch (error) {
@@ -565,11 +568,11 @@ const pendingCount = computed(() => {
               <button type="button" class="jm-btn" @click="openStorageSettings">更改位置</button>
             </template>
             <template v-else>
-              <button type="button" class="jm-btn is-primary" @click="importComics(false)">
+              <button type="button" class="jm-btn is-primary" :disabled="importing" @click="importComics(false)">
                 <PhImage :size="17" />
                 导入 CBZ
               </button>
-              <button type="button" class="jm-btn" @click="importComics(true)">导入文件夹</button>
+              <button type="button" class="jm-btn" :disabled="importing" @click="importComics(true)">导入文件夹</button>
             </template>
           </div>
         </div>

@@ -85,6 +85,7 @@ const {
   downloadAndInstallApk,
   onOpenFile,
   requestAllFilesAccessAndWait,
+  requiresAllFilesAccess,
   watchNetworkMetered,
   watchNetworkVpn,
   withAndroidSelection,
@@ -241,4 +242,18 @@ test('network watchers, open-file listener and install wrapper read initial stat
   const stopInstall = downloadAndInstallApk('https://example.invalid/a.apk', 'a.apk', (p) => installEvents.push(p))
   stopInstall()
   assert.deepEqual(installEvents, [{ state: 'error', message: 'service start rejected' }])
+})
+
+test('requiresAllFilesAccess distinguishes app-private storage from public shared storage', () => {
+  const savedLibraryPath = mockWindow.JmAndroid.libraryPath
+  mockWindow.JmAndroid.libraryPath = () => '/data/user/0/com.joymanga.app/files/library'
+  try {
+    assert.equal(requiresAllFilesAccess(''), false)
+    assert.equal(requiresAllFilesAccess('/data/user/0/com.joymanga.app/files/library'), false)
+    assert.equal(requiresAllFilesAccess('/storage/emulated/0/Android/data/com.joymanga.app/files/JoyManga'), false)
+    assert.equal(requiresAllFilesAccess('/storage/emulated/0/Download/JoyManga'), true)
+    assert.equal(requiresAllFilesAccess('/storage/emulated/0/Pictures/Manga'), true)
+  } finally {
+    mockWindow.JmAndroid.libraryPath = savedLibraryPath
+  }
 })

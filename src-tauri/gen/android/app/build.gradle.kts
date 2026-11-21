@@ -26,14 +26,14 @@ val parsedVersion: String = if (tauriConfFile.exists()) {
 
 val appVersionName: String = System.getenv("APP_VERSION_NAME") ?: parsedVersion
 
-// 自动计算 versionCode: major * 10000 + minor * 100 + patch
+// 自动计算 versionCode: 与 Tauri CLI 保持一致（major * 1_000_000 + minor * 1_000 + patch）
 val defaultVersionCode: Int = try {
     val clean = appVersionName.split("-")[0]
     val parts = clean.split(".")
     val major = parts.getOrNull(0)?.toIntOrNull() ?: 0
     val minor = parts.getOrNull(1)?.toIntOrNull() ?: 0
     val patch = parts.getOrNull(2)?.toIntOrNull() ?: 0
-    major * 10000 + minor * 100 + patch
+    major * 1_000_000 + minor * 1_000 + patch
 } catch (e: Exception) {
     202
 }

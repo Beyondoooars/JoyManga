@@ -22,12 +22,28 @@ struct FinalizeRuns {
     running: HashSet<i64>,
     /// 整合运行期间又被请求调度的漫画 ID：收尾后必须再跑一次。
     rerun: HashSet<i64>,
+    /// 正在执行删除操作的漫画 ID：阻止删除期间启动新的归档整合。
+    removing: HashSet<i64>,
 }
 
 /// 正在执行归档最终整合的漫画集合（同一本漫画同时只允许一个整合任务）。
 #[derive(Default)]
 pub struct ArchiveFinalizeState {
     runs: Mutex<FinalizeRuns>,
+}
+
+/// 删除漫画期间持有的整合互斥守卫；释放后解除对该漫画的整合封锁。
+pub(crate) struct RemovalFinalizeGuard {
+    app: AppHandle,
+    comic_id: i64,
+}
+
+impl Drop for RemovalFinalizeGuard {
+    fn drop(&mut self) {
+        if let Some(state) = self.app.try_state::<ArchiveFinalizeState>() {
+            state.runs.lock().removing.remove(&self.comic_id);
+        }
+    }
 }
 
 impl ArchiveFinalizeState {
@@ -37,12 +53,34 @@ impl ArchiveFinalizeState {
     #[cfg(test)]
     fn try_begin(&self, comic_id: i64) -> bool {
         let mut runs = self.runs.lock();
+        if runs.removing.contains(&comic_id) {
+            return false;
+        }
         if runs.running.insert(comic_id) {
             true
         } else {
             runs.rerun.insert(comic_id);
             false
         }
+    }
+
+    /// 删除漫画前登记独占锁；若该漫画正在整合或已在删除中返回 `None`。
+    pub(crate) fn try_lock_comic_for_removal(
+        &self,
+        app: &AppHandle,
+        comic_id: i64,
+    ) -> Option<RemovalFinalizeGuard> {
+        let mut runs = self.runs.lock();
+        if runs.running.contains(&comic_id)
+            || runs.rerun.contains(&comic_id)
+            || !runs.removing.insert(comic_id)
+        {
+            return None;
+        }
+        Some(RemovalFinalizeGuard {
+            app: app.clone(),
+            comic_id,
+        })
     }
 
     /// 结束整合；返回是否有等待中的重跑请求。
@@ -60,7 +98,9 @@ impl ArchiveFinalizeState {
     pub fn ensure_download_allowed(&self, comic_id: i64) -> anyhow::Result<()> {
         let runs = self.runs.lock();
         anyhow::ensure!(
-            !runs.running.contains(&comic_id) && !runs.rerun.contains(&comic_id),
+            !runs.running.contains(&comic_id)
+                && !runs.rerun.contains(&comic_id)
+                && !runs.removing.contains(&comic_id),
             "该漫画正在整理 CBZ，请稍后再下载"
         );
         Ok(())
@@ -83,6 +123,9 @@ impl ArchiveFinalizeState {
         comic_id: i64,
     ) -> bool {
         let mut runs = self.runs.lock();
+        if runs.removing.contains(&comic_id) {
+            return false;
+        }
         if tasks.values().any(|task| {
             task.comic.id == comic_id
                 && matches!(
@@ -102,14 +145,17 @@ impl ArchiveFinalizeState {
         true
     }
 
-    /// 该漫画当前是否正在整合（供新建下载任务前检查，避免与清理来源文件交叉）。
+    /// 该漫画当前是否正在整合（供单元测试检查，生产入口由 ensure_download_allowed / is_any_running 判定）。
+    #[cfg(test)]
     pub fn is_running(&self, comic_id: i64) -> bool {
-        self.runs.lock().running.contains(&comic_id)
+        let runs = self.runs.lock();
+        runs.running.contains(&comic_id) || runs.removing.contains(&comic_id)
     }
 
     /// 是否有任意漫画正在整合（供清理类命令判断）。
     pub fn is_any_running(&self) -> bool {
-        !self.runs.lock().running.is_empty()
+        let runs = self.runs.lock();
+        !runs.running.is_empty() || !runs.removing.is_empty()
     }
 }
 
@@ -123,18 +169,16 @@ struct FinalizeGuard {
 impl Drop for FinalizeGuard {
     fn drop(&mut self) {
         let manager = self.app.get_download_manager();
-        let has_rerun = {
+        let should_spawn = {
             let tasks = manager.download_tasks.read();
             let rerun = self.app.state::<ArchiveFinalizeState>().end(self.comic_id);
-            if rerun {
-                // 在共同临界区内登记补跑，启动前不能再插入下载任务。
-                self.app
-                    .state::<ArchiveFinalizeState>()
-                    .begin_with_downloads_locked(&tasks, self.comic_id);
-            }
             rerun
+                && self
+                    .app
+                    .state::<ArchiveFinalizeState>()
+                    .begin_with_downloads_locked(&tasks, self.comic_id)
         };
-        if has_rerun {
+        if should_spawn {
             spawn_registered_finalize(self.app.clone(), self.comic_id);
         } else if let Err(error) = manager.restore_pending_for_comic(self.comic_id) {
             tracing::error!(comic_id = self.comic_id, error = %error, "归档结束后恢复下载失败");
@@ -216,19 +260,17 @@ fn finalize_comic_archive(app: &AppHandle, comic_id: i64) {
     .emit(app);
     let mut progress = ArchiveProgressReporter::new(app.clone(), comic_id, run_id, total);
 
-    // 清理条件：本次执行期间没有新任务被创建。若新章节已排队/下载，保留意图，
-    // 待任务完成触发下一次整合时再处理；否则清除本次已消费的意图。
-    let has_new_tasks = app
-        .get_download_manager()
-        .has_active_tasks_for_comic(comic_id);
     match run_finalize(app, &comic, &mut progress) {
         Ok(archive_path) => {
-            // 运行期间有章节完成时会记录重跑；此时保留意图，让补跑继续使用用户
-            // 选择的整理方式，而不是退回配置默认值。
+            // 清理条件：本次执行完成后没有新活跃任务、没有暂停/失败等待续下载任务、且无重跑请求；
+            // 否则保留意图，待后续章节继续完成时触发下一次自动合并。
+            let manager = app.get_download_manager();
+            let has_new_tasks = manager.has_active_tasks_for_comic(comic_id);
+            let has_incomplete_tasks = manager.has_incomplete_tasks_for_comic(comic_id);
             let rerun_pending = app
                 .state::<ArchiveFinalizeState>()
                 .is_rerun_pending(comic_id);
-            if !has_new_tasks && !rerun_pending {
+            if !has_new_tasks && !has_incomplete_tasks && !rerun_pending {
                 // 运行期间用户可能重新选择了整理方式：只有仍与本次执行一致时才清除意图，
                 // 否则保留用户的新选择，交给下一次整合执行。
                 let intents = app.state::<ArchiveIntentStore>();

@@ -166,7 +166,11 @@ const currentImagePath = computed(() => {
 const currentBookmarkId = computed(() => chapterData.value
   ? bookmarkId(chapterData.value.comicId, chapterData.value.chapterId, currentPage.value) : '')
 const currentIsBookmarked = computed(() => store.readingState.bookmarks.some((item) => item.id === currentBookmarkId.value))
-const comicBookmarks = computed(() => store.readingState.bookmarks.filter((item) => item.comicId === chapterData.value?.comicId))
+const comicBookmarks = computed(() => {
+  const comicId = chapterData.value?.comicId ?? store.activeReaderTarget?.comicId
+  if (comicId === undefined) return []
+  return store.readingState.bookmarks.filter((item) => item.comicId === comicId)
+})
 
 function progressSnapshot(): ReadingProgress | undefined {
   const chapter = chapterData.value
@@ -315,8 +319,13 @@ function goToPage(page: number) {
   if (!chapterData.value) return
   currentPage.value = Math.max(1, Math.min(page, chapterData.value.totalImages))
   preloadCurrentRange()
-  // 滚动模式下页码滑块/书签跳转要真的把对应页滚进视野
-  if (readingMode.value === 'Scroll') scrollToPage(currentPage.value)
+  // 滚动模式下页码滑块/书签跳转要等 DOM 更新后再将对应页滚进视野
+  if (readingMode.value === 'Scroll') {
+    const targetPage = currentPage.value
+    void nextTick(() => {
+      if (readingMode.value === 'Scroll') scrollToPage(targetPage)
+    })
+  }
 }
 
 function jumpToBookmark(bookmark: ReadingBookmark) {
@@ -381,6 +390,8 @@ function tapRight(): void {
 }
 
 function handleKeyDown(e: KeyboardEvent) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return
+  if ((e.target as HTMLElement | null)?.closest?.('.n-slider, [role="slider"]')) return
   const action = pageActionForKey(e.key)
   if (!action) return
   // 空格/PageDown/PageUp 会滚动页面，必须阻止默认行为
@@ -661,13 +672,14 @@ onUnmounted(() => {
 .reader-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 9999;
+  z-index: 1900;
   background-color: rgba(0, 0, 0, 0.55);
   backdrop-filter: blur(2px);
 }
 
 .reader-window {
   position: fixed;
+  z-index: 1901;
   display: flex;
   flex-direction: column;
   background-color: #18191C;
@@ -878,6 +890,10 @@ onUnmounted(() => {
 .scroll-page.page-sized .scroll-page-placeholder {
   height: 100%;
   object-fit: contain;
+}
+
+.scroll-page.page-sized .scroll-page-placeholder {
+  min-height: 0;
 }
 
 .scroll-page-placeholder {

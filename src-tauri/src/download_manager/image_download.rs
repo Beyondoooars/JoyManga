@@ -323,6 +323,30 @@ fn elapsed_nanos(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
+fn remove_stale_page_variants(save_path: &Path) {
+    let Some(parent) = save_path.parent() else {
+        return;
+    };
+    let Some(target_stem) = save_path.file_stem() else {
+        return;
+    };
+    let Some(target_name) = save_path.file_name() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.file_stem() == Some(target_stem)
+            && path.file_name() != Some(target_name)
+            && path.is_file()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 pub(crate) async fn save_img(
     save_path: &Path,
     block_num: u32,
@@ -338,7 +362,11 @@ pub(crate) async fn save_img(
         return tokio::task::spawn_blocking(move || {
             let write_started = Instant::now();
             file_writes
-                .run(|| atomic_fs::write(&save_path_buf, src_img_data))
+                .run(|| {
+                    atomic_fs::write(&save_path_buf, src_img_data)?;
+                    remove_stale_page_variants(&save_path_buf);
+                    Ok(())
+                })
                 .context(format!("保存图片`{}`失败", save_path_buf.display()))?;
             Ok(SaveImgMetrics {
                 processing_nanos: 0,
@@ -367,7 +395,11 @@ pub(crate) async fn save_img(
         // 保存编码后的图片数据
         let write_started = Instant::now();
         file_writes
-            .run(|| atomic_fs::write(&save_path, dst_img_data))
+            .run(|| {
+                atomic_fs::write(&save_path, dst_img_data)?;
+                remove_stale_page_variants(&save_path);
+                Ok(())
+            })
             .context(format!("保存图片`{}`失败", save_path.display()))?;
         Ok(SaveImgMetrics {
             processing_nanos,

@@ -10,7 +10,7 @@ use crate::atomic_fs;
 use crate::state_recovery;
 use crate::types::CbzMode;
 
-const MAX_INTENTS: usize = 200;
+const MAX_INTENTS: usize = 2000;
 pub const INTENTS_FILE_NAME: &str = "archive-intents.json";
 
 /// 归档意图文件与配置同目录；启动、备份与事务恢复共用同一路径。
