@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v0.3.21-ff69b4.svg" alt="Version 0.3.21" />
+  <img src="https://img.shields.io/badge/Version-v0.3.22-ff69b4.svg" alt="Version 0.3.22" />
   <img src="https://img.shields.io/badge/Platform-Android%20(arm64--v8a)-0969da.svg" alt="Platform Android" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20Tauri%20v2-ea580c.svg" alt="Tauri v2" />
   <img src="https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Naive%20UI-10b981.svg" alt="Vue 3" />
